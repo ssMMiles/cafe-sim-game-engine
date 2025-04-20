@@ -1,0 +1,8 @@
+[target.wasm32-unknown-unknown]
+runner = "wasm-server-runner"
+
+# Enable max optimizations for dependencies, but not for our code:
+# From https://bevy-cheatbook.github.io/pitfalls/performance.html
+# Gives us better performance in dev without increasing compile times aside from the first build
+[profile.dev.package."*"]
+opt-level = 3
