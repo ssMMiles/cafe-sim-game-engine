@@ -41,8 +41,10 @@ impl Plugin for SimulationPlugin {
     }
 }
 
-#[derive(Component, Debug)]
-pub struct PlayerCamera;
+#[derive(Component, Debug, Default)]
+pub struct PlayerCamera {
+    pub velocity: Vec3,
+}
 
 fn setup(
     mut commands: Commands,
@@ -53,7 +55,7 @@ fn setup(
 
     // setup a 2d camera
     commands.spawn((
-        PlayerCamera,
+        PlayerCamera::default(),
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             // PI = 180 degree fov, so idfk what this does
@@ -76,38 +78,70 @@ fn setup(
         Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
         GlobalTransform::default(),
     ));
+
+    // spawn a plane at 0, 0, 0
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d {
+            normal: Dir3::Y,
+            half_size: Vec2 { x: 100.0, y: 100.0 },
+            ..Default::default()
+        })),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.1, 0.1, 0.1),
+            ..Default::default()
+        })),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+        GlobalTransform::default(),
+    ));
 }
 
-const SPEED: f32 = 0.1;
+const SPEED: f32 = 1.0;
+const ACCELERATION: f32 = 0.2;
+const MAX_VELOCITY: f32 = 1.0;
 // Handle keyboard input for wasd/space/ctrl to move the camera
 fn handle_movement(
     mut commands: Commands,
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<&mut Transform, With<PlayerCamera>>,
+    mut query: Query<(&mut Transform, &mut PlayerCamera)>,
 ) {
-    for mut transform in query.iter_mut() {
-        let mut translation = transform.translation;
-
+    for (mut transform, mut camera) in query.iter_mut() {
+        // Update the camera velocity based on keyboard input
         if keyboard_input.pressed(KeyCode::KeyW) {
-            translation.z -= SPEED;
-        }
-        if keyboard_input.pressed(KeyCode::KeyS) {
-            translation.z += SPEED;
-        }
-        if keyboard_input.pressed(KeyCode::KeyA) {
-            translation.x -= SPEED;
-        }
-        if keyboard_input.pressed(KeyCode::KeyD) {
-            translation.x += SPEED;
-        }
-        if keyboard_input.pressed(KeyCode::Space) {
-            translation.y += SPEED;
-        }
-        if keyboard_input.pressed(KeyCode::ControlLeft) {
-            translation.y -= SPEED;
+            camera.velocity.z -= ACCELERATION;
+        } else if keyboard_input.pressed(KeyCode::KeyS) {
+            camera.velocity.z += ACCELERATION;
+        } else {
+            camera.velocity.z = 0.0;
         }
 
-        transform.translation = translation;
+        if keyboard_input.pressed(KeyCode::KeyA) {
+            camera.velocity.x -= ACCELERATION;
+        } else if keyboard_input.pressed(KeyCode::KeyD) {
+            camera.velocity.x += ACCELERATION;
+        } else {
+            camera.velocity.x = 0.0;
+        }
+
+        if keyboard_input.pressed(KeyCode::Space) {
+            camera.velocity.y += ACCELERATION;
+        } else if keyboard_input.pressed(KeyCode::ControlLeft) {
+            camera.velocity.y -= ACCELERATION;
+        } else {
+            camera.velocity.y = 0.0;
+        }
+
+        // Clamp the velocity to the maximum value
+        camera.velocity.x = camera.velocity.x.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+        camera.velocity.y = camera.velocity.y.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+        camera.velocity.z = camera.velocity.z.clamp(-MAX_VELOCITY, MAX_VELOCITY);
+
+        // Update the camera translation based on the velocity
+        transform.translation.x += camera.velocity.x * SPEED;
+        transform.translation.y += camera.velocity.y * SPEED;
+        transform.translation.z += camera.velocity.z * SPEED;
+
+        info!("Camera translation: {:?}", transform.translation);
+        info!("Camera velocity: {:?}", camera.velocity);
     }
 }
 
