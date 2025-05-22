@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 
-mod freecam;
 mod game;
 mod menu;
 
