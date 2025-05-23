@@ -1,7 +1,7 @@
 use bevy::{prelude::*, window::CursorGrabMode};
 
 use super::SimulationState;
-use crate::AppState;
+use crate::{menu::ui_builder::{MenuCommandsExt, MenuContainerExt, UIColors, ButtonStyle}, AppState};
 
 #[derive(Component)]
 pub struct PauseMenu;
@@ -41,76 +41,12 @@ pub fn handle_pause_input(
 }
 
 pub fn setup_pause_menu(mut commands: Commands) {
-    let background = Node {
-        width: Val::Percent(100.0),
-        height: Val::Percent(100.0),
-        align_items: AlignItems::Center,
-        justify_content: JustifyContent::Center,
-        flex_direction: FlexDirection::Column,
-        ..Default::default()
-    };
-
     commands
-        .spawn((
-            PauseMenu,
-            background,
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
-        ))
+        .spawn_menu_container(PauseMenu, UIColors::BACKGROUND_OVERLAY)
         .with_children(|parent| {
-            // Pause title
-            parent.spawn((
-                Text::new("PAUSED"),
-                TextFont {
-                    font_size: 48.0,
-                    ..Default::default()
-                },
-                TextColor(Color::WHITE),
-                Node {
-                    margin: UiRect::bottom(Val::Px(50.0)),
-                    ..Default::default()
-                },
-            ));
-
-            // Resume button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(65.0),
-                        border: UiRect::all(Val::Px(5.0)),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        margin: UiRect::bottom(Val::Px(20.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.4, 0.4, 0.2)),
-                    PauseMenuButton::Resume,
-                ))
-                .with_child((
-                    Text::new("Resume"),
-                    TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                ));
-
-            // Exit button
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: Val::Px(200.0),
-                        height: Val::Px(65.0),
-                        border: UiRect::all(Val::Px(5.0)),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.6, 0.2, 0.2)),
-                    PauseMenuButton::ExitGame,
-                ))
-                .with_child((
-                    Text::new("Exit Game"),
-                    TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                ));
+            parent.spawn_title("PAUSED");
+            parent.spawn_button("Resume", PauseMenuButton::Resume, ButtonStyle::Primary);
+            parent.spawn_button("Exit Game", PauseMenuButton::ExitGame, ButtonStyle::Danger);
         });
 }
 
