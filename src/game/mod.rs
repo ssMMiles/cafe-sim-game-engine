@@ -1,9 +1,14 @@
-use bevy::{log, prelude::*};
+use bevy::prelude::*;
 
 use crate::AppState;
 
-mod freecam;
-use freecam::{setup_camera, handle_movement};
+mod camera;
+mod simulation;
+mod pause_menu;
+
+use camera::handle_movement;
+use simulation::{setup, update, exit};
+use pause_menu::{handle_pause_input, setup_pause_menu, cleanup_pause_menu, handle_pause_menu};
 
 pub struct SimulationPlugin;
 
@@ -25,6 +30,9 @@ impl Default for SimulationConfig {
     }
 }
 
+#[derive(Component)]
+struct GameEntity;
+
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::InGame), setup);
@@ -32,63 +40,17 @@ impl Plugin for SimulationPlugin {
 
         app.add_systems(
             FixedUpdate,
-            (update).run_if(in_state(SimulationState::Running).and(in_state(AppState::InGame))),
+            update.run_if(in_state(SimulationState::Running).and(in_state(AppState::InGame))),
         );
 
-        app.add_systems(Update, handle_movement.run_if(in_state(AppState::InGame)));
+        app.add_systems(Update, handle_movement.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+        app.add_systems(Update, handle_pause_input.run_if(in_state(AppState::InGame)));
+        
+        app.add_systems(OnEnter(SimulationState::Paused), setup_pause_menu);
+        app.add_systems(OnExit(SimulationState::Paused), cleanup_pause_menu);
+        app.add_systems(Update, handle_pause_menu.run_if(in_state(SimulationState::Paused)));
 
         app.init_state::<SimulationState>();
         app.init_resource::<SimulationConfig>();
     }
-}
-
-
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    log::info!("Setting up the simulation environment");
-
-    setup_camera(&mut commands);
-    commands.insert_resource(SimulationConfig::default());
-
-    let sphere = meshes.add(Sphere::default());
-
-    // spawn a sphere at 0, 0, 0
-    commands.spawn((
-        Mesh3d(sphere),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.1, 0.1),
-            ..Default::default()
-        })),
-        Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
-        GlobalTransform::default(),
-    ));
-
-    // spawn a plane at 0, 0, 0
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d {
-            normal: Dir3::Y,
-            half_size: Vec2 { x: 100.0, y: 100.0 },
-            ..Default::default()
-        })),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.1, 0.1, 0.1),
-            ..Default::default()
-        })),
-        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
-        GlobalTransform::default(),
-    ));
-}
-
-
-fn update(_commands: Commands, _simulation_state: ResMut<SimulationConfig>, _time: Res<Time>) {
-    // Update the simulation state based on the elapsed time
-    // simulation_state.update(time.delta_seconds());
-}
-
-fn exit(mut commands: Commands) {
-    // Cleanup the simulation environment
-    commands.remove_resource::<SimulationConfig>();
 }
