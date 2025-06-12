@@ -2,7 +2,10 @@ use bevy::{log, prelude::*};
 
 use crate::AppState;
 
-use super::{ui_builder::{MenuCommandsExt, MenuContainerExt, UIColors, ButtonStyle}, MenuScreen};
+use super::{
+    MenuScreen,
+    ui_builder::{ButtonStyle, MenuCommandsExt, MenuContainerExt, UIColors},
+};
 
 #[derive(Component, Debug)]
 pub struct MainMenuScreen;
@@ -19,7 +22,11 @@ pub fn setup_main_menu(mut commands: Commands) {
     commands
         .spawn_menu_container(MainMenuScreen, UIColors::BACKGROUND_DARK)
         .with_children(|parent| {
-            parent.spawn_button("Start Game", MainMenuButton::StartGame, ButtonStyle::Primary);
+            parent.spawn_button(
+                "Start Game",
+                MainMenuButton::StartGame,
+                ButtonStyle::Primary,
+            );
             parent.spawn_button("Settings", MainMenuButton::Settings, ButtonStyle::Primary);
         });
 }

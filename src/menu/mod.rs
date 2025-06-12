@@ -51,7 +51,7 @@ fn destroy_menu(
     log::info!("Destroying menu");
 
     for entity in camera_query.iter() {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 
     menu_state.set(MenuScreen::None);
@@ -59,6 +59,6 @@ fn destroy_menu(
 
 fn despawn_screen<T: Component>(to_despawn: Query<Entity, With<T>>, mut commands: Commands) {
     for entity in &to_despawn {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 }
