@@ -6,24 +6,43 @@ use crate::{
 };
 
 mod camera;
+mod cutting_board;
+mod edit_mode;
+mod icons;
+mod interaction;
+mod materials;
+mod outline;
 pub mod pause_menu;
 mod simulation;
+mod ui_displays;
+mod world;
 
 use camera::handle_movement;
+use cutting_board::{
+    ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
+    update_cutting_board_menu_rotation,
+};
+use edit_mode::{
+    PlacementPreviewEntity, cleanup_placement_preview, handle_edit_mode_click,
+    setup_placement_preview, toggle_edit_mode, toggle_placement_object, update_placement_preview,
+};
+use icons::SvgTextureCache;
+use interaction::{InteractableClicked, check_interactions, detect_interactable_clicks};
+use outline::{toggle_outline, update_outline};
 use pause_menu::{
     PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
     update_slider_label,
 };
 use simulation::{
-    check_interactions, cleanup_placement_preview, exit, handle_edit_mode_click,
-    propagate_interactable_to_children, setup, setup_fps_display, setup_interaction_info_display,
-    setup_keybinds_display, setup_placement_preview, setup_position_display, show_interaction_text, toggle_crosshair,
-    toggle_edit_mode, toggle_placement_object, update, update_crosshair_display, update_fps_display,
-    update_interaction_info_display, update_keybinds_display, update_outline,
-    update_placement_preview, update_position_display, PlacementPreviewEntity,
-    handle_cutting_board_interaction, update_cutting_board_menu_rotation,
-    ActiveCuttingBoardMenu,
+    display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
+    toggle_crosshair, update_cooking_display_rotation, update_cooking_displays,
+    update_cooking_timers, update_crosshair_display,
+};
+use ui_displays::{
+    setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
+    setup_position_display, update_dynamic_backgrounds, update_fps_display,
+    update_interaction_info_display, update_keybinds_display, update_position_display,
 };
 
 pub struct SimulationPlugin;
@@ -47,7 +66,7 @@ impl Default for SimulationConfig {
 }
 
 #[derive(Component)]
-struct GameEntity;
+pub struct GameEntity;
 
 fn edit_mode_active(settings: Res<UserSettings>) -> bool {
     settings.edit_mode
@@ -56,6 +75,7 @@ fn edit_mode_active(settings: Res<UserSettings>) -> bool {
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        app.add_event::<InteractableClicked>();
         app.add_systems(
             OnEnter(AppState::InGame),
             (
@@ -69,18 +89,13 @@ impl Plugin for SimulationPlugin {
         app.add_systems(OnExit(AppState::InGame), exit);
 
         app.add_systems(
-            FixedUpdate,
-            update.run_if(in_state(SimulationState::Running).and(in_state(AppState::InGame))),
-        );
-
-        app.add_systems(
             Update,
             handle_movement
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(
             Update,
-            check_interactions
+            (check_interactions, detect_interactable_clicks)
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(
@@ -102,8 +117,12 @@ impl Plugin for SimulationPlugin {
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(Update, toggle_crosshair.run_if(in_state(AppState::InGame)));
+        app.add_systems(Update, toggle_outline.run_if(in_state(AppState::InGame)));
         app.add_systems(Update, toggle_edit_mode.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, toggle_placement_object.run_if(in_state(AppState::InGame)));
+        app.add_systems(
+            Update,
+            toggle_placement_object.run_if(in_state(AppState::InGame)),
+        );
         app.add_systems(
             Update,
             setup_placement_preview.run_if(in_state(AppState::InGame)),
@@ -137,18 +156,26 @@ impl Plugin for SimulationPlugin {
             Update,
             update_position_display.run_if(in_state(AppState::InGame)),
         );
-        // Propagate interactable to mesh children
-        app.add_systems(
-            Update,
-            propagate_interactable_to_children.run_if(in_state(AppState::InGame)),
-        );
-        // Cutting board menu systems
+        // Interactable and menu systems
         app.add_systems(
             Update,
             (
-                handle_cutting_board_interaction,
+                handle_interactable_clicks,
                 update_cutting_board_menu_rotation,
+                animate_card_hover,
+                update_card_shadows,
+                check_menu_distances,
+                update_cooking_timers,
+                display_cooking_progress,
+                update_cooking_displays,
+                update_cooking_display_rotation,
             )
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
+        // Dynamic background system - runs less frequently to avoid issues
+        app.add_systems(
+            FixedUpdate,
+            update_dynamic_backgrounds
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(
@@ -194,5 +221,6 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<SimulationConfig>();
         app.init_resource::<PlacementPreviewEntity>();
         app.init_resource::<ActiveCuttingBoardMenu>();
+        app.init_resource::<SvgTextureCache>();
     }
 }

@@ -76,6 +76,7 @@ pub struct UserSettings {
     pub movement_speed: f32,
     pub edit_mode: bool,
     pub current_placement_object: PlacementObjectType,
+    pub outline_visible: bool,
 }
 
 impl Default for UserSettings {
@@ -87,6 +88,7 @@ impl Default for UserSettings {
             movement_speed: 0.1,
             edit_mode: false,
             current_placement_object: PlacementObjectType::default(),
+            outline_visible: false,
         }
     }
 }
@@ -105,6 +107,11 @@ impl UserSettings {
                 name: "Crosshair",
                 keybind: "Shift+T",
                 current_value: if self.crosshair_visible { "ON" } else { "OFF" }.to_string(),
+            },
+            SettingInfo {
+                name: "Outline",
+                keybind: "Shift+O",
+                current_value: if self.outline_visible { "ON" } else { "OFF" }.to_string(),
             },
             SettingInfo {
                 name: "Movement Mode",
@@ -136,6 +143,10 @@ impl UserSettings {
 
     pub fn toggle_crosshair(&mut self) {
         self.crosshair_visible = !self.crosshair_visible;
+    }
+
+    pub fn toggle_outline(&mut self) {
+        self.outline_visible = !self.outline_visible;
     }
 
     pub fn toggle_movement_mode(&mut self) {

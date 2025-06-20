@@ -63,6 +63,29 @@ impl<T: Component> Default for SliderTrack<T> {
     }
 }
 
+pub fn handle_cursor_lock(
+    mut windows: Query<&mut Window>,
+    current_sim_state: &Res<State<SimulationState>>,
+) {
+    if let Ok(mut window) = windows.single_mut() {
+        match current_sim_state.get() {
+            SimulationState::Running => {
+                window.cursor_options.grab_mode = CursorGrabMode::None;
+                window.cursor_options.visible = true;
+            }
+            SimulationState::Paused => {
+                let height = window.height();
+                let width = window.width();
+
+                window.set_cursor_position(Some(Vec2::new(width / 2.0, height / 2.0)));
+
+                window.cursor_options.grab_mode = CursorGrabMode::Locked;
+                window.cursor_options.visible = false;
+            }
+        }
+    }
+}
+
 pub fn handle_pause_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     current_sim_state: Res<State<SimulationState>>,
@@ -72,14 +95,11 @@ pub fn handle_pause_input(
     mut windows: Query<&mut Window>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
+        handle_cursor_lock(windows, &current_sim_state);
+
         match current_sim_state.get() {
             SimulationState::Running => {
                 sim_next_state.set(SimulationState::Paused);
-                // Unlock cursor when pausing
-                if let Ok(mut window) = windows.single_mut() {
-                    window.cursor_options.grab_mode = CursorGrabMode::None;
-                    window.cursor_options.visible = true;
-                }
             }
             SimulationState::Paused => {
                 match current_menu_state.get() {
@@ -90,11 +110,6 @@ pub fn handle_pause_input(
                     PauseMenuState::Main => {
                         // If in main pause menu, resume game
                         sim_next_state.set(SimulationState::Running);
-                        // Lock cursor when resuming
-                        if let Ok(mut window) = windows.single_mut() {
-                            window.cursor_options.grab_mode = CursorGrabMode::Locked;
-                            window.cursor_options.visible = false;
-                        }
                     }
                 }
             }
