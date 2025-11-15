@@ -1,4 +1,5 @@
-use bevy::{log, pbr::NotShadowCaster, prelude::*};
+use bevy::light::NotShadowCaster;
+use bevy::{log, prelude::*};
 
 use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
 use super::materials::PendingMaterial;

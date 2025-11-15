@@ -1,5 +1,4 @@
-use bevy::prelude::*;
-use bevy::render::{mesh::PrimitiveTopology, render_asset::RenderAssetUsages};
+use bevy::{asset::RenderAssetUsages, mesh::{Indices, PrimitiveTopology}, prelude::*};
 
 #[derive(Component, Clone)]
 pub struct PendingMaterial {
@@ -121,7 +120,7 @@ pub fn create_arc_mesh(radius: f32, progress: f32) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
+    mesh.insert_indices(Indices::U32(indices));
 
     mesh
 }

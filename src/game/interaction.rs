@@ -243,7 +243,7 @@ pub fn check_interactions(
     }
 }
 
-#[derive(Event)]
+#[derive(Message)]
 pub struct InteractableClicked {
     pub entity: Entity,
     pub interactable: Interactable,
@@ -252,7 +252,7 @@ pub struct InteractableClicked {
 pub fn detect_interactable_clicks(
     mouse_input: Res<ButtonInput<MouseButton>>,
     hovered_query: Query<(Entity, &Interactable), With<HoveredOver>>,
-    mut click_events: EventWriter<InteractableClicked>,
+    mut click_events: MessageWriter<InteractableClicked>,
 ) {
     if mouse_input.just_pressed(MouseButton::Left) {
         for (entity, interactable) in hovered_query.iter() {

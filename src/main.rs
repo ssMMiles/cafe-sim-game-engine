@@ -1,8 +1,5 @@
-use bevy::{
-    prelude::*,
-    window::{PresentMode, Window, WindowPlugin},
-};
-use bevy_mod_outline::OutlinePlugin;
+use bevy::{prelude::*, window::{PresentMode, Window, WindowPlugin}};
+// use bevy_mod_outline::OutlinePlugin;
 
 mod game;
 mod menu;
@@ -18,14 +15,14 @@ pub enum AppState {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+        .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()).set(WindowPlugin {
             primary_window: Some(Window {
-                present_mode: PresentMode::Immediate, // Disable VSync for uncapped framerate
+                present_mode: PresentMode::Immediate,
                 ..default()
             }),
             ..default()
         }))
-        .add_plugins(OutlinePlugin)
+        // .add_plugins(OutlinePlugin)
         .add_plugins(settings::SettingsPlugin)
         .add_plugins(menu::MenuPlugin)
         .add_plugins(game::SimulationPlugin)

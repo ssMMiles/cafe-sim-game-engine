@@ -17,7 +17,7 @@ mod simulation;
 mod ui_displays;
 mod world;
 
-use camera::handle_movement;
+use camera::{handle_movement, resize_render_texture_sprite};
 use cutting_board::{
     ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
     update_cutting_board_menu_rotation,
@@ -92,6 +92,10 @@ impl Plugin for SimulationPlugin {
             Update,
             handle_movement
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
+        app.add_systems(
+            Update,
+            resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,

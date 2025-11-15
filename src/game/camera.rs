@@ -1,7 +1,11 @@
 use std::f32::consts::PI;
 
-use crate::settings::{MovementMode, UserSettings};
-use bevy::{input::mouse::MouseMotion, prelude::*};
+use crate::{game::simulation::Player, settings::{MovementMode, UserSettings}};
+use bevy::{camera::visibility::RenderLayers, ecs::query, image::ImageSampler, input::mouse::MouseMotion, prelude::*, render::{Render, render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}}, sprite_render::Material2d, window::PrimaryWindow};
+use bevy_modern_pixel_camera::prelude::*;
+
+const RENDER_TEXTURE_WIDTH: u32 = 1920;
+const RENDER_TEXTURE_HEIGHT: u32 = 1080;
 
 #[derive(Component, Debug, Default)]
 pub struct PlayerCamera {
@@ -9,6 +13,9 @@ pub struct PlayerCamera {
     pub yaw: f32,
     pub pitch: f32,
 }
+
+#[derive(Component)]
+pub struct RenderTextureSprite;
 
 // Movement speed is now controlled by UserSettings
 const ACCELERATION: f32 = 0.2;
@@ -24,42 +31,165 @@ struct MovementInput {
     up: bool,
     down: bool,
     toggle_mode: bool,
+    toggle_third_person: bool,
 }
 
-pub fn setup_camera(commands: &mut Commands) {
-    use super::GameEntity;
-    let initial_transform = Transform::from_translation(Vec3::new(8.0, 2.0, -12.0))
-        .looking_at(Vec3::new(8.0, 2.0, -8.0), Vec3::Y);
+pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>, meshes: &mut ResMut<Assets<Mesh>>, materials: &mut ResMut<Assets<StandardMaterial>>) {
+    let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
 
+    let size = Extent3d {
+        width: RENDER_TEXTURE_WIDTH,
+        height: RENDER_TEXTURE_HEIGHT,
+        ..default()
+    };
+
+    let mut render_texture = Image {
+        texture_descriptor: TextureDescriptor {
+            label: None,
+            size,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Bgra8UnormSrgb,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        },
+        sampler: ImageSampler::nearest(), // For pixelated look
+        ..default()
+    };
+
+    // Fill image.data with zeroes
+    render_texture.resize(size);
+
+    let render_texture_handle = images.add(render_texture);
+    let render_texture_layer = RenderLayers::layer(0);
+
+    // The camera to render all entities on render layer #0, which is the default layer for
+    // entities, unless otherwise specified.
     commands.spawn((
-        GameEntity,
+        Camera3d::default(),
+        Camera {
+            // render before the "main pass" camera
+            // order: -1,
+            target: render_texture_handle.clone().into(),
+            // clear_color: Color::WHITE.into(),
+            ..default()
+        },
         PlayerCamera {
             velocity: Vec3::ZERO,
             yaw,
             pitch,
         },
-        Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             fov: (PI / 5.),
             ..default()
         }),
         initial_transform,
+        render_texture_layer,
+    ));
+
+    let cube_size = 4.0;
+    let cube_handle = meshes.add(Cuboid::new(cube_size, cube_size, cube_size));
+
+    // This material has the texture that has been rendered.
+    // let material_handle = materials.add(StandardMaterial {
+    //     base_color_texture: Some(render_texture_handle),
+    //     reflectance: 0.02,
+    //     unlit: false,
+    //     ..default()
+    // });
+
+    // let alt_material_handle = materials.add(StandardMaterial {
+    //     base_color: Color::srgb(0.8, 0.2, 0.2),
+    //     reflectance: 0.02,
+    //     unlit: false,
+    //     ..default()
+    // });
+
+    // Main pass cube, with material containing the rendered first pass texture.
+    // commands.spawn((
+    //     Mesh3d(cube_handle),
+    //     MeshMaterial3d(material_handle),
+    //     Transform::from_xyz(0.0, 0.0, 1.5).with_rotation(Quat::from_rotation_x(-PI / 5.0)),
+    //     RenderLayers::layer(1),
+    // ));
+
+    // commands.spawn((
+    //     Camera3d::default(),
+    //     Transform::from_xyz(0.0, 0.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+    //     RenderLayers::layer(1),
+    // ));
+
+    //
+    // A sprite and orthographic camera is used to present the render texture.
+    // These are on render layer #1
+    //
+    commands.spawn((
+        Sprite::from_image(render_texture_handle),
+        RenderTextureSprite,
+        RenderLayers::layer(1),
+    ));
+
+    // commands.spawn((Camera2d::default(), RenderLayers::layer(1)));
+
+    commands.spawn((
+        IsDefaultUiCamera,
+        Camera2d::default(),
+        // PixelZoom::FitSize {
+        //         width: RENDER_TEXTURE_WIDTH as i32,
+        //         height: RENDER_TEXTURE_HEIGHT as i32,
+        // },
+        // PixelViewport,
+        RenderLayers::layer(1),
     ));
 }
 
 pub fn handle_movement(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut mouse_motion: EventReader<MouseMotion>,
+    mut mouse_motion: MessageReader<MouseMotion>,
     mut settings: ResMut<UserSettings>,
-    mut query: Query<(&mut Transform, &mut PlayerCamera)>,
+    camera_query: Option<Single<(&mut Transform, &mut PlayerCamera), Without<Player>>>,
+    player_query: Option<Single<(&mut Transform), With<Player>>>,
 ) {
-    for (mut transform, mut camera) in query.iter_mut() {
-        let input = collect_movement_input(&keyboard_input);
+    let (mut camera_transform, mut camera) = match camera_query {
+        Some(query) => query.into_inner(),
+        None => {
+            warn!("No camera entity found for camera movement system.");
+            return;
+        }
+    };
+    let mut player_transform = match player_query {
+        Some(query) => query.into_inner(),
+        None => {
+            warn!("No player entity found for camera movement system.");
+            return;
+        }
+    };
 
-        handle_mode_toggle(&input, &mut settings, &mut transform);
-        handle_mouse_look(&mut mouse_motion, &mut camera, &mut transform, &settings);
-        apply_movement(&input, &mut transform, &settings);
+    let input = collect_movement_input(&keyboard_input);
+
+    handle_mode_toggle(&input, &mut settings, &mut player_transform);
+    apply_movement(&input, &mut player_transform, &camera_transform, &settings);
+
+    if settings.third_person_view {
+        // Third-person camera with free rotation around player
+        let offset_distance = 20.0; // Distance from player
+
+        // Allow both horizontal and vertical rotation with mouse
+        handle_mouse_look(&mut mouse_motion, &mut camera, &mut camera_transform, &settings);
+
+        // Calculate offset direction based on current camera rotation
+        let offset_direction = camera_transform.forward().as_vec3();
+
+        // Position camera at offset from player, looking at them
+        camera_transform.translation = player_transform.translation - offset_direction * offset_distance;
+    } else {
+        // First-person view: sync camera to player
+        camera_transform.translation = player_transform.translation;
+        handle_mouse_look(&mut mouse_motion, &mut camera, &mut camera_transform, &settings);
     }
 }
 
@@ -72,6 +202,8 @@ fn collect_movement_input(keyboard_input: &Res<ButtonInput<KeyCode>>) -> Movemen
         up: keyboard_input.pressed(KeyCode::Space),
         down: keyboard_input.pressed(KeyCode::ControlLeft),
         toggle_mode: keyboard_input.just_pressed(KeyCode::KeyM)
+            && keyboard_input.pressed(KeyCode::ShiftLeft),
+        toggle_third_person: keyboard_input.just_pressed(KeyCode::KeyV)
             && keyboard_input.pressed(KeyCode::ShiftLeft),
     }
 }
@@ -91,10 +223,13 @@ fn handle_mode_toggle(
         };
         settings.toggle_movement_mode();
     }
+    if input.toggle_third_person {
+        settings.third_person_view = !settings.third_person_view;
+    }
 }
 
 fn handle_mouse_look(
-    mouse_motion: &mut EventReader<MouseMotion>,
+    mouse_motion: &mut MessageReader<MouseMotion>,
     camera: &mut PlayerCamera,
     transform: &mut Transform,
     settings: &UserSettings,
@@ -114,31 +249,49 @@ fn handle_mouse_look(
     }
 }
 
-fn apply_movement(input: &MovementInput, transform: &mut Transform, settings: &UserSettings) {
+fn handle_mouse_look_isometric(
+    mouse_motion: &mut MessageReader<MouseMotion>,
+    camera: &mut PlayerCamera,
+    settings: &UserSettings,
+) {
+    let mut mouse_delta = Vec2::ZERO;
+    for motion in mouse_motion.read() {
+        mouse_delta += motion.delta;
+    }
+
+    if mouse_delta != Vec2::ZERO {
+        // Only apply horizontal (yaw) rotation for isometric view
+        camera.yaw -= mouse_delta.x * settings.mouse_sensitivity;
+        // Pitch stays locked at isometric angle
+    }
+}
+
+fn apply_movement(input: &MovementInput, transform: &mut Transform, camera_transform: &Transform, settings: &UserSettings) {
     match settings.movement_mode {
-        MovementMode::FreeCam => apply_freecam_movement(input, transform, settings),
-        MovementMode::FloorBased => apply_floor_movement(input, transform, settings),
+        MovementMode::FreeCam => apply_freecam_movement(input, transform, camera_transform, settings),
+        MovementMode::FloorBased => apply_floor_movement(input, transform, camera_transform, settings),
     }
 }
 
 fn apply_freecam_movement(
     input: &MovementInput,
     transform: &mut Transform,
+    camera_transform: &Transform,
     settings: &UserSettings,
 ) {
     let mut movement = Vec3::ZERO;
 
     if input.forward {
-        movement += transform.forward().as_vec3();
+        movement += camera_transform.forward().as_vec3();
     }
     if input.backward {
-        movement -= transform.forward().as_vec3();
+        movement -= camera_transform.forward().as_vec3();
     }
     if input.left {
-        movement -= transform.right().as_vec3();
+        movement -= camera_transform.right().as_vec3();
     }
     if input.right {
-        movement += transform.right().as_vec3();
+        movement += camera_transform.right().as_vec3();
     }
     if input.up {
         movement += Vec3::Y;
@@ -155,20 +308,20 @@ fn apply_freecam_movement(
     transform.translation += movement;
 }
 
-fn apply_floor_movement(input: &MovementInput, transform: &mut Transform, settings: &UserSettings) {
+fn apply_floor_movement(input: &MovementInput, transform: &mut Transform, camera_transform: &Transform, settings: &UserSettings) {
     let mut movement = Vec3::ZERO;
 
     if input.forward {
-        movement += transform.forward().as_vec3();
+        movement += camera_transform.forward().as_vec3();
     }
     if input.backward {
-        movement -= transform.forward().as_vec3();
+        movement -= camera_transform.forward().as_vec3();
     }
     if input.left {
-        movement -= transform.right().as_vec3();
+        movement -= camera_transform.right().as_vec3();
     }
     if input.right {
-        movement += transform.right().as_vec3();
+        movement += camera_transform.right().as_vec3();
     }
 
     // Project movement to XZ plane and normalize
@@ -183,4 +336,15 @@ fn apply_floor_movement(input: &MovementInput, transform: &mut Transform, settin
 
     // Keep camera at floor height
     transform.translation.y = FLOOR_HEIGHT;
+}
+
+pub fn resize_render_texture_sprite(
+    window_query: Query<&Window, With<PrimaryWindow>>,
+    mut sprite_query: Query<&mut Sprite, With<RenderTextureSprite>>,
+) {
+    if let Ok(window) = window_query.single() {
+        if let Ok(mut sprite) = sprite_query.single_mut() {
+            sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
+        }
+    }
 }

@@ -77,6 +77,7 @@ pub struct UserSettings {
     pub edit_mode: bool,
     pub current_placement_object: PlacementObjectType,
     pub outline_visible: bool,
+    pub third_person_view: bool,
 }
 
 impl Default for UserSettings {
@@ -89,6 +90,7 @@ impl Default for UserSettings {
             edit_mode: false,
             current_placement_object: PlacementObjectType::default(),
             outline_visible: false,
+            third_person_view: true,
         }
     }
 }
@@ -137,6 +139,11 @@ impl UserSettings {
                 name: "Movement Speed",
                 keybind: "",
                 current_value: format!("{:.2}", self.movement_speed),
+            },
+            SettingInfo {
+                name: "Third Person View",
+                keybind: "Shift+V",
+                current_value: if self.third_person_view { "ON" } else { "OFF" }.to_string(),
             },
         ]
     }

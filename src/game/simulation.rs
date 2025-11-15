@@ -1,3 +1,5 @@
+use bevy::math::VectorSpace;
+use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
 use super::icons::{SvgTextureCache, load_svg_icons};
@@ -42,24 +44,43 @@ pub struct CookingDisplay {
 #[derive(Component)]
 pub struct ProgressArc;
 
+#[derive(Component)]
+pub struct Player;
+
 pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    images: ResMut<Assets<Image>>,
-    mut windows: Query<&mut Window>,
+    mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     svg_cache: ResMut<SvgTextureCache>,
+    mut cursor_options: Single<&mut CursorOptions>,
 ) {
     log::info!("Setting up the simulation environment");
 
     // Lock cursor to window for FPS-style controls
-    if let Ok(mut window) = windows.single_mut() {
-        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
-        window.cursor_options.visible = false;
-    }
+    cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
+    cursor_options.visible = false;
 
-    super::camera::setup_camera(&mut commands);
+    let cylinder = meshes.add(
+        Cylinder::new(1.0, 2.0)
+    );
+
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.6, 0.4, 0.2, 1.0),
+        ..default()
+    });
+
+    let _player = commands.spawn((
+        GameEntity,
+        Player,
+        Transform::default(),
+        GlobalTransform::default(),
+        Mesh3d(cylinder),
+        MeshMaterial3d(material),
+    )).id();
+
+    super::camera::setup_camera(&mut commands, &mut images, &mut meshes, &mut materials);
     commands.insert_resource(SimulationConfig::default());
 
     // Load SVG icons
@@ -329,8 +350,8 @@ pub fn update_cooking_display_rotation(
 
 pub fn exit(
     mut commands: Commands,
-    mut windows: Query<&mut Window>,
     game_entities: Query<Entity, With<GameEntity>>,
+    mut cursor_options: Single<&mut CursorOptions>
 ) {
     // Use world::cleanup to despawn all game entities
     super::world::cleanup(commands.reborrow(), game_entities);
@@ -339,16 +360,14 @@ pub fn exit(
     commands.remove_resource::<SimulationConfig>();
 
     // Unlock cursor when exiting game
-    if let Ok(mut window) = windows.single_mut() {
-        window.cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
-        window.cursor_options.visible = true;
-    }
+    cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
+    cursor_options.visible = true;
 }
 
 // Main handler for all interactable clicks
 pub fn handle_interactable_clicks(
     mut commands: Commands,
-    mut click_events: EventReader<super::interaction::InteractableClicked>,
+    mut click_events: MessageReader<super::interaction::InteractableClicked>,
     camera_query: Query<&Transform, With<super::camera::PlayerCamera>>,
     transform_query: Query<&Transform>,
     mut active_menu: ResMut<super::cutting_board::ActiveCuttingBoardMenu>,

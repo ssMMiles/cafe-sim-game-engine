@@ -1,4 +1,4 @@
-use bevy::{prelude::*, window::CursorGrabMode};
+use bevy::{prelude::*, window::{CursorGrabMode, CursorOptions}};
 
 use super::SimulationState;
 use crate::{
@@ -65,13 +65,14 @@ impl<T: Component> Default for SliderTrack<T> {
 
 pub fn handle_cursor_lock(
     mut windows: Query<&mut Window>,
+    mut cursor_options: Single<&mut CursorOptions>,
     current_sim_state: &Res<State<SimulationState>>,
 ) {
     if let Ok(mut window) = windows.single_mut() {
         match current_sim_state.get() {
             SimulationState::Running => {
-                window.cursor_options.grab_mode = CursorGrabMode::None;
-                window.cursor_options.visible = true;
+                cursor_options.grab_mode = CursorGrabMode::None;
+                cursor_options.visible = true;
             }
             SimulationState::Paused => {
                 let height = window.height();
@@ -79,8 +80,8 @@ pub fn handle_cursor_lock(
 
                 window.set_cursor_position(Some(Vec2::new(width / 2.0, height / 2.0)));
 
-                window.cursor_options.grab_mode = CursorGrabMode::Locked;
-                window.cursor_options.visible = false;
+                cursor_options.grab_mode = CursorGrabMode::Locked;
+                cursor_options.visible = false;
             }
         }
     }
@@ -93,9 +94,10 @@ pub fn handle_pause_input(
     mut sim_next_state: ResMut<NextState<SimulationState>>,
     mut menu_next_state: ResMut<NextState<PauseMenuState>>,
     mut windows: Query<&mut Window>,
+    mut cursor_options: Single<&mut CursorOptions>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
-        handle_cursor_lock(windows, &current_sim_state);
+        handle_cursor_lock(windows, cursor_options, &current_sim_state);
 
         match current_sim_state.get() {
             SimulationState::Running => {
@@ -175,7 +177,7 @@ pub fn handle_pause_menu(
     mut simulation_state: ResMut<NextState<SimulationState>>,
     mut pause_menu_state: ResMut<NextState<PauseMenuState>>,
     mut app_state: ResMut<NextState<AppState>>,
-    mut windows: Query<&mut Window>,
+    mut cursor_options: Single<&mut CursorOptions>,
 ) {
     for (interaction, action) in interaction_query.iter() {
         if *interaction == Interaction::Pressed {
@@ -183,10 +185,8 @@ pub fn handle_pause_menu(
                 PauseMenuButton::Resume => {
                     simulation_state.set(SimulationState::Running);
                     // Lock cursor when resuming
-                    if let Ok(mut window) = windows.single_mut() {
-                        window.cursor_options.grab_mode = CursorGrabMode::Locked;
-                        window.cursor_options.visible = false;
-                    }
+                    cursor_options.grab_mode = CursorGrabMode::Locked;
+                    cursor_options.visible = false;
                 }
                 PauseMenuButton::Settings => {
                     pause_menu_state.set(PauseMenuState::Settings);
@@ -195,10 +195,8 @@ pub fn handle_pause_menu(
                     app_state.set(AppState::MainMenu);
                     simulation_state.set(SimulationState::Running);
                     // Unlock cursor when exiting to main menu
-                    if let Ok(mut window) = windows.single_mut() {
-                        window.cursor_options.grab_mode = CursorGrabMode::None;
-                        window.cursor_options.visible = true;
-                    }
+                    cursor_options.grab_mode = CursorGrabMode::None;
+                    cursor_options.visible = true;
                 }
             }
         }

@@ -6,3 +6,12 @@ runner = "wasm-server-runner"
 # Gives us better performance in dev without increasing compile times aside from the first build
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.dev.package.objc2]
+debug-assertions = false
+
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"

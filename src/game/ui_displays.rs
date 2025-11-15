@@ -1,8 +1,5 @@
 use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    log,
-    prelude::*,
-    render::primitives::Aabb,
+    camera::primitives::Aabb, diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin}, log, prelude::*
 };
 
 use super::interaction::{HoveredOver, Interactable};
