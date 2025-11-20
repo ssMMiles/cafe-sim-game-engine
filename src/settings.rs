@@ -11,6 +11,7 @@ pub mod slider_constants {
 pub mod setting_ranges {
     pub const MOUSE_SENSITIVITY: (f32, f32) = (0.001, 0.01);
     pub const MOVEMENT_SPEED: (f32, f32) = (0.05, 0.3);
+    pub const THIRD_PERSON_DISTANCE: (f32, f32) = (5.0, 50.0);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +79,7 @@ pub struct UserSettings {
     pub current_placement_object: PlacementObjectType,
     pub outline_visible: bool,
     pub third_person_view: bool,
+    pub third_person_distance: f32,
 }
 
 impl Default for UserSettings {
@@ -91,6 +93,7 @@ impl Default for UserSettings {
             current_placement_object: PlacementObjectType::default(),
             outline_visible: false,
             third_person_view: true,
+            third_person_distance: 20.0,
         }
     }
 }

@@ -1,21 +1,47 @@
 use bevy::light::NotShadowCaster;
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::render::alpha::AlphaMode;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
 use bevy::{log, prelude::*};
 
 use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
 use super::materials::PendingMaterial;
 use super::{GameEntity, simulation::TableMarker};
 
+// Define the Material Extension
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct ToonMaterial {
+    #[uniform(100)]
+    pub color: LinearRgba,
+}
+
+impl MaterialExtension for ToonMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/toon_lighting.wgsl".into()
+    }
+
+    fn deferred_fragment_shader() -> ShaderRef {
+        "shaders/toon_lighting.wgsl".into()
+    }
+
+    fn alpha_mode() -> Option<AlphaMode> {
+        Some(AlphaMode::Opaque)
+    }
+}
+
 pub fn setup(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     asset_server: &Res<AssetServer>,
+    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
 ) {
     log::info!("Setting up the game world");
 
     spawn_lighting(commands, meshes, materials);
-    spawn_environment(commands, meshes, materials);
-    spawn_cafe_building(commands, meshes, materials);
+    spawn_environment(commands, meshes, toon_materials);
+    spawn_cafe_building(commands, meshes, toon_materials);
     spawn_table(commands, asset_server);
 }
 
@@ -33,61 +59,75 @@ fn spawn_lighting(
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
-    let sun_position = Vec3::new(25.0, 50.0, -150.0);
+    let moon_position = Vec3::new(25.0, 50.0, -150.0);
 
     // Calculate rotation to point at origin
     let target = Vec3::new(0.0, 0.0, 0.0);
-    let direction = (target - sun_position).normalize();
-    let sun_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction);
+    let direction = (target - moon_position).normalize();
+    let moon_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction);
 
-    // Add directional light (sun)
-    let sun_transform = Transform {
-        translation: sun_position,
-        rotation: sun_rotation,
+    // Add directional light (moonlight)
+    let moon_transform = Transform {
+        translation: moon_position,
+        rotation: moon_rotation,
         ..default()
     };
 
     commands.spawn((
         GameEntity,
         DirectionalLight {
-            color: Color::srgb(1.0, 1.0, 0.9),
-            illuminance: 10000.0,
+            color: Color::srgb(0.6, 0.7, 1.0), // Saturated blue for moonlight hue
+            illuminance: 25.0, // Very low illuminance for dark nighttime
             shadows_enabled: true,
             ..default()
         },
-        sun_transform,
+        moon_transform,
     ));
 
     // Debug sun position with yellow cone
-    commands.spawn((
-        GameEntity,
-        Mesh3d(meshes.add(Cone::new(1.0, 3.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 1.0, 0.0),      // Bright yellow
-            emissive: Color::srgb(1.0, 1.0, 0.0).into(), // Fully emissive so it glows
-            cull_mode: None,                             // Show both sides
-            ..Default::default()
-        })),
-        NotShadowCaster, // Prevent casting shadows
-        Transform {
-            translation: sun_transform.translation,
-            rotation: sun_transform.rotation * Quat::from_rotation_x(-std::f32::consts::PI / 2.0), // Point the cone downwards
-            scale: Vec3::splat(3.0), // Make it bigger
-        },
-    ));
+    // commands.spawn((
+    //     GameEntity,
+    //     Mesh3d(meshes.add(Cone::new(1.0, 3.0))),
+    //     MeshMaterial3d(materials.add(StandardMaterial {
+    //         base_color: Color::srgb(1.0, 1.0, 0.0),      // Bright yellow
+    //         emissive: Color::srgb(1.0, 1.0, 0.0).into(), // Fully emissive so it glows
+    //         cull_mode: None,                             // Show both sides
+    //         ..Default::default()
+    //     })),
+    //     NotShadowCaster, // Prevent casting shadows
+    //     Transform {
+    //         translation: sun_transform.translation,
+    //         rotation: sun_transform.rotation * Quat::from_rotation_x(-std::f32::consts::PI / 2.0), // Point the cone downwards
+    //         scale: Vec3::splat(3.0), // Make it bigger
+    //     },
+    // ));
 
     // Add ambient light for diffusion
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.6, 0.6, 0.7), // Slightly brighter and warmer
-        brightness: 800.0,                 // Much higher for more diffusion
+        color: Color::srgb(0.4, 0.5, 0.6), // Cool ambient to match moonlight
+        brightness: 5.0,                   // Very low ambient for nighttime
         affects_lightmapped_meshes: true,
     });
+
+    // Add warm point light inside the building (lamp)
+    commands.spawn((
+        GameEntity,
+        PointLight {
+            color: Color::srgb(1.0, 0.7, 0.4), // Warm orange/yellow lamp
+            intensity: 2000.0, // Bright lamp
+            range: 250.0,
+            radius: 0.5,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(8.0, 5.0, 0.0)), // Center of building, mid-height
+    ));
 }
 
 fn spawn_environment(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
 ) {
     // Test sphere
     let sphere = meshes.add(Sphere::default());
@@ -99,9 +139,17 @@ fn spawn_environment(
             interactable_type: InteractableType::Table, // Default type for test sphere
         },
         Mesh3d(sphere),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.1, 0.1),
-            ..Default::default()
+        MeshMaterial3d(toon_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb(1.0, 0.1, 0.1),
+                perceptual_roughness: 1.0,
+                metallic: 0.0,
+                reflectance: 0.0,
+                ..Default::default()
+            },
+            extension: ToonMaterial {
+                color: Color::srgb(1.0, 0.1, 0.1).into(),
+            },
         })),
         Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
         GlobalTransform::default(),
@@ -115,9 +163,17 @@ fn spawn_environment(
             half_size: Vec2 { x: 100.0, y: 100.0 },
             ..Default::default()
         })),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.7, 0.2),
-            ..Default::default()
+        MeshMaterial3d(toon_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb(0.2, 0.7, 0.2),
+                perceptual_roughness: 1.0,
+                metallic: 0.0,
+                reflectance: 0.0,
+                ..Default::default()
+            },
+            extension: ToonMaterial {
+                color: Color::srgb(0.2, 0.7, 0.2).into(),
+            },
         })),
         Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
         GlobalTransform::default(),
@@ -127,21 +183,42 @@ fn spawn_environment(
 fn spawn_cafe_building(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
 ) {
     // Create a 4x bigger cafe building with door opening (2x shorter height)
     let cafe_roof = meshes.add(Cuboid::new(28.0, 1.0, 20.0));
 
-    let brown_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.6, 0.4, 0.2),
-        cull_mode: None,
-        ..Default::default()
+    let brown_material = toon_materials.add(ExtendedMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgb(0.8, 0.3, 0.3),
+            perceptual_roughness: 1.0,
+            metallic: 0.0,
+            reflectance: 0.0,
+            ..Default::default()
+        },
+        extension: ToonMaterial {
+            color: Color::srgb(0.8, 0.3, 0.3).into(),
+        },
     });
 
-    let red_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.8, 0.2, 0.2),
-        cull_mode: None,
-        ..Default::default()
+    // let brown_material = materials.add(StandardMaterial {
+    //     base_color: Color::srgb(0.6, 0.4, 0.2),
+    //     cull_mode: None,
+    //     ..Default::default()
+    // });
+
+    let red_material = toon_materials.add(ExtendedMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgb(0.8, 0.2, 0.2),
+            cull_mode: None,
+            perceptual_roughness: 1.0,
+            metallic: 0.0,
+            reflectance: 0.0,
+            ..Default::default()
+        },
+        extension: ToonMaterial {
+            color: Color::srgb(0.8, 0.2, 0.2).into(),
+        },
     });
 
     // Cafe walls with door opening (front wall split into three parts) - 4x bigger, 1.5x taller

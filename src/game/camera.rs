@@ -1,7 +1,20 @@
 use std::f32::consts::PI;
 
-use crate::{game::simulation::Player, settings::{MovementMode, UserSettings}};
-use bevy::{camera::visibility::RenderLayers, ecs::query, image::ImageSampler, input::mouse::MouseMotion, prelude::*, render::{Render, render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}}, sprite_render::Material2d, window::PrimaryWindow};
+use crate::{game::simulation::Player, settings::{setting_ranges, MovementMode, UserSettings}};
+use bevy::{
+    camera::visibility::RenderLayers,
+    core_pipeline::prepass::{DepthPrepass, NormalPrepass},
+    ecs::query,
+    image::ImageSampler,
+    input::mouse::{MouseMotion, MouseWheel},
+    prelude::*,
+    render::{
+        Render,
+        render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}
+    },
+    sprite_render::Material2d,
+    window::PrimaryWindow
+};
 use bevy_modern_pixel_camera::prelude::*;
 
 const RENDER_TEXTURE_WIDTH: u32 = 1920;
@@ -89,6 +102,9 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>,
         }),
         initial_transform,
         render_texture_layer,
+        // Enable depth and normal prepasses for edge detection
+        DepthPrepass,
+        NormalPrepass,
     ));
 
     let cube_size = 4.0;
@@ -176,8 +192,6 @@ pub fn handle_movement(
 
     if settings.third_person_view {
         // Third-person camera with free rotation around player
-        let offset_distance = 20.0; // Distance from player
-
         // Allow both horizontal and vertical rotation with mouse
         handle_mouse_look(&mut mouse_motion, &mut camera, &mut camera_transform, &settings);
 
@@ -185,7 +199,7 @@ pub fn handle_movement(
         let offset_direction = camera_transform.forward().as_vec3();
 
         // Position camera at offset from player, looking at them
-        camera_transform.translation = player_transform.translation - offset_direction * offset_distance;
+        camera_transform.translation = player_transform.translation - offset_direction * settings.third_person_distance;
     } else {
         // First-person view: sync camera to player
         camera_transform.translation = player_transform.translation;
@@ -346,5 +360,27 @@ pub fn resize_render_texture_sprite(
         if let Ok(mut sprite) = sprite_query.single_mut() {
             sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
         }
+    }
+}
+
+pub fn adjust_camera_distance(
+    mut scroll_events: EventReader<MouseWheel>,
+    mut settings: ResMut<UserSettings>,
+) {
+    // Only adjust distance when in third person view
+    if !settings.third_person_view {
+        return;
+    }
+
+    for event in scroll_events.read() {
+        // Adjust distance based on scroll delta
+        // Positive scroll = zoom in (decrease distance)
+        // Negative scroll = zoom out (increase distance)
+        let scroll_sensitivity = 2.0;
+        settings.third_person_distance -= event.y * scroll_sensitivity;
+
+        // Clamp to min/max range
+        let (min_dist, max_dist) = setting_ranges::THIRD_PERSON_DISTANCE;
+        settings.third_person_distance = settings.third_person_distance.clamp(min_dist, max_dist);
     }
 }

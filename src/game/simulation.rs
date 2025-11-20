@@ -1,4 +1,5 @@
 use bevy::math::VectorSpace;
+use bevy::pbr::ExtendedMaterial;
 use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
@@ -6,6 +7,7 @@ use super::icons::{SvgTextureCache, load_svg_icons};
 use super::interaction::{HoveredOver, Interactable, InteractableType};
 use super::materials::create_arc_mesh;
 use super::{GameEntity, SimulationConfig};
+use crate::game::world::ToonMaterial;
 use crate::settings::UserSettings;
 
 #[derive(Component)]
@@ -51,6 +53,7 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     svg_cache: ResMut<SvgTextureCache>,
@@ -66,9 +69,15 @@ pub fn setup(
         Cylinder::new(1.0, 2.0)
     );
 
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.6, 0.4, 0.2, 1.0),
-        ..default()
+    let material = toon_materials.add(ExtendedMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgba(0.6, 0.4, 0.2, 1.0),
+            reflectance: 0.0,
+            ..default()
+        },
+        extension: ToonMaterial {
+            color: Color::srgba(0.6, 0.4, 0.2, 1.0).into(),
+        },
     });
 
     let _player = commands.spawn((
@@ -87,7 +96,7 @@ pub fn setup(
     load_svg_icons(images, svg_cache);
 
     // Setup the game world
-    super::world::setup(&mut commands, &mut meshes, &mut materials, &asset_server);
+    super::world::setup(&mut commands, &mut meshes, &mut materials, &asset_server, &mut toon_materials);
 }
 
 pub fn show_interaction_text(

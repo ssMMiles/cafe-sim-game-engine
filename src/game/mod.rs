@@ -1,8 +1,7 @@
-use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
+use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
-    AppState,
-    settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings},
+    AppState, game::world::ToonMaterial, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
 };
 
 mod camera;
@@ -17,7 +16,7 @@ mod simulation;
 mod ui_displays;
 mod world;
 
-use camera::{handle_movement, resize_render_texture_sprite};
+use camera::{adjust_camera_distance, handle_movement, resize_render_texture_sprite};
 use cutting_board::{
     ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
     update_cutting_board_menu_rotation,
@@ -75,6 +74,7 @@ fn edit_mode_active(settings: Res<UserSettings>) -> bool {
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
         app.add_event::<InteractableClicked>();
         app.add_systems(
             OnEnter(AppState::InGame),
@@ -96,6 +96,10 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
+        );
+        app.add_systems(
+            Update,
+            adjust_camera_distance.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,
