@@ -65,9 +65,7 @@ pub fn setup(
     cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
     cursor_options.visible = false;
 
-    let cylinder = meshes.add(
-        Cylinder::new(1.0, 2.0)
-    );
+    let mr_windmill: Handle<Scene> = asset_server.load("meshes/character/mr windmill.gltf#Scene0");
 
     let material = toon_materials.add(ExtendedMaterial {
         base: StandardMaterial {
@@ -85,8 +83,7 @@ pub fn setup(
         Player,
         Transform::default(),
         GlobalTransform::default(),
-        Mesh3d(cylinder),
-        MeshMaterial3d(material),
+        SceneRoot(mr_windmill),
     )).id();
 
     super::camera::setup_camera(&mut commands, &mut images, &mut meshes, &mut materials);

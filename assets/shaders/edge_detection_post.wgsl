@@ -1,5 +1,4 @@
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
-#import bevy_pbr::prepass_utils
 
 // Settings for edge detection
 struct EdgeSettings {
@@ -10,8 +9,10 @@ struct EdgeSettings {
 }
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
-@group(0) @binding(1) var texture_sampler: sampler;
-@group(0) @binding(2) var<uniform> settings: EdgeSettings;
+@group(0) @binding(1) var depth_texture: texture_depth_multisampled_2d;
+@group(0) @binding(2) var normal_texture: texture_multisampled_2d<f32>;
+@group(0) @binding(3) var texture_sampler: sampler;
+@group(0) @binding(4) var<uniform> settings: EdgeSettings;
 
 // Sobel kernels for edge detection
 const SOBEL_X: array<f32, 9> = array<f32, 9>(
@@ -29,7 +30,10 @@ const SOBEL_Y: array<f32, 9> = array<f32, 9>(
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let resolution = vec2<f32>(textureDimensions(screen_texture));
-    let pixel_size = vec2<f32>(settings.edge_thickness, settings.edge_thickness);
+    let texel_size = settings.edge_thickness / resolution;
+
+    // Convert UV to pixel coordinates for textureLoad
+    let pixel_coords = vec2<i32>(in.position.xy);
 
     // Initialize Sobel accumulators
     var depth_sobel_x = 0.0;
@@ -41,23 +45,15 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     var kernel_index = 0u;
     for (var y: i32 = -1; y <= 1; y++) {
         for (var x: i32 = -1; x <= 1; x++) {
-            // Calculate screen position for this sample
-            let offset = vec2<f32>(f32(x), f32(y)) * pixel_size;
-            let sample_pos = in.position.xy + offset;
+            let sample_coords = pixel_coords + vec2<i32>(x, y);
 
-            // Sample depth using prepass utilities
-            #ifdef MULTISAMPLED
-                let depth = bevy_pbr::prepass_utils::prepass_depth(sample_pos, 0u);
-            #else
-                let depth = bevy_pbr::prepass_utils::prepass_depth(sample_pos, 0u);
-            #endif
+            // Sample depth (using textureLoad for multisampled depth textures, sample index 0)
+            let depth = textureLoad(depth_texture, sample_coords, 0);
 
-            // Sample normal using prepass utilities
-            #ifdef MULTISAMPLED
-                let normal = bevy_pbr::prepass_utils::prepass_normal(sample_pos, 0u);
-            #else
-                let normal = bevy_pbr::prepass_utils::prepass_normal(sample_pos, 0u);
-            #endif
+            // Sample normal (stored as RGB10A2, need to unpack from [0,1] to [-1,1])
+            // For multisampled textures, we also need to specify the sample index
+            let normal_sample = textureLoad(normal_texture, sample_coords, 0);
+            let normal = normalize(normal_sample.xyz * 2.0 - vec3<f32>(1.0));
 
             // Apply Sobel kernels
             let sobel_weight_x = SOBEL_X[kernel_index];
@@ -74,12 +70,14 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Calculate edge strength from depth discontinuities
+    // This detects geometric boundaries (object edges)
     let depth_edge = sqrt(
         depth_sobel_x * depth_sobel_x +
         depth_sobel_y * depth_sobel_y
     ) * settings.depth_sensitivity;
 
     // Calculate edge strength from normal discontinuities
+    // This detects surface angle changes (creases, folds)
     let normal_edge_x = length(normal_sobel_x);
     let normal_edge_y = length(normal_sobel_y);
     let normal_edge = sqrt(
@@ -88,6 +86,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     ) * settings.normal_sensitivity;
 
     // Combine edge signals (max for sharper edges)
+    // Using max ensures either geometric edges OR surface angle changes trigger detection
     let edge_strength = max(depth_edge, normal_edge);
 
     // Threshold and sharpen

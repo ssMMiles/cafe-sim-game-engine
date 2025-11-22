@@ -1,12 +1,22 @@
 use std::f32::consts::PI;
 
-use crate::{game::simulation::Player, settings::{setting_ranges, MovementMode, UserSettings}};
+use crate::{
+    game::{post_process::EdgeDetectionSettings, simulation::Player},
+    settings::{setting_ranges, MovementMode, UserSettings},
+};
 use bevy::{
-    camera::visibility::RenderLayers,
-    core_pipeline::prepass::{DepthPrepass, NormalPrepass},
+    anti_alias::fxaa::Fxaa,
+    camera::{visibility::RenderLayers, Exposure},
+    core_pipeline::{
+        prepass::{DepthPrepass, NormalPrepass},
+        tonemapping::Tonemapping,
+    },
     ecs::query,
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
+    light::AtmosphereEnvironmentMapLight,
+    pbr::{Atmosphere, AtmosphereSettings, DistanceFog, FogFalloff},
+    post_process::bloom::Bloom,
     prelude::*,
     render::{
         Render,
@@ -47,7 +57,12 @@ struct MovementInput {
     toggle_third_person: bool,
 }
 
-pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>, meshes: &mut ResMut<Assets<Mesh>>, materials: &mut ResMut<Assets<StandardMaterial>>) {
+pub fn setup_camera(
+    commands: &mut Commands,
+    images: &mut ResMut<Assets<Image>>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
 
@@ -62,7 +77,7 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>,
             label: None,
             size,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Bgra8UnormSrgb,
+            format: TextureFormat::Rgba16Float, // HDR format required for atmosphere
             mip_level_count: 1,
             sample_count: 1,
             usage: TextureUsages::TEXTURE_BINDING
@@ -82,7 +97,7 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>,
 
     // The camera to render all entities on render layer #0, which is the default layer for
     // entities, unless otherwise specified.
-    commands.spawn((
+    let camera_entity = commands.spawn((
         Camera3d::default(),
         Camera {
             // render before the "main pass" camera
@@ -105,6 +120,19 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>,
         // Enable depth and normal prepasses for edge detection
         DepthPrepass,
         NormalPrepass,
+        // Edge detection post-processing settings
+        EdgeDetectionSettings::new(),
+        Fxaa::default(),
+    )).id();
+
+    // Add atmosphere components separately to avoid bundle size limit
+    commands.entity(camera_entity).insert((
+        Atmosphere::EARTH,
+        AtmosphereSettings::default(),
+        Exposure { ev100: 13.0 },
+        Tonemapping::AcesFitted,
+        Bloom::NATURAL,
+        AtmosphereEnvironmentMapLight::default(),
     ));
 
     let cube_size = 4.0;
@@ -160,6 +188,7 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>,
         // },
         // PixelViewport,
         RenderLayers::layer(1),
+        // Fxaa::default(),
     ));
 }
 

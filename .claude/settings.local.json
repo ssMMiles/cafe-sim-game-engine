@@ -1,9 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(cargo check:*)",
+      "Bash(if not exist docs mkdir docs)",
+      "Bash(mkdir:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "/c/Users/Miles/Documents/projects/bevy"
+    ]
   }
 }

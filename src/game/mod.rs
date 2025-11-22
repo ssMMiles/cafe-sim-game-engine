@@ -6,12 +6,14 @@ use crate::{
 
 mod camera;
 mod cutting_board;
+mod day_night;
 mod edit_mode;
 mod icons;
 mod interaction;
 mod materials;
 mod outline;
 pub mod pause_menu;
+mod post_process;
 mod simulation;
 mod ui_displays;
 mod world;
@@ -21,6 +23,7 @@ use cutting_board::{
     ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
     update_cutting_board_menu_rotation,
 };
+use day_night::{TimeOfDay, update_time_of_day, update_sun_transform, update_sun_properties};
 use edit_mode::{
     PlacementPreviewEntity, cleanup_placement_preview, handle_edit_mode_click,
     setup_placement_preview, toggle_edit_mode, toggle_placement_object, update_placement_preview,
@@ -33,6 +36,7 @@ use pause_menu::{
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
     update_slider_label,
 };
+use post_process::EdgeDetectionPlugin;
 use simulation::{
     display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
     toggle_crosshair, update_cooking_display_rotation, update_cooking_displays,
@@ -40,8 +44,9 @@ use simulation::{
 };
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
-    setup_position_display, update_dynamic_backgrounds, update_fps_display,
+    setup_position_display, setup_time_display, update_dynamic_backgrounds, update_fps_display,
     update_interaction_info_display, update_keybinds_display, update_position_display,
+    update_time_display,
 };
 
 pub struct SimulationPlugin;
@@ -75,6 +80,7 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
+        app.add_plugins(EdgeDetectionPlugin);
         app.add_event::<InteractableClicked>();
         app.add_systems(
             OnEnter(AppState::InGame),
@@ -82,6 +88,7 @@ impl Plugin for SimulationPlugin {
                 setup,
                 setup_keybinds_display,
                 setup_fps_display,
+                setup_time_display,
                 setup_interaction_info_display,
                 setup_position_display,
             ),
@@ -91,6 +98,11 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             handle_movement
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
+        app.add_systems(
+            Update,
+            (update_time_of_day, update_sun_transform, update_sun_properties)
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(
@@ -155,6 +167,10 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             update_fps_display.run_if(in_state(AppState::InGame)),
+        );
+        app.add_systems(
+            Update,
+            update_time_display.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,
@@ -227,6 +243,7 @@ impl Plugin for SimulationPlugin {
         app.init_state::<SimulationState>();
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
+        app.init_resource::<TimeOfDay>();
         app.init_resource::<PlacementPreviewEntity>();
         app.init_resource::<ActiveCuttingBoardMenu>();
         app.init_resource::<SvgTextureCache>();

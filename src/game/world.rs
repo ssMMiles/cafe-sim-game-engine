@@ -1,10 +1,11 @@
 use bevy::light::NotShadowCaster;
-use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::pbr::{DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension};
 use bevy::render::alpha::AlphaMode;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 use bevy::{log, prelude::*};
 
+use super::day_night::Sun;
 use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
 use super::materials::PendingMaterial;
 use super::{GameEntity, simulation::TableMarker};
@@ -40,7 +41,7 @@ pub fn setup(
     log::info!("Setting up the game world");
 
     spawn_lighting(commands, meshes, materials);
-    spawn_environment(commands, meshes, toon_materials);
+    spawn_environment(commands, meshes, toon_materials, asset_server);
     spawn_cafe_building(commands, meshes, toon_materials);
     spawn_table(commands, asset_server);
 }
@@ -75,9 +76,10 @@ fn spawn_lighting(
 
     commands.spawn((
         GameEntity,
+        Sun,
         DirectionalLight {
-            color: Color::srgb(0.6, 0.7, 1.0), // Saturated blue for moonlight hue
-            illuminance: 25.0, // Very low illuminance for dark nighttime
+            color: Color::srgb(0.3, 0.3, 0.4), // Saturated blue for moonlight hue
+            illuminance: 20.0, // Very low illuminance for dark nighttime
             shadows_enabled: true,
             ..default()
         },
@@ -104,8 +106,8 @@ fn spawn_lighting(
 
     // Add ambient light for diffusion
     commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.4, 0.5, 0.6), // Cool ambient to match moonlight
-        brightness: 5.0,                   // Very low ambient for nighttime
+        color: Color::srgb(0.05, 0.05, 0.1), // Very dim, slightly blue for nighttime
+        brightness: 0.02,                     // Very low ambient for dark nighttime
         affects_lightmapped_meshes: true,
     });
 
@@ -114,8 +116,8 @@ fn spawn_lighting(
         GameEntity,
         PointLight {
             color: Color::srgb(1.0, 0.7, 0.4), // Warm orange/yellow lamp
-            intensity: 2000.0, // Bright lamp
-            range: 250.0,
+            intensity: 10000.0, // Bright lamp
+            range: 2500.0,
             radius: 0.5,
             shadows_enabled: true,
             ..default()
@@ -128,6 +130,7 @@ fn spawn_environment(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
+    asset_server: &Res<AssetServer>,
 ) {
     // Test sphere
     let sphere = meshes.add(Sphere::default());
@@ -165,17 +168,37 @@ fn spawn_environment(
         })),
         MeshMaterial3d(toon_materials.add(ExtendedMaterial {
             base: StandardMaterial {
-                base_color: Color::srgb(0.2, 0.7, 0.2),
+                base_color: Color::srgb(0.74, 0.447, 0.207),
                 perceptual_roughness: 1.0,
                 metallic: 0.0,
                 reflectance: 0.0,
                 ..Default::default()
             },
             extension: ToonMaterial {
-                color: Color::srgb(0.2, 0.7, 0.2).into(),
+                color: Color::srgb(0.74, 0.447, 0.207).into(),
             },
         })),
         Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+        GlobalTransform::default(),
+    ));
+
+    let rock_mesh: Handle<Mesh> = asset_server.load("meshes/rock/bigrock.gltf#Mesh0/Primitive0");
+    commands.spawn((
+        GameEntity,
+        Mesh3d(rock_mesh),
+        MeshMaterial3d(toon_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb(0.5, 0.5, 0.5),
+                perceptual_roughness: 1.0,
+                metallic: 0.0,
+                reflectance: 0.0,
+                ..Default::default()
+            },
+            extension: ToonMaterial {
+                color: Color::srgb(0.5, 0.5, 0.5).into(),
+            },
+        })),
+        Transform::from_translation(Vec3::new(-10.0, 0.0, -10.0)).with_scale(Vec3::splat(2.0)),
         GlobalTransform::default(),
     ));
 }
@@ -190,14 +213,14 @@ fn spawn_cafe_building(
 
     let brown_material = toon_materials.add(ExtendedMaterial {
         base: StandardMaterial {
-            base_color: Color::srgb(0.8, 0.3, 0.3),
+            base_color: Color::srgb(0.340, 0.0782, 0.0782),
             perceptual_roughness: 1.0,
             metallic: 0.0,
             reflectance: 0.0,
             ..Default::default()
         },
         extension: ToonMaterial {
-            color: Color::srgb(0.8, 0.3, 0.3).into(),
+            color: Color::srgb(0.38, 0.26, 0.05).into(),
         },
     });
 

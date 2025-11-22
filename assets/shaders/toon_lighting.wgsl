@@ -25,6 +25,15 @@ struct ToonMaterial {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> toon_material: ToonMaterial;
 
+// Helper function to quantize a color into discrete bands
+fn quantize_color(color: vec3<f32>, bands: f32) -> vec3<f32> {
+    return vec3<f32>(
+        floor(color.r * bands) / bands,
+        floor(color.g * bands) / bands,
+        floor(color.b * bands) / bands
+    );
+}
+
 @fragment
 fn fragment(
     in: VertexOutput,
@@ -81,7 +90,9 @@ fn fragment(
             );
         }
 
-        lit_color += diffuse * shadow;
+        // Quantize this light's contribution before accumulating
+        let light_contribution = diffuse * shadow;
+        lit_color += quantize_color(light_contribution, 5.0);
     }
 
     // Process point lights using clustering
@@ -130,20 +141,18 @@ fn fragment(
             );
         }
 
-        lit_color += diffuse * shadow;
+        // Quantize this light's contribution before accumulating
+        let light_contribution = diffuse * shadow;
+        lit_color += quantize_color(light_contribution, 5.0);
     }
 
-    // Add ambient light (simple, no Fresnel)
-    lit_color += base_color * view_bindings::lights.ambient_color.rgb;
+    // Add ambient light (quantized separately)
+    let ambient_contribution = base_color * view_bindings::lights.ambient_color.rgb;
+    lit_color += quantize_color(ambient_contribution, 5.0);
 
-    // Apply Reinhard tone mapping to compress HDR values to 0-1 range
-    lit_color = lit_color / (lit_color + vec3<f32>(1.0));
-
-    // Apply cel-shading by quantizing each RGB channel independently
-    let bands = 5.0;
-    lit_color.r = floor(lit_color.r * bands) / bands;
-    lit_color.g = floor(lit_color.g * bands) / bands;
-    lit_color.b = floor(lit_color.b * bands) / bands;
+    // Note: Each light is now quantized individually before accumulation,
+    // so we don't need to quantize the final result. This creates more
+    // distinct light layers and reduces muddy transitions.
 
     out.color = vec4<f32>(lit_color, pbr_input.material.base_color.a);
 #endif
