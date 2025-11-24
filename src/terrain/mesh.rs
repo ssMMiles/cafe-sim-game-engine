@@ -3,7 +3,12 @@ use bevy::{
     mesh::{Indices, Mesh, PrimitiveTopology},
 };
 
-pub fn generate_terrain_topology(width: usize, height: usize) -> Mesh {
+pub fn generate_terrain_topology(
+    width: usize,
+    height: usize,
+    tile_size: (f32, f32),
+    max_height: f32,
+) -> Mesh {
     let vertex_count = width * height;
     let mut indices = Vec::new();
 
@@ -35,14 +40,12 @@ pub fn generate_terrain_topology(width: usize, height: usize) -> Mesh {
     mesh.insert_indices(Indices::U32(indices));
 
     // Generate actual XZ positions (shader will add Y displacement)
-    // This ensures the AABB is correct for frustum culling
     let mut positions = Vec::with_capacity(vertex_count);
-    let tile_size = (0.5_f32, 0.5_f32); // Default tile size, matches TILE_SIZE constant
     for y in 0..height {
         for x in 0..width {
             positions.push([
                 x as f32 * tile_size.0,
-                0.0, // Approximate middle height (shader will set actual height)
+                0.0, // Shader will set actual height
                 y as f32 * tile_size.1,
             ]);
         }
@@ -54,4 +57,22 @@ pub fn generate_terrain_topology(width: usize, height: usize) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
 
     mesh
+}
+
+/// Calculate the AABB for the terrain after GPU displacement
+pub fn calculate_terrain_aabb(
+    width: usize,
+    height: usize,
+    tile_size: (f32, f32),
+    max_height: f32,
+) -> bevy::camera::primitives::Aabb {
+    use bevy::{camera::primitives::Aabb, math::{Vec3}};
+
+    let terrain_width = (width - 1) as f32 * tile_size.0;
+    let terrain_depth = (height - 1) as f32 * tile_size.1;
+
+    Aabb::from_min_max(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(terrain_width, max_height, terrain_depth),
+    )
 }

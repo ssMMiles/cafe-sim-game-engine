@@ -1,6 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
-    camera::visibility::NoFrustumCulling,
+    camera::primitives::Aabb,
     mesh::{Indices, PrimitiveTopology},
     pbr::ExtendedMaterial,
     prelude::*,
@@ -9,7 +9,7 @@ use image::{DynamicImage, ImageBuffer, Rgba};
 
 use crate::terrain::{
     material::{TerrainConfig, TerrainMaterial},
-    mesh::generate_terrain_topology,
+    mesh::{calculate_terrain_aabb, generate_terrain_topology},
 };
 
 mod material;
@@ -45,16 +45,27 @@ fn create_heightmap_mesh(
             //     base_color: Color::WHITE,
             //     ..Default::default()
             // };
-
+            
             let indices_mesh = heightmap_data.to_mesh();
             let terrain_material = TerrainMaterial {
                 heightmap: image_handle.0.clone(),
                 config: TerrainConfig {
                     grid_size: Vec2::new(heightmap_data.width as f32, heightmap_data.height as f32),
-                    tile_size: Vec2::new(1.0, 1.0),
-                    height_scale: 10.0,
+                    tile_size : Vec2::new(
+                        heightmap_data.tile_size.0,
+                        heightmap_data.tile_size.1,
+                    ),
+                    height_scale: heightmap_data.height_scale,
                 },
             };
+
+            // Calculate proper AABB for frustum culling
+            let aabb = calculate_terrain_aabb(
+                heightmap_data.width,
+                heightmap_data.height,
+                heightmap_data.tile_size,
+                heightmap_data.height_scale,
+            );
 
             commands.entity(entity).insert((
                 heightmap_data,
@@ -71,7 +82,7 @@ fn create_heightmap_mesh(
                 })),
                 Transform::default(),
                 GlobalTransform::default(),
-                NoFrustumCulling,
+                aabb,
             ));
         }
     }
@@ -125,12 +136,15 @@ fn generate_heightmap_mesh_naive(heightmap_data: &HeightmapData) -> Mesh {
     mesh
 }
 
-const TILE_SIZE: (f32, f32) = (0.5, 0.5);
+const TILE_SIZE: (f32, f32) = (1.0, 1.0);
+const HEIGHT_SCALE: f32 = 10.0;
 
 #[derive(Debug, Component, Reflect)]
 pub struct HeightmapData {
     pub tiles: Vec<Vec<f32>>,
+
     pub tile_size: (f32, f32),
+    pub height_scale: f32,
 
     pub width: usize,
     pub height: usize,
@@ -158,12 +172,13 @@ impl HeightmapData {
             tiles,
             width: width as usize,
             height: height as usize,
+            height_scale: HEIGHT_SCALE,
             tile_size: TILE_SIZE,
         }
     }
 
     pub fn to_mesh(&self) -> Mesh {
-        generate_terrain_topology(self.width, self.height)
+        generate_terrain_topology(self.width, self.height, self.tile_size, self.height_scale)
     }
 
     pub fn save_to_file(&self, path: &str) {
@@ -192,6 +207,7 @@ impl HeightmapData {
             tiles,
             width,
             height,
+            height_scale: HEIGHT_SCALE,
             tile_size: TILE_SIZE,
         }
     }
