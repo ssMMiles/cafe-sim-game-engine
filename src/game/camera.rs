@@ -126,14 +126,15 @@ pub fn setup_camera(
     )).id();
 
     // Add atmosphere components separately to avoid bundle size limit
-    commands.entity(camera_entity).insert((
-        Atmosphere::EARTH,
-        AtmosphereSettings::default(),
-        Exposure { ev100: 13.0 },
-        Tonemapping::AcesFitted,
-        Bloom::NATURAL,
-        AtmosphereEnvironmentMapLight::default(),
-    ));
+    // DISABLED: Atmosphere system conflicts with render-to-texture setup
+    // commands.entity(camera_entity).insert((
+    //     Atmosphere::EARTH,
+    //     AtmosphereSettings::default(),
+    //     Exposure { ev100: 13.0 },
+    //     Tonemapping::AcesFitted,
+    //     Bloom::NATURAL,
+    //     AtmosphereEnvironmentMapLight::default(),
+    // ));
 
     let cube_size = 4.0;
     let cube_handle = meshes.add(Cuboid::new(cube_size, cube_size, cube_size));

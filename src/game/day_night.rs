@@ -4,7 +4,7 @@ use bevy::prelude::*;
 pub const SECONDS_PER_DAY: f32 = 86400.0; // 24 hours * 60 minutes * 60 seconds
 pub const DAY_CYCLE_DURATION: f32 = 1800.0; // 30 real minutes = 1 game day
 pub const TIME_SCALE: f32 = SECONDS_PER_DAY / DAY_CYCLE_DURATION; // 48x speed multiplier
-pub const STARTING_TIME: f32 = 36000.0; // 10am in seconds (10 * 3600)
+pub const STARTING_TIME: f32 = 56000.0; // 10am in seconds (10 * 3600)
 pub const SUN_DISTANCE: f32 = 5000.0; // Distance from origin for sun position
 
 /// Resource to track the current time of day
@@ -147,5 +147,5 @@ fn get_sun_illuminance(_seconds: f32) -> f32 {
     // Using realistic sunlight illuminance for atmosphere system
     // Bevy's lux::RAW_SUNLIGHT is approximately 128,000 lux
     // Using a slightly lower value that still works well with atmosphere
-    100_000.0
+    100_0.0
 }

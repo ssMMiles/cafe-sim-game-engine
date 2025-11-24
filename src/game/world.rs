@@ -5,6 +5,8 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 use bevy::{log, prelude::*};
 
+use crate::terrain::Heightmap;
+
 use super::day_night::Sun;
 use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
 use super::materials::PendingMaterial;
@@ -159,28 +161,34 @@ fn spawn_environment(
     ));
 
     // Ground plane
-    commands.spawn((
-        GameEntity,
-        Mesh3d(meshes.add(Plane3d {
-            normal: Dir3::Y,
-            half_size: Vec2 { x: 100.0, y: 100.0 },
-            ..Default::default()
-        })),
-        MeshMaterial3d(toon_materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb(0.74, 0.447, 0.207),
-                perceptual_roughness: 1.0,
-                metallic: 0.0,
-                reflectance: 0.0,
-                ..Default::default()
-            },
-            extension: ToonMaterial {
-                color: Color::srgb(0.74, 0.447, 0.207).into(),
-            },
-        })),
-        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
-        GlobalTransform::default(),
-    ));
+    // commands.spawn((
+    //     GameEntity,
+    //     Mesh3d(meshes.add(Plane3d {
+    //         normal: Dir3::Y,
+    //         half_size: Vec2 { x: 100.0, y: 100.0 },
+    //         ..Default::default()
+    //     })),
+    //     MeshMaterial3d(toon_materials.add(ExtendedMaterial {
+    //         base: StandardMaterial {
+    //             base_color: Color::srgb(0.74, 0.447, 0.207),
+    //             perceptual_roughness: 1.0,
+    //             metallic: 0.0,
+    //             reflectance: 0.0,
+    //             ..Default::default()
+    //         },
+    //         extension: ToonMaterial {
+    //             color: Color::srgb(0.74, 0.447, 0.207).into(),
+    //         },
+    //     })),
+    //     Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+    //     GlobalTransform::default(),
+    // ));
+
+    let heightmap = commands.spawn(
+        (
+            Heightmap(asset_server.load("heightmaps/2.png")),
+        )
+    ).id();
 
     let rock_mesh: Handle<Mesh> = asset_server.load("meshes/rock/bigrock.gltf#Mesh0/Primitive0");
     commands.spawn((

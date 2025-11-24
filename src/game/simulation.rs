@@ -9,6 +9,7 @@ use super::materials::create_arc_mesh;
 use super::{GameEntity, SimulationConfig};
 use crate::game::world::ToonMaterial;
 use crate::settings::UserSettings;
+use crate::terrain::Heightmap;
 
 #[derive(Component)]
 pub struct InteractionText;

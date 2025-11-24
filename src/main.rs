@@ -4,6 +4,7 @@ use bevy::{prelude::*, window::{PresentMode, Window, WindowPlugin}};
 mod game;
 mod menu;
 mod settings;
+mod terrain;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
 pub enum AppState {
@@ -26,6 +27,7 @@ fn main() {
         .add_plugins(settings::SettingsPlugin)
         .add_plugins(menu::MenuPlugin)
         .add_plugins(game::SimulationPlugin)
+        .add_plugins(terrain::HeightmapPlugin)
         .add_systems(Startup, initialize)
         .init_state::<AppState>()
         .run();
