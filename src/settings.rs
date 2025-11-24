@@ -10,7 +10,7 @@ pub mod slider_constants {
 // Setting value ranges
 pub mod setting_ranges {
     pub const MOUSE_SENSITIVITY: (f32, f32) = (0.001, 0.01);
-    pub const MOVEMENT_SPEED: (f32, f32) = (0.05, 0.3);
+    pub const MOVEMENT_SPEED: (f32, f32) = (0.05, 5.0);
     pub const THIRD_PERSON_DISTANCE: (f32, f32) = (5.0, 50.0);
 }
 
