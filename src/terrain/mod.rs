@@ -1,11 +1,25 @@
 use bevy::{
     asset::RenderAssetUsages,
-    camera::primitives::Aabb,
     mesh::{Indices, PrimitiveTopology},
     pbr::ExtendedMaterial,
     prelude::*,
+    render::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
+        gpu_readback::{Readback, ReadbackComplete},
+        render_asset::RenderAssets,
+        render_graph::{self, RenderGraph, RenderLabel},
+        render_resource::*,
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        texture::GpuImage,
+        Render, RenderApp, RenderSystems,
+    },
 };
 use image::{DynamicImage, ImageBuffer, Rgba};
+use std::{
+    borrow::Cow,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::terrain::{
     material::{TerrainConfig, TerrainMaterial},
@@ -18,74 +32,225 @@ mod mesh;
 #[derive(Debug, Component)]
 pub struct Heightmap(pub Handle<Image>);
 
+// Marker components for readback tracking
+#[derive(Component)]
+struct PositionReadback {
+    terrain_entity: Entity,
+}
+
+#[derive(Component)]
+struct NormalReadback {
+    terrain_entity: Entity,
+}
+
+// Component to track mesh that's waiting for readback to complete before rendering
+#[derive(Component)]
+struct PendingTerrainMesh {
+    indices: Vec<u32>,
+    width: usize,
+    height: usize,
+    material_handle: Handle<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    positions: Option<Vec<[f32; 3]>>,
+    normals: Option<Vec<[f32; 3]>>,
+}
+
+// Resource that gets extracted from main world to render world
+#[derive(Resource, Clone, ExtractResource)]
+pub struct TerrainComputeData {
+    pub heightmap: Handle<Image>,
+    pub position_buffer: Handle<ShaderStorageBuffer>,
+    pub normal_buffer: Handle<ShaderStorageBuffer>,
+    pub config: TerrainConfig,
+    pub needs_recompute: bool,
+}
+
+// Render world resources for compute pipeline
+#[derive(Resource)]
+struct TerrainComputePipeline {
+    bind_group_layout: BindGroupLayout,
+    pipeline_id: CachedComputePipelineId,
+}
+
+#[derive(Resource)]
+struct TerrainComputeBindGroup(BindGroup);
+
+// Render graph label for terrain compute node
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct TerrainComputeLabel;
+
 pub struct HeightmapPlugin;
 impl Plugin for HeightmapPlugin {
     fn build(&self, app: &mut App) {
-        // register custom terrainmaterial
+        // Register custom terrain material
         app.add_plugins(MaterialPlugin::<
             ExtendedMaterial<StandardMaterial, TerrainMaterial>,
         >::default());
+
+        // Enable GPU readback for copying compute results to CPU
+        // app.add_plugins(GpuReadbackPlugin::default());
+
+        // Extract compute data to render world
+        app.add_plugins(ExtractResourcePlugin::<TerrainComputeData>::default());
+
+        // Main world system
         app.add_systems(Update, create_heightmap_mesh);
+
+        // Readback observers to handle GPU->CPU data transfer
+        app.add_observer(handle_position_readback);
+        app.add_observer(handle_normal_readback);
+
+        // Setup render world
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return; // No rendering in headless mode
+        };
+
+        render_app
+            .add_systems(
+                Render,
+                setup_compute_pipeline.in_set(RenderSystems::PrepareAssets),
+            )
+            .add_systems(
+                Render,
+                prepare_compute_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+            );
+
+        // Add compute node to render graph
+        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
+        render_graph.add_node(TerrainComputeLabel, TerrainComputeNode::default());
+        render_graph.add_node_edge(
+            TerrainComputeLabel,
+            bevy::render::graph::CameraDriverLabel,
+        );
     }
 }
 
 fn create_heightmap_mesh(
-    heightmap_data: Query<(&Heightmap, Entity), Without<Mesh3d>>,
+    heightmap_query: Query<(&Heightmap, Entity), Without<Mesh3d>>,
     images: Res<Assets<Image>>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
 ) {
-    for (image_handle, entity) in heightmap_data.iter() {
-        if let Some(image) = images.get(&image_handle.0) {
-            let heightmap_data = HeightmapData::from_image(&image);
+    for (heightmap, entity) in heightmap_query.iter() {
+        let Some(image) = images.get(&heightmap.0) else {
+            continue;
+        };
 
-            // let mesh = generate_heightmap_mesh_naive(&heightmap_data);
-            // let material = StandardMaterial {
-            //     base_color: Color::WHITE,
-            //     ..Default::default()
-            // };
-            
-            let indices_mesh = heightmap_data.to_mesh();
-            let terrain_material = TerrainMaterial {
-                heightmap: image_handle.0.clone(),
-                config: TerrainConfig {
-                    grid_size: Vec2::new(heightmap_data.width as f32, heightmap_data.height as f32),
-                    tile_size : Vec2::new(
-                        heightmap_data.tile_size.0,
-                        heightmap_data.tile_size.1,
-                    ),
-                    height_scale: heightmap_data.height_scale,
-                },
-            };
+        let width = image.width() as usize;
+        let height = image.height() as usize;
+        let vertex_count = width * height;
 
-            // Calculate proper AABB for frustum culling
-            let aabb = calculate_terrain_aabb(
-                heightmap_data.width,
-                heightmap_data.height,
-                heightmap_data.tile_size,
-                heightmap_data.height_scale,
-            );
+        // Create storage buffers for compute shader to fill
+        let positions = vec![Vec4::ZERO; vertex_count];
+        let normals = vec![Vec4::new(0.0, 1.0, 0.0, 0.0); vertex_count];
 
-            commands.entity(entity).insert((
-                heightmap_data,
-                Mesh3d(meshes.add(indices_mesh)),
-                MeshMaterial3d(terrain_materials.add(ExtendedMaterial {
-                    base: StandardMaterial {
-                        base_color: Color::srgb(1.0, 0.1, 0.1),
-                        perceptual_roughness: 1.0,
-                        metallic: 0.0,
-                        reflectance: 0.0,
-                        ..Default::default()
-                    },
-                    extension: terrain_material,
-                })),
-                Transform::default(),
-                GlobalTransform::default(),
-                aabb,
-            ));
+        // Create buffers with COPY_SRC usage for GPU->CPU readback
+        let mut position_buffer_data = ShaderStorageBuffer::from(positions);
+        position_buffer_data.buffer_description.usage |= BufferUsages::COPY_SRC;
+        let position_buffer = storage_buffers.add(position_buffer_data);
+
+        let mut normal_buffer_data = ShaderStorageBuffer::from(normals);
+        normal_buffer_data.buffer_description.usage |= BufferUsages::COPY_SRC;
+        let normal_buffer = storage_buffers.add(normal_buffer_data);
+
+        // Create terrain config
+        let config = TerrainConfig {
+            grid_size: Vec2::new(width as f32, height as f32),
+            tile_size: Vec2::new(TILE_SIZE.0, TILE_SIZE.1),
+            height_scale: HEIGHT_SCALE,
+        };
+
+        // Create material (minimal now - vertex data comes from mesh attributes)
+        let terrain_material = TerrainMaterial {
+            config: config.clone(),
+        };
+
+        let material = terrain_materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb(1.0, 0.1, 0.1),
+                perceptual_roughness: 1.0,
+                metallic: 0.0,
+                reflectance: 0.0,
+                ..default()
+            },
+            extension: terrain_material,
+        });
+
+        // Calculate AABB
+        let aabb = calculate_terrain_aabb(width, height, TILE_SIZE, HEIGHT_SCALE);
+
+        // Generate indices but don't create mesh yet - wait for readback
+        let indices = generate_terrain_indices(width, height);
+
+        // Insert components (but NOT Mesh3d/MeshMaterial3d yet - wait for readback)
+        commands.entity(entity).insert((
+            Transform::default(),
+            GlobalTransform::default(),
+            aabb,
+            PendingTerrainMesh {
+                indices,
+                width,
+                height,
+                material_handle: material,
+                positions: None,
+                normals: None,
+            },
+        ));
+
+        // Store compute data (will be extracted to render world)
+        commands.insert_resource(TerrainComputeData {
+            heightmap: heightmap.0.clone(),
+            position_buffer: position_buffer.clone(),
+            normal_buffer: normal_buffer.clone(),
+            config: config.clone(),
+            needs_recompute: true, // Compute on first frame
+        });
+
+        // Spawn readback entities to copy GPU data back to CPU after compute
+        commands.spawn((
+            Readback::buffer(position_buffer),
+            PositionReadback {
+                terrain_entity: entity,
+            },
+        ));
+
+        commands.spawn((
+            Readback::buffer(normal_buffer),
+            NormalReadback {
+                terrain_entity: entity,
+            },
+        ));
+    }
+}
+
+// Generate indices for terrain grid
+fn generate_terrain_indices(width: usize, height: usize) -> Vec<u32> {
+    let mut indices = Vec::new();
+    for y in 0..(height - 1) {
+        for x in 0..(width - 1) {
+            let top_left = (x * height + y) as u32;
+            let top_right = ((x + 1) * height + y) as u32;
+            let bottom_left = (x * height + (y + 1)) as u32;
+            let bottom_right = ((x + 1) * height + (y + 1)) as u32;
+
+            // First triangle
+            indices.push(top_left);
+            indices.push(bottom_left);
+            indices.push(top_right);
+
+            // Second triangle
+            indices.push(top_right);
+            indices.push(bottom_left);
+            indices.push(bottom_right);
         }
     }
+
+    indices
+}
+
+// No longer needed - mesh creation deferred until readback
+fn _create_terrain_mesh_shell(_width: usize, _height: usize) -> Mesh {
+    unimplemented!("Mesh creation now happens after readback completes")
 }
 
 fn generate_heightmap_mesh_naive(heightmap_data: &HeightmapData) -> Mesh {
@@ -252,5 +417,322 @@ impl HeightmapData {
 impl Default for HeightmapData {
     fn default() -> Self {
         HeightmapData::flat(25, 25)
+    }
+}
+
+// ==== READBACK OBSERVERS ====
+
+fn handle_position_readback(
+    trigger: On<ReadbackComplete>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    readback_query: Query<&PositionReadback>,
+    mut pending_query: Query<&mut PendingTerrainMesh>,
+) {
+    let Ok(readback) = readback_query.get(trigger.entity) else {
+        return;
+    };
+
+    // Decode positions from GPU data
+    let positions_vec4: Vec<Vec4> = trigger.event().to_shader_type();
+
+    // Convert to mesh attribute format [f32; 3]
+    let positions: Vec<[f32; 3]> = positions_vec4
+        .iter()
+        .map(|v| [v.x, v.y, v.z])
+        .collect();
+
+    info!("Received {} computed positions from GPU", positions.len());
+
+    // Store positions and check if we can create the mesh
+    if let Ok(mut pending) = pending_query.get_mut(readback.terrain_entity) {
+        pending.positions = Some(positions);
+
+        // If both position and normal are ready, create the mesh!
+        if let (Some(pos), Some(norm)) = (&pending.positions, &pending.normals) {
+            info!("Both readbacks complete - creating terrain mesh");
+
+            // Create mesh with real data
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            mesh.insert_indices(Indices::U32(pending.indices.clone()));
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm.clone());
+
+            // Generate UVs based on grid position (required for PBR pipeline)
+            let width = pending.width;
+            let height = pending.height;
+            let uvs: Vec<[f32; 2]> = (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| [
+                        x as f32 / (width - 1) as f32,
+                        y as f32 / (height - 1) as f32,
+                    ])
+                })
+                .collect();
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+
+            let mesh_handle = meshes.add(mesh);
+
+            // Insert rendering components
+            commands.entity(readback.terrain_entity).insert((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(pending.material_handle.clone()),
+                Visibility::Inherited,
+            )).remove::<PendingTerrainMesh>();
+        }
+    }
+
+    // Cleanup: despawn the readback entity (one-time operation)
+    commands.entity(trigger.entity).despawn();
+}
+
+fn handle_normal_readback(
+    trigger: On<ReadbackComplete>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    readback_query: Query<&NormalReadback>,
+    mut pending_query: Query<&mut PendingTerrainMesh>,
+) {
+    let Ok(readback) = readback_query.get(trigger.entity) else {
+        return;
+    };
+
+    // Decode normals from GPU data
+    let normals_vec4: Vec<Vec4> = trigger.event().to_shader_type();
+
+    // Convert to mesh attribute format [f32; 3]
+    let normals: Vec<[f32; 3]> = normals_vec4
+        .iter()
+        .map(|v| [v.x, v.y, v.z])
+        .collect();
+
+    info!("Received {} computed normals from GPU", normals.len());
+
+    // Store normals and check if we can create the mesh
+    if let Ok(mut pending) = pending_query.get_mut(readback.terrain_entity) {
+        pending.normals = Some(normals);
+
+        // If both position and normal are ready, create the mesh!
+        if let (Some(pos), Some(norm)) = (&pending.positions, &pending.normals) {
+            info!("Both readbacks complete - creating terrain mesh");
+
+            // Create mesh with real data
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            mesh.insert_indices(Indices::U32(pending.indices.clone()));
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm.clone());
+
+            // Generate UVs based on grid position (required for PBR pipeline)
+            let width = pending.width;
+            let height = pending.height;
+            let uvs: Vec<[f32; 2]> = (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| [
+                        x as f32 / (width - 1) as f32,
+                        y as f32 / (height - 1) as f32,
+                    ])
+                })
+                .collect();
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+
+            let mesh_handle = meshes.add(mesh);
+
+            // Insert rendering components
+            commands.entity(readback.terrain_entity).insert((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(pending.material_handle.clone()),
+                Visibility::Inherited,
+            )).remove::<PendingTerrainMesh>();
+        }
+    }
+
+    // Cleanup: despawn the readback entity (one-time operation)
+    commands.entity(trigger.entity).despawn();
+}
+
+// ==== RENDER WORLD SYSTEMS ====
+
+fn setup_compute_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    render_device: Res<RenderDevice>,
+    mut pipeline_cache: ResMut<PipelineCache>,
+    existing_pipeline: Option<Res<TerrainComputePipeline>>,
+) {
+    // Only setup once
+    if existing_pipeline.is_some() {
+        return;
+    }
+
+    use bevy::render::render_resource::binding_types::*;
+
+    // Create bind group layout matching compute shader
+    let bind_group_layout = render_device.create_bind_group_layout(
+        Some("terrain_compute_layout"),
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                uniform_buffer::<TerrainConfig>(false),
+                storage_buffer::<Vec4>(false), // positions
+                storage_buffer::<Vec4>(false), // normals
+            ),
+        ),
+    );
+
+    // Load compute shader
+    let shader = asset_server.load("shaders/terrain_compute.wgsl");
+
+    // Queue pipeline for compilation
+    let pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("terrain_compute_pipeline".into()),
+        layout: vec![bind_group_layout.clone()],
+        shader,
+        shader_defs: vec![],
+        entry_point: Some(Cow::Borrowed("compute_terrain")),
+        push_constant_ranges: vec![],
+        zero_initialize_workgroup_memory: false,
+    });
+
+    commands.insert_resource(TerrainComputePipeline {
+        bind_group_layout,
+        pipeline_id,
+    });
+}
+
+fn prepare_compute_bind_groups(
+    mut commands: Commands,
+    pipeline: Option<Res<TerrainComputePipeline>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    gpu_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    terrain_data: Option<Res<TerrainComputeData>>,
+    existing_bind_group: Option<Res<TerrainComputeBindGroup>>,
+    mut uniform_buffer: Local<Option<UniformBuffer<TerrainConfig>>>,
+    mut bind_group_created: Local<bool>,
+) {
+    let Some(pipeline) = pipeline else { return };
+    let Some(terrain_data) = terrain_data else { return };
+
+    // Skip if bind group already exists
+    if *bind_group_created && existing_bind_group.is_some() {
+        return;
+    }
+
+    // Get GPU resources
+    let Some(position_buffer) = gpu_buffers.get(&terrain_data.position_buffer) else {
+        return;
+    };
+    let Some(normal_buffer) = gpu_buffers.get(&terrain_data.normal_buffer) else {
+        return;
+    };
+    let Some(heightmap_image) = gpu_images.get(&terrain_data.heightmap) else {
+        return;
+    };
+
+    // Create or update uniform buffer (only on first run)
+    if uniform_buffer.is_none() {
+        *uniform_buffer = Some(UniformBuffer::from(terrain_data.config.clone()));
+        let uniform = uniform_buffer.as_mut().unwrap();
+        uniform.write_buffer(&render_device, &render_queue);
+    }
+
+    // Create bind group (only once)
+    let bind_group = render_device.create_bind_group(
+        Some("terrain_compute_bind_group"),
+        &pipeline.bind_group_layout,
+        &BindGroupEntries::sequential((
+            &heightmap_image.texture_view,
+            &heightmap_image.sampler,
+            uniform_buffer.as_ref().unwrap().binding().unwrap(),
+            position_buffer.buffer.as_entire_buffer_binding(),
+            normal_buffer.buffer.as_entire_buffer_binding(),
+        )),
+    );
+
+    commands.insert_resource(TerrainComputeBindGroup(bind_group));
+    *bind_group_created = true;
+}
+
+struct TerrainComputeNode {
+    has_computed: AtomicBool,
+}
+
+impl Default for TerrainComputeNode {
+    fn default() -> Self {
+        Self {
+            has_computed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl render_graph::Node for TerrainComputeNode {
+    fn run(
+        &self,
+        _graph: &mut render_graph::RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), render_graph::NodeRunError> {
+        // Get resources
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline = world.get_resource::<TerrainComputePipeline>();
+        let bind_group = world.get_resource::<TerrainComputeBindGroup>();
+        let terrain_data = world.get_resource::<TerrainComputeData>();
+
+        // Check all resources exist
+        let (Some(pipeline), Some(bind_group), Some(terrain_data)) =
+            (pipeline, bind_group, terrain_data)
+        else {
+            return Ok(()); // Not ready yet
+        };
+
+        // Skip if already computed once
+        if self.has_computed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Skip if no recompute needed
+        if !terrain_data.needs_recompute {
+            return Ok(());
+        }
+
+        // Get compiled pipeline
+        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
+        else {
+            return Ok(()); // Still compiling
+        };
+
+        // Begin compute pass
+        let mut pass = render_context
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("terrain_compute_pass"),
+                timestamp_writes: None,
+            });
+
+        pass.set_bind_group(0, &bind_group.0, &[]);
+        pass.set_pipeline(compute_pipeline);
+
+        // Calculate workgroups (ceil division by workgroup size of 8)
+        let width = terrain_data.config.grid_size.x as u32;
+        let height = terrain_data.config.grid_size.y as u32;
+        let workgroups_x = (width + 7) / 8;
+        let workgroups_y = (height + 7) / 8;
+
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+        // Mark as computed so we don't run again
+        drop(pass);
+        self.has_computed.store(true, Ordering::Relaxed);
+
+        Ok(())
     }
 }

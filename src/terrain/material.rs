@@ -7,11 +7,9 @@ use bevy::{
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct TerrainMaterial {
-    #[texture(100)]
-    #[sampler(101)]
-    pub heightmap: Handle<Image>,
-
-    #[uniform(102)]
+    // Note: Material is now minimal since vertex data comes from mesh attributes
+    // Keeping config for potential future use (e.g., fragment shader effects)
+    #[uniform(100)]
     pub config: TerrainConfig,
 }
 
@@ -26,6 +24,14 @@ impl MaterialExtension for TerrainMaterial {
     fn vertex_shader() -> ShaderRef {
         "shaders/terrain.wgsl".into()
     }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/terrain.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/terrain.wgsl".into() // Custom prepass fragment without normal requirements
+    }                                                                                                                           
 
     fn alpha_mode() -> Option<AlphaMode> {
         Some(AlphaMode::Opaque)
