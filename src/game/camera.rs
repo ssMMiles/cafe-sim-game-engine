@@ -6,24 +6,13 @@ use crate::{
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
-    camera::{visibility::RenderLayers, Exposure},
-    core_pipeline::{
-        prepass::{DepthPrepass, NormalPrepass},
-        tonemapping::Tonemapping,
-    },
-    ecs::query,
+    camera::{visibility::RenderLayers, RenderTarget},
+    core_pipeline::prepass::{DepthPrepass, NormalPrepass},
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
-    light::AtmosphereEnvironmentMapLight,
-    pbr::{Atmosphere, AtmosphereSettings, DistanceFog, FogFalloff},
-    post_process::bloom::Bloom,
     prelude::*,
-    render::{
-        Render,
-        render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}
-    },
-    sprite_render::Material2d,
-    window::PrimaryWindow
+    render::render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
+    window::PrimaryWindow,
 };
 use bevy_modern_pixel_camera::prelude::*;
 
@@ -99,13 +88,8 @@ pub fn setup_camera(
     // entities, unless otherwise specified.
     let camera_entity = commands.spawn((
         Camera3d::default(),
-        Camera {
-            // render before the "main pass" camera
-            // order: -1,
-            target: render_texture_handle.clone().into(),
-            // clear_color: Color::WHITE.into(),
-            ..default()
-        },
+        Camera::default(),
+        RenderTarget::Image(render_texture_handle.clone().into()),
         PlayerCamera {
             velocity: Vec3::ZERO,
             yaw,
@@ -394,7 +378,7 @@ pub fn resize_render_texture_sprite(
 }
 
 pub fn adjust_camera_distance(
-    mut scroll_events: EventReader<MouseWheel>,
+    mut scroll_events: MessageReader<MouseWheel>,
     mut settings: ResMut<UserSettings>,
 ) {
     // Only adjust distance when in third person view

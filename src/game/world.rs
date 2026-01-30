@@ -1,5 +1,4 @@
-use bevy::light::NotShadowCaster;
-use bevy::pbr::{DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::render::alpha::AlphaMode;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
@@ -107,10 +106,10 @@ fn spawn_lighting(
     // ));
 
     // Add ambient light for diffusion
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.05, 0.05, 0.1), // Very dim, slightly blue for nighttime
         brightness: 0.02,                     // Very low ambient for dark nighttime
-        affects_lightmapped_meshes: true,
+        ..default()
     });
 
     // Add warm point light inside the building (lamp)

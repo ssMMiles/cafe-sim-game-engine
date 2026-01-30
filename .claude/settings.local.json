@@ -3,7 +3,16 @@
     "allow": [
       "Bash(cargo check:*)",
       "Bash(xargs:*)",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:bevy.org)",
+      "WebFetch(domain:crates.io)",
+      "Bash(cargo search:*)",
+      "Bash(cargo info:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo doc:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(grep:*)",
+      "Bash(cargo build:*)"
     ],
     "deny": [],
     "ask": [],

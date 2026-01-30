@@ -83,7 +83,7 @@ pub struct TerrainComputeData {
 // Render world resources for compute pipeline
 #[derive(Resource)]
 struct TerrainComputePipeline {
-    bind_group_layout: BindGroupLayout,
+    bind_group_layout: BindGroupLayoutDescriptor,
     pipeline_id: CachedComputePipelineId,
 }
 
@@ -642,9 +642,9 @@ fn setup_compute_pipeline(
 
     use bevy::render::render_resource::binding_types::*;
 
-    // Create bind group layout matching compute shader
-    let bind_group_layout = render_device.create_bind_group_layout(
-        Some("terrain_compute_layout"),
+    // Create bind group layout descriptor matching compute shader
+    let bind_group_layout = BindGroupLayoutDescriptor::new(
+        "terrain_compute_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
@@ -680,6 +680,7 @@ fn setup_compute_pipeline(
 fn prepare_compute_bind_groups(
     mut commands: Commands,
     pipeline: Option<Res<TerrainComputePipeline>>,
+    pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     gpu_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
@@ -718,7 +719,7 @@ fn prepare_compute_bind_groups(
     // Create bind group (only once)
     let bind_group = render_device.create_bind_group(
         Some("terrain_compute_bind_group"),
-        &pipeline.bind_group_layout,
+        &pipeline_cache.get_bind_group_layout(&pipeline.bind_group_layout),
         &BindGroupEntries::sequential((
             &heightmap_image.texture_view,
             &heightmap_image.sampler,

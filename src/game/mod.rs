@@ -82,7 +82,7 @@ impl Plugin for SimulationPlugin {
         app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
         app.add_plugins(EdgeDetectionPlugin);
-        app.add_event::<InteractableClicked>();
+        app.add_message::<InteractableClicked>();
         app.add_systems(
             OnEnter(AppState::InGame),
             (

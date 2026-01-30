@@ -105,7 +105,7 @@ impl ViewNode for EdgeDetectionNode {
 
         let bind_group = render_context.render_device().create_bind_group(
             "edge_detection_bind_group",
-            &edge_pipeline.layout,
+            &pipeline_cache.get_bind_group_layout(&edge_pipeline.layout),
             &BindGroupEntries::sequential((
                 post_process.source,
                 depth_view,
@@ -138,7 +138,7 @@ impl ViewNode for EdgeDetectionNode {
 
 #[derive(Resource)]
 struct EdgeDetectionPipeline {
-    layout: BindGroupLayout,
+    layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     pipeline_id: CachedRenderPipelineId,
 }
@@ -162,9 +162,8 @@ fn init_edge_detection_pipeline(
         ),
     );
 
-    // Create the actual bind group layout
-    let layout =
-        render_device.create_bind_group_layout("edge_detection_bind_group_layout", &layout_entries);
+    // Create the bind group layout descriptor
+    let layout = BindGroupLayoutDescriptor::new("edge_detection_bind_group_layout", &layout_entries);
 
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
 

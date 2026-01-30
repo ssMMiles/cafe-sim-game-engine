@@ -27,7 +27,7 @@ pub struct HoveredOver;
 
 // Single observer function that handles both Interactable and PendingMaterial when scene is ready
 fn on_scene_ready(
-    trigger: Trigger<SceneInstanceReady>,
+    trigger: On<SceneInstanceReady>,
     mut commands: Commands,
     entity_query: Query<(
         Option<&Interactable>,
@@ -38,7 +38,7 @@ fn on_scene_ready(
     children_query: Query<&Children>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let entity = trigger.target();
+    let entity = trigger.entity;
 
     if let Ok((maybe_interactable, maybe_pending_material, maybe_children)) =
         entity_query.get(entity)
