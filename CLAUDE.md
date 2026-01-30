@@ -47,7 +47,7 @@ The game transitions from main menu (2D camera) to in-game (3D camera with free 
 
 ## Memories and Development Notes
 
-- Whenever you make a change that affects the project structure or just something that you find might be important to remember, please write it to your memory file yourself.
+- Whenever you make a change that affects the project structure or just something that you find might be important to remember, please write it to your memory file yourself. Never delete or modify existing memories unless you are correcting a mistake or updating an existing memory with new information. You are free to move previous memories to a different file in a memory directory in order to avoid cluttering the memory file.
 - Always take your time to write clean, well designed and organised code. Do not repeat yourself, but also don't break things up to a ridiculous extent before it is needed.
 - You have full access to the bevy documentation in the local bevy_docs directory.
 - Instead of running the program as it's a visual app you can't interact with, just ask me.

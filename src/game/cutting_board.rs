@@ -195,8 +195,8 @@ pub fn handle_recipe_card_click(
                 if cooking_status.is_none() {
                     // Start cooking this recipe
                     let cooking_time = match recipe_name {
-                        "Cake Slice" => 30.0,
-                        "Cupcake" => 120.0,
+                        "Cake Slice" => 5.0,
+                        "Cupcake" => 10.0,
                         _ => 60.0, // Default
                     };
 

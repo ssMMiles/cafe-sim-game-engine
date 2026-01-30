@@ -88,7 +88,7 @@ pub fn handle_edit_mode_click(
                 distance: 10.0,
                 interactable_type,
             },
-            SceneRoot(table_scene),
+            SceneRoot(table_scene.clone()),
             Transform::from_translation(Vec3::new(pos.x, 0.0, pos.z)).with_scale(Vec3::splat(0.02)),
             GlobalTransform::default(),
         );

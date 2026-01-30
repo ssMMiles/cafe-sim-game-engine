@@ -1,7 +1,7 @@
-use bevy::{log, prelude::*};
+use bevy::{log, prelude::*, picking::mesh_picking::ray_cast::MeshRayCast};
 
 use super::icons::{SvgTextureCache, load_svg_icons};
-use super::interaction::{HoveredOver, Interactable, InteractableType};
+use super::interaction::{HoveredOver, Interactable, InteractableType, spawn_interactable_scene};
 use super::materials::create_arc_mesh;
 use super::{GameEntity, SimulationConfig};
 use crate::settings::UserSettings;
@@ -23,6 +23,12 @@ pub struct FridgeMarker;
 
 #[derive(Component)]
 pub struct CuttingBoardMarker;
+
+#[derive(Component)]
+pub struct CupcakeMarker;
+
+#[derive(Component)]
+pub struct CakeSliceMarker;
 
 #[derive(Component, Debug)]
 pub struct ActiveCooking {
@@ -139,11 +145,13 @@ pub fn update_crosshair_display(
 
 pub fn update_cooking_timers(
     mut commands: Commands,
-    mut cooking_query: Query<(Entity, &mut ActiveCooking)>,
+    mut cooking_query: Query<(Entity, &mut ActiveCooking, &Transform)>,
     time: Res<Time>,
     cooking_display_query: Query<(Entity, &CookingDisplay)>,
+    asset_server: Res<AssetServer>,
+    mut raycast: MeshRayCast,
 ) {
-    for (entity, mut cooking) in cooking_query.iter_mut() {
+    for (entity, mut cooking, table_transform) in cooking_query.iter_mut() {
         // Count down the timer
         cooking.remaining_time -= time.delta_secs();
 
@@ -161,9 +169,107 @@ pub fn update_cooking_timers(
                 }
             }
 
-            // TODO: Spawn finished product
+            // Spawn finished product
+            spawn_food_item(&mut commands, &asset_server, &cooking.recipe_name, entity, table_transform, &mut raycast);
         }
     }
+}
+
+fn spawn_food_item(
+    commands: &mut Commands,
+    asset_server: &Res<AssetServer>,
+    recipe_name: &str,
+    table_entity: Entity,
+    table_transform: &Transform,
+    raycast: &mut MeshRayCast,
+) {
+    let cupcake_scene: Handle<Scene> = asset_server.load("meshes/cupcake.glb#Scene0");
+    
+    // Use raycast to find exact table top position
+    let ray_origin = table_transform.translation + Vec3::new(0.0, 2.0, 0.0);
+    let ray_direction = Dir3::new(Vec3::NEG_Y).unwrap();
+    let ray = Ray3d::new(ray_origin, ray_direction);
+    
+    // Cast the ray
+    let hits = raycast.cast_ray(ray, &Default::default());
+    
+    // Find the table top hit
+    let mut table_top_y = table_transform.translation.y + 0.75; // Default fallback
+    for (entity, hit_data) in hits.iter() {
+        // Check if this is our table
+        if *entity == table_entity {
+            table_top_y = hit_data.point.y;
+            log::info!("Found table top at Y: {}", table_top_y);
+            break;
+        }
+    }
+    
+    // Spawn position on table top with small offset
+    let spawn_position = Vec3::new(
+        table_transform.translation.x,
+        table_top_y - 0.05, // Small offset to prevent clipping
+        table_transform.translation.z
+    );
+    
+    // Spawn food item based on recipe
+    match recipe_name {
+        "Cupcake" => {
+            spawn_interactable_scene(
+                commands,
+                (
+                    GameEntity,
+                    Interactable {
+                        name: "Cupcake".to_string(),
+                        distance: 10.0,
+                        interactable_type: InteractableType::FoodItem("Cupcake".to_string()),
+                    },
+                    super::interaction::Pickuppable,
+                    SceneRoot(cupcake_scene),
+                    Transform::from_translation(spawn_position).with_scale(Vec3::splat(0.08)),
+                    GlobalTransform::default(),
+                    CupcakeMarker,
+                ),
+            );
+        },
+        "Cake Slice" => {
+            spawn_interactable_scene(
+                commands,
+                (
+                    GameEntity,
+                    Interactable {
+                        name: "Cake Slice".to_string(),
+                        distance: 10.0,
+                        interactable_type: InteractableType::FoodItem("Cake Slice".to_string()),
+                    },
+                    super::interaction::Pickuppable,
+                    SceneRoot(cupcake_scene),
+                    Transform::from_translation(spawn_position).with_scale(Vec3::splat(0.045)),
+                    GlobalTransform::default(),
+                    CakeSliceMarker,
+                ),
+            );
+        },
+        _ => {
+            spawn_interactable_scene(
+                commands,
+                (
+                    GameEntity,
+                    Interactable {
+                        name: recipe_name.to_string(),
+                        distance: 10.0,
+                        interactable_type: InteractableType::FoodItem(recipe_name.to_string()),
+                    },
+                    super::interaction::Pickuppable,
+                    SceneRoot(cupcake_scene),
+                    Transform::from_translation(spawn_position).with_scale(Vec3::splat(0.045)),
+                    GlobalTransform::default(),
+                    CupcakeMarker,
+                ),
+            );
+        }
+    }
+    
+    log::info!("Spawned {} on table at position {:?}", recipe_name, spawn_position);
 }
 
 pub fn display_cooking_progress(
@@ -327,11 +433,34 @@ pub fn update_cooking_display_rotation(
     }
 }
 
+pub fn update_held_item_position(
+    camera_query: Query<&Transform, With<super::camera::PlayerCamera>>,
+    mut held_item_query: Query<&mut Transform, (With<super::interaction::HeldItem>, Without<super::camera::PlayerCamera>)>,
+) {
+    if let Ok(camera_transform) = camera_query.single() {
+        for mut item_transform in held_item_query.iter_mut() {
+            // Position the item in front of the camera
+            let camera_forward = camera_transform.forward().as_vec3();
+            let new_position = camera_transform.translation + camera_forward * super::interaction::HELD_ITEM_OFFSET;
+            
+            item_transform.translation = new_position;
+            // Optionally, make the item face the same direction as the camera
+            item_transform.rotation = camera_transform.rotation;
+        }
+    }
+}
+
 pub fn exit(
     mut commands: Commands,
     mut windows: Query<&mut Window>,
     game_entities: Query<Entity, With<GameEntity>>,
+    held_items: Query<Entity, With<super::interaction::HeldItem>>,
 ) {
+    // Remove HeldItem components from any entities that have them
+    for entity in held_items.iter() {
+        commands.entity(entity).remove::<super::interaction::HeldItem>();
+    }
+    
     // Use world::cleanup to despawn all game entities
     super::world::cleanup(commands.reborrow(), game_entities);
 
@@ -363,6 +492,8 @@ pub fn handle_interactable_clicks(
         (Entity, Option<&ActiveCooking>),
         Or<(With<TableMarker>, With<CuttingBoardMarker>)>,
     >,
+    pickuppable_query: Query<&super::interaction::Pickuppable>,
+    held_item_query: Query<&super::interaction::HeldItem>,
 ) {
     for event in click_events.read() {
         let entity = event.entity;
@@ -390,6 +521,27 @@ pub fn handle_interactable_clicks(
                     &menu_owner_query,
                     &mut table_query,
                 );
+            }
+            InteractableType::FoodItem(food_name) => {
+                // Check if this item is pickuppable
+                if pickuppable_query.get(entity).is_ok() {
+                    // Check if this item is already held
+                    if held_item_query.get(entity).is_ok() {
+                        // Drop the item
+                        commands.entity(entity).remove::<super::interaction::HeldItem>();
+                        log::info!("Dropped {}", food_name);
+                    } else {
+                        // Pick up the item
+                        if let Ok(transform) = transform_query.get(entity) {
+                            commands.entity(entity).insert(super::interaction::HeldItem {
+                                original_position: transform.translation,
+                            });
+                            log::info!("Picked up {}", food_name);
+                        }
+                    }
+                } else {
+                    log::info!("Clicked on {} but it's not pickuppable", food_name);
+                }
             }
             _ => {
                 log::warn!(

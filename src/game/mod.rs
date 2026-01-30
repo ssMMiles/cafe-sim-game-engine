@@ -37,7 +37,7 @@ use pause_menu::{
 use simulation::{
     display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
     toggle_crosshair, update_cooking_display_rotation, update_cooking_displays,
-    update_cooking_timers, update_crosshair_display,
+    update_cooking_timers, update_crosshair_display, update_held_item_position,
 };
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
@@ -169,6 +169,7 @@ impl Plugin for SimulationPlugin {
                 display_cooking_progress,
                 update_cooking_displays,
                 update_cooking_display_rotation,
+                update_held_item_position,
             )
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );

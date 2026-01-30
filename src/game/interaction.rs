@@ -10,6 +10,7 @@ pub enum InteractableType {
     Table,
     CuttingBoard,
     RecipeCard(String), // Store the recipe name
+    FoodItem(String),   // Store the food item name
 }
 
 #[derive(Component, Clone)]
@@ -24,6 +25,16 @@ pub struct InteractableParent(pub Entity);
 
 #[derive(Component)]
 pub struct HoveredOver;
+
+#[derive(Component)]
+pub struct Pickuppable;
+
+#[derive(Component)]
+pub struct HeldItem {
+    pub original_position: Vec3,
+}
+
+pub const HELD_ITEM_OFFSET: f32 = 2.0;
 
 // Single observer function that handles both Interactable and PendingMaterial when scene is ready
 fn on_scene_ready(
@@ -137,6 +148,7 @@ pub fn check_interactions(
         Without<super::camera::PlayerCamera>,
     >,
     marked_query: Query<Entity, With<HoveredOver>>,
+    held_item_query: Query<&HeldItem>,
     mut raycast: MeshRayCast,
 ) {
     let mut current_interaction: Option<Entity> = None;
@@ -166,6 +178,11 @@ pub fn check_interactions(
             {
                 // Use parent entity if this is a child mesh, otherwise use the entity itself
                 let target_entity = parent_ref.map(|p| p.0).unwrap_or(*entity);
+
+                // Skip if this item is being held
+                if held_item_query.get(target_entity).is_ok() {
+                    continue;
+                }
 
                 // For distance calculation, use parent position if available, otherwise child position
                 let reference_pos = if let Some(parent) = parent_ref {
