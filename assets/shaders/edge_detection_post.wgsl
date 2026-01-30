@@ -6,6 +6,7 @@ struct EdgeSettings {
     depth_sensitivity: f32,
     normal_sensitivity: f32,
     edge_color: vec4<f32>,
+    enabled: u32,
 }
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;

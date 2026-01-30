@@ -72,9 +72,14 @@ impl ViewNode for EdgeDetectionNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, _settings, settings_index, prepass_textures): QueryItem<Self::ViewQuery>,
+        (view_target, settings, settings_index, prepass_textures): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        // Early return if disabled - must be before post_process_write() to avoid buffer swap
+        if settings.enabled == 0 {
+            return Ok(());
+        }
+
         let edge_pipeline = world.resource::<EdgeDetectionPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
@@ -194,6 +199,8 @@ pub struct EdgeDetectionSettings {
     pub depth_sensitivity: f32,
     pub normal_sensitivity: f32,
     pub edge_color: LinearRgba,
+    /// Set to 0 to disable edge detection, non-zero to enable
+    pub enabled: u32,
 }
 
 impl EdgeDetectionSettings {
@@ -203,6 +210,25 @@ impl EdgeDetectionSettings {
             depth_sensitivity: 2.0,   // Detects depth discontinuities (geometric edges)
             normal_sensitivity: 1.5,  // Detects surface angle changes
             edge_color: LinearRgba::BLACK,
+            enabled: 1,
+        }
+    }
+}
+
+pub fn toggle_edge_detection(mut settings: ResMut<crate::settings::UserSettings>, input: Res<ButtonInput<KeyCode>>) {
+    if input.just_pressed(KeyCode::F2) {
+        settings.toggle_edge_detection();
+    }
+}
+
+pub fn sync_edge_detection_settings(
+    user_settings: Res<crate::settings::UserSettings>,
+    mut query: Query<&mut EdgeDetectionSettings>,
+) {
+    let enabled = if user_settings.edge_detection_enabled { 1 } else { 0 };
+    for mut settings in &mut query {
+        if settings.enabled != enabled {
+            settings.enabled = enabled;
         }
     }
 }

@@ -80,6 +80,7 @@ pub struct UserSettings {
     pub outline_visible: bool,
     pub third_person_view: bool,
     pub third_person_distance: f32,
+    pub edge_detection_enabled: bool,
 }
 
 impl Default for UserSettings {
@@ -94,6 +95,7 @@ impl Default for UserSettings {
             outline_visible: false,
             third_person_view: true,
             third_person_distance: 20.0,
+            edge_detection_enabled: true,
         }
     }
 }
@@ -148,6 +150,11 @@ impl UserSettings {
                 keybind: "Shift+V",
                 current_value: if self.third_person_view { "ON" } else { "OFF" }.to_string(),
             },
+            SettingInfo {
+                name: "Edge Detection",
+                keybind: "F2",
+                current_value: if self.edge_detection_enabled { "ON" } else { "OFF" }.to_string(),
+            },
         ]
     }
 
@@ -177,6 +184,10 @@ impl UserSettings {
             PlacementObjectType::Fridge => PlacementObjectType::CuttingBoard,
             PlacementObjectType::CuttingBoard => PlacementObjectType::Table,
         };
+    }
+
+    pub fn toggle_edge_detection(&mut self) {
+        self.edge_detection_enabled = !self.edge_detection_enabled;
     }
 }
 

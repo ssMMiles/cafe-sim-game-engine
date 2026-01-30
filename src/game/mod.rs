@@ -1,4 +1,4 @@
-use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, pbr::ExtendedMaterial, prelude::*};
+use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
     AppState, game::world::ToonMaterial, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
@@ -36,7 +36,7 @@ use pause_menu::{
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
     update_slider_label,
 };
-use post_process::EdgeDetectionPlugin;
+use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use simulation::{
     display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
     toggle_crosshair, update_cooking_display_rotation, update_cooking_displays,
@@ -79,6 +79,7 @@ fn edit_mode_active(settings: Res<UserSettings>) -> bool {
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
         app.add_plugins(EdgeDetectionPlugin);
         app.add_event::<InteractableClicked>();
@@ -139,6 +140,8 @@ impl Plugin for SimulationPlugin {
         app.add_systems(Update, toggle_crosshair.run_if(in_state(AppState::InGame)));
         app.add_systems(Update, toggle_outline.run_if(in_state(AppState::InGame)));
         app.add_systems(Update, toggle_edit_mode.run_if(in_state(AppState::InGame)));
+        app.add_systems(Update, toggle_edge_detection.run_if(in_state(AppState::InGame)));
+        app.add_systems(Update, sync_edge_detection_settings.run_if(in_state(AppState::InGame)));
         app.add_systems(
             Update,
             toggle_placement_object.run_if(in_state(AppState::InGame)),

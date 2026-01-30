@@ -34,7 +34,7 @@ pub fn generate_terrain_topology(
     // Create mesh with NO vertex attributes - just indices!
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
 
     mesh.insert_indices(Indices::U32(indices));

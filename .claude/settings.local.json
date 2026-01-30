@@ -1,12 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat:*)",
       "Bash(cargo check:*)",
-      "Bash(if not exist docs mkdir docs)",
-      "Bash(mkdir:*)",
-      "Bash(grep:*)",
-      "Bash(find:*)"
+      "Bash(xargs:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": [],

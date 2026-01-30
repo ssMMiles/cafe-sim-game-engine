@@ -23,14 +23,29 @@ use std::{
 
 use crate::terrain::{
     material::{TerrainConfig, TerrainMaterial},
-    mesh::{calculate_terrain_aabb, generate_terrain_topology},
+    mesh::generate_terrain_topology,
 };
 
 mod material;
 mod mesh;
 
+/// Chunk size in vertices (128 vertices = 127 cells per chunk side)
+/// Larger chunks = fewer draw calls, better batching
+const CHUNK_SIZE: usize = 128;
+
 #[derive(Debug, Component)]
 pub struct Heightmap(pub Handle<Image>);
+
+/// Marker component for terrain chunk entities
+#[derive(Component)]
+pub struct TerrainChunk {
+    pub chunk_x: usize,
+    pub chunk_y: usize,
+}
+
+/// Marker indicating terrain has been processed (prevents re-running setup)
+#[derive(Component)]
+struct TerrainProcessed;
 
 // Marker components for readback tracking
 #[derive(Component)]
@@ -43,10 +58,11 @@ struct NormalReadback {
     terrain_entity: Entity,
 }
 
-// Component to track mesh that's waiting for readback to complete before rendering
+/// Component to track terrain chunks waiting for readback to complete
 #[derive(Component)]
-struct PendingTerrainMesh {
-    indices: Vec<u32>,
+struct PendingTerrainChunks {
+    chunks_x: usize,
+    chunks_y: usize,
     width: usize,
     height: usize,
     material_handle: Handle<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
@@ -125,7 +141,7 @@ impl Plugin for HeightmapPlugin {
 }
 
 fn create_heightmap_mesh(
-    heightmap_query: Query<(&Heightmap, Entity), Without<Mesh3d>>,
+    heightmap_query: Query<(&Heightmap, Entity), Without<TerrainProcessed>>,
     images: Res<Assets<Image>>,
     mut commands: Commands,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
@@ -176,19 +192,30 @@ fn create_heightmap_mesh(
             extension: terrain_material,
         });
 
-        // Calculate AABB
-        let aabb = calculate_terrain_aabb(width, height, TILE_SIZE, HEIGHT_SCALE);
+        // Calculate number of chunks (ceiling division)
+        let chunks_x = (width + CHUNK_SIZE - 2) / (CHUNK_SIZE - 1);
+        let chunks_y = (height + CHUNK_SIZE - 2) / (CHUNK_SIZE - 1);
 
-        // Generate indices but don't create mesh yet - wait for readback
-        let indices = generate_terrain_indices(width, height);
+        info!(
+            "Terrain {}x{} will be split into {}x{} = {} chunks",
+            width,
+            height,
+            chunks_x,
+            chunks_y,
+            chunks_x * chunks_y
+        );
 
-        // Insert components (but NOT Mesh3d/MeshMaterial3d yet - wait for readback)
+        // Insert components (chunks will be spawned after readback completes)
+        // Parent needs Visibility for child InheritedVisibility to work properly
+        // TerrainProcessed prevents this system from re-running
         commands.entity(entity).insert((
             Transform::default(),
             GlobalTransform::default(),
-            aabb,
-            PendingTerrainMesh {
-                indices,
+            Visibility::Inherited,
+            TerrainProcessed,
+            PendingTerrainChunks {
+                chunks_x,
+                chunks_y,
                 width,
                 height,
                 material_handle: material,
@@ -223,35 +250,6 @@ fn create_heightmap_mesh(
     }
 }
 
-// Generate indices for terrain grid
-fn generate_terrain_indices(width: usize, height: usize) -> Vec<u32> {
-    let mut indices = Vec::new();
-    for y in 0..(height - 1) {
-        for x in 0..(width - 1) {
-            let top_left = (x * height + y) as u32;
-            let top_right = ((x + 1) * height + y) as u32;
-            let bottom_left = (x * height + (y + 1)) as u32;
-            let bottom_right = ((x + 1) * height + (y + 1)) as u32;
-
-            // First triangle
-            indices.push(top_left);
-            indices.push(bottom_left);
-            indices.push(top_right);
-
-            // Second triangle
-            indices.push(top_right);
-            indices.push(bottom_left);
-            indices.push(bottom_right);
-        }
-    }
-
-    indices
-}
-
-// No longer needed - mesh creation deferred until readback
-fn _create_terrain_mesh_shell(_width: usize, _height: usize) -> Mesh {
-    unimplemented!("Mesh creation now happens after readback completes")
-}
 
 fn generate_heightmap_mesh_naive(heightmap_data: &HeightmapData) -> Mesh {
     let width = heightmap_data.width;
@@ -427,7 +425,7 @@ fn handle_position_readback(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     readback_query: Query<&PositionReadback>,
-    mut pending_query: Query<&mut PendingTerrainMesh>,
+    mut pending_query: Query<&mut PendingTerrainChunks>,
 ) {
     let Ok(readback) = readback_query.get(trigger.entity) else {
         return;
@@ -444,45 +442,15 @@ fn handle_position_readback(
 
     info!("Received {} computed positions from GPU", positions.len());
 
-    // Store positions and check if we can create the mesh
+    // Store positions and check if we can create chunk meshes
     if let Ok(mut pending) = pending_query.get_mut(readback.terrain_entity) {
         pending.positions = Some(positions);
-
-        // If both position and normal are ready, create the mesh!
-        if let (Some(pos), Some(norm)) = (&pending.positions, &pending.normals) {
-            info!("Both readbacks complete - creating terrain mesh");
-
-            // Create mesh with real data
-            let mut mesh = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::RENDER_WORLD,
-            );
-            mesh.insert_indices(Indices::U32(pending.indices.clone()));
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm.clone());
-
-            // Generate UVs based on grid position (required for PBR pipeline)
-            let width = pending.width;
-            let height = pending.height;
-            let uvs: Vec<[f32; 2]> = (0..height)
-                .flat_map(|y| {
-                    (0..width).map(move |x| [
-                        x as f32 / (width - 1) as f32,
-                        y as f32 / (height - 1) as f32,
-                    ])
-                })
-                .collect();
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-
-            let mesh_handle = meshes.add(mesh);
-
-            // Insert rendering components
-            commands.entity(readback.terrain_entity).insert((
-                Mesh3d(mesh_handle),
-                MeshMaterial3d(pending.material_handle.clone()),
-                Visibility::Inherited,
-            )).remove::<PendingTerrainMesh>();
-        }
+        try_create_terrain_chunks(
+            &mut commands,
+            &mut meshes,
+            readback.terrain_entity,
+            &pending,
+        );
     }
 
     // Cleanup: despawn the readback entity (one-time operation)
@@ -494,7 +462,7 @@ fn handle_normal_readback(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     readback_query: Query<&NormalReadback>,
-    mut pending_query: Query<&mut PendingTerrainMesh>,
+    mut pending_query: Query<&mut PendingTerrainChunks>,
 ) {
     let Ok(readback) = readback_query.get(trigger.entity) else {
         return;
@@ -511,49 +479,151 @@ fn handle_normal_readback(
 
     info!("Received {} computed normals from GPU", normals.len());
 
-    // Store normals and check if we can create the mesh
+    // Store normals and check if we can create chunk meshes
     if let Ok(mut pending) = pending_query.get_mut(readback.terrain_entity) {
         pending.normals = Some(normals);
-
-        // If both position and normal are ready, create the mesh!
-        if let (Some(pos), Some(norm)) = (&pending.positions, &pending.normals) {
-            info!("Both readbacks complete - creating terrain mesh");
-
-            // Create mesh with real data
-            let mut mesh = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::RENDER_WORLD,
-            );
-            mesh.insert_indices(Indices::U32(pending.indices.clone()));
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm.clone());
-
-            // Generate UVs based on grid position (required for PBR pipeline)
-            let width = pending.width;
-            let height = pending.height;
-            let uvs: Vec<[f32; 2]> = (0..height)
-                .flat_map(|y| {
-                    (0..width).map(move |x| [
-                        x as f32 / (width - 1) as f32,
-                        y as f32 / (height - 1) as f32,
-                    ])
-                })
-                .collect();
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-
-            let mesh_handle = meshes.add(mesh);
-
-            // Insert rendering components
-            commands.entity(readback.terrain_entity).insert((
-                Mesh3d(mesh_handle),
-                MeshMaterial3d(pending.material_handle.clone()),
-                Visibility::Inherited,
-            )).remove::<PendingTerrainMesh>();
-        }
+        try_create_terrain_chunks(
+            &mut commands,
+            &mut meshes,
+            readback.terrain_entity,
+            &pending,
+        );
     }
 
     // Cleanup: despawn the readback entity (one-time operation)
     commands.entity(trigger.entity).despawn();
+}
+
+/// Create terrain chunk meshes once both positions and normals are available
+fn try_create_terrain_chunks(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    terrain_entity: Entity,
+    pending: &PendingTerrainChunks,
+) {
+    let (Some(positions), Some(normals)) = (&pending.positions, &pending.normals) else {
+        return;
+    };
+
+    info!(
+        "Both readbacks complete - creating {} terrain chunks",
+        pending.chunks_x * pending.chunks_y
+    );
+
+    let width = pending.width;
+    let height = pending.height;
+
+    // Spawn chunk entities as children of the terrain entity
+    commands.entity(terrain_entity).with_children(|parent| {
+        for cy in 0..pending.chunks_y {
+            for cx in 0..pending.chunks_x {
+                // Calculate global vertex range for this chunk
+                // Stride is CHUNK_SIZE - 1 so chunks overlap by 1 vertex
+                let start_x = cx * (CHUNK_SIZE - 1);
+                let start_y = cy * (CHUNK_SIZE - 1);
+                let end_x = (start_x + CHUNK_SIZE).min(width);
+                let end_y = (start_y + CHUNK_SIZE).min(height);
+
+                let chunk_width = end_x - start_x;
+                let chunk_height = end_y - start_y;
+
+                // Extract vertices for this chunk from global arrays
+                let mut chunk_positions = Vec::with_capacity(chunk_width * chunk_height);
+                let mut chunk_normals = Vec::with_capacity(chunk_width * chunk_height);
+                let mut chunk_uvs = Vec::with_capacity(chunk_width * chunk_height);
+
+                // Track min/max for AABB calculation
+                let mut min_pos = Vec3::splat(f32::MAX);
+                let mut max_pos = Vec3::splat(f32::MIN);
+
+                for local_x in 0..chunk_width {
+                    for local_y in 0..chunk_height {
+                        let global_x = start_x + local_x;
+                        let global_y = start_y + local_y;
+                        // Global vertex index uses column-major layout: x * height + y
+                        let global_idx = global_x * height + global_y;
+
+                        let pos = positions[global_idx];
+                        chunk_positions.push(pos);
+                        chunk_normals.push(normals[global_idx]);
+
+                        // UV coordinates relative to global terrain
+                        chunk_uvs.push([
+                            global_x as f32 / (width - 1) as f32,
+                            global_y as f32 / (height - 1) as f32,
+                        ]);
+
+                        // Update AABB bounds
+                        let pos_vec = Vec3::from_array(pos);
+                        min_pos = min_pos.min(pos_vec);
+                        max_pos = max_pos.max(pos_vec);
+                    }
+                }
+
+                // Generate indices for chunk (local indices, column-major layout)
+                let mut chunk_indices = Vec::new();
+                for local_x in 0..(chunk_width - 1) {
+                    for local_y in 0..(chunk_height - 1) {
+                        let top_left = (local_x * chunk_height + local_y) as u32;
+                        let top_right = ((local_x + 1) * chunk_height + local_y) as u32;
+                        let bottom_left = (local_x * chunk_height + (local_y + 1)) as u32;
+                        let bottom_right = ((local_x + 1) * chunk_height + (local_y + 1)) as u32;
+
+                        // First triangle
+                        chunk_indices.push(top_left);
+                        chunk_indices.push(bottom_left);
+                        chunk_indices.push(top_right);
+
+                        // Second triangle
+                        chunk_indices.push(top_right);
+                        chunk_indices.push(bottom_left);
+                        chunk_indices.push(bottom_right);
+                    }
+                }
+
+                // Create chunk mesh
+                let mut mesh = Mesh::new(
+                    PrimitiveTopology::TriangleList,
+                    RenderAssetUsages::RENDER_WORLD,
+                );
+                mesh.insert_indices(Indices::U32(chunk_indices));
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, chunk_positions);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, chunk_normals);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, chunk_uvs);
+
+                let mesh_handle = meshes.add(mesh);
+
+                // Calculate AABB from actual vertex positions
+                use bevy::camera::primitives::Aabb;
+                let aabb = Aabb::from_min_max(min_pos, max_pos);
+
+                // Spawn chunk entity
+                parent.spawn((
+                    Mesh3d(mesh_handle),
+                    MeshMaterial3d(pending.material_handle.clone()),
+                    Transform::default(),
+                    Visibility::Inherited,
+                    aabb,
+                    TerrainChunk {
+                        chunk_x: cx,
+                        chunk_y: cy,
+                    },
+                ));
+            }
+        }
+    });
+
+    info!(
+        "Created {} terrain chunks ({} x {})",
+        pending.chunks_x * pending.chunks_y,
+        pending.chunks_x,
+        pending.chunks_y
+    );
+
+    // Remove pending component now that chunks are created
+    commands
+        .entity(terrain_entity)
+        .remove::<PendingTerrainChunks>();
 }
 
 // ==== RENDER WORLD SYSTEMS ====
