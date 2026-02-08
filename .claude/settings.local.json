@@ -12,7 +12,9 @@
       "Bash(cargo doc:*)",
       "WebFetch(domain:docs.rs)",
       "Bash(grep:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(identify:*)",
+      "Bash(cargo test:*)"
     ],
     "deny": [],
     "ask": [],

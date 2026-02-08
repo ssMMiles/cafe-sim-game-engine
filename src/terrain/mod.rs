@@ -21,6 +21,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use crate::game::camera::PlayerCamera;
 use crate::terrain::{
     material::{TerrainConfig, TerrainMaterial},
     mesh::generate_terrain_topology,
@@ -28,10 +29,29 @@ use crate::terrain::{
 
 mod material;
 mod mesh;
+pub mod storage;
 
 /// Chunk size in vertices (128 vertices = 127 cells per chunk side)
 /// Larger chunks = fewer draw calls, better batching
-const CHUNK_SIZE: usize = 128;
+const CHUNK_SIZE: usize = 64;
+
+/// Number of LOD levels per chunk
+const LOD_LEVELS: usize = 4;
+
+/// Distance thresholds for LOD switching (in world units)
+/// LOD 0 (full detail) used when distance < LOD_DISTANCES[0]
+/// LOD 1 used when distance < LOD_DISTANCES[1], etc.
+#[allow(dead_code)]
+const LOD_DISTANCES: [f32; LOD_LEVELS] = [500.0, 1000.0, 2500.0, 4000.0];
+
+/// Squared distance thresholds for LOD switching (avoids sqrt in hot path)
+/// Derived from LOD_DISTANCES: [500^2, 1000^2, 2500^2, 4000^2]
+const LOD_DISTANCES_SQ: [f32; LOD_LEVELS] = [
+    250_000.0,    // 500^2
+    1_000_000.0,  // 1000^2
+    6_250_000.0,  // 2500^2
+    16_000_000.0, // 4000^2
+];
 
 #[derive(Debug, Component)]
 pub struct Heightmap(pub Handle<Image>);
@@ -41,6 +61,27 @@ pub struct Heightmap(pub Handle<Image>);
 pub struct TerrainChunk {
     pub chunk_x: usize,
     pub chunk_y: usize,
+    /// Mesh handles for each LOD level (index 0 = highest detail)
+    pub lod_meshes: [Handle<Mesh>; LOD_LEVELS],
+    /// Currently active LOD level
+    pub current_lod: usize,
+}
+
+/// Tracks camera position for LOD update throttling
+#[derive(Resource)]
+struct TerrainLodState {
+    last_camera_pos: Vec3,
+    /// Squared distance threshold - camera must move this far before LOD recalculation
+    update_threshold_sq: f32,
+}
+
+impl Default for TerrainLodState {
+    fn default() -> Self {
+        Self {
+            last_camera_pos: Vec3::ZERO,
+            update_threshold_sq: 15.0 * 15.0, // 15 units movement threshold
+        }
+    }
 }
 
 /// Marker indicating terrain has been processed (prevents re-running setup)
@@ -108,8 +149,11 @@ impl Plugin for HeightmapPlugin {
         // Extract compute data to render world
         app.add_plugins(ExtractResourcePlugin::<TerrainComputeData>::default());
 
-        // Main world system
-        app.add_systems(Update, create_heightmap_mesh);
+        // Initialize LOD state resource
+        app.init_resource::<TerrainLodState>();
+
+        // Main world systems
+        app.add_systems(Update, (create_heightmap_mesh, update_terrain_lod));
 
         // Readback observers to handle GPU->CPU data transfer
         app.add_observer(handle_position_readback);
@@ -506,8 +550,9 @@ fn try_create_terrain_chunks(
     };
 
     info!(
-        "Both readbacks complete - creating {} terrain chunks",
-        pending.chunks_x * pending.chunks_y
+        "Both readbacks complete - creating {} terrain chunks with {} LOD levels",
+        pending.chunks_x * pending.chunks_y,
+        LOD_LEVELS
     );
 
     let width = pending.width;
@@ -530,11 +575,6 @@ fn try_create_terrain_chunks(
                 // Extract vertices for this chunk from global arrays
                 let mut chunk_positions = Vec::with_capacity(chunk_width * chunk_height);
                 let mut chunk_normals = Vec::with_capacity(chunk_width * chunk_height);
-                let mut chunk_uvs = Vec::with_capacity(chunk_width * chunk_height);
-
-                // Track min/max for AABB calculation
-                let mut min_pos = Vec3::splat(f32::MAX);
-                let mut max_pos = Vec3::splat(f32::MIN);
 
                 for local_x in 0..chunk_width {
                     for local_y in 0..chunk_height {
@@ -543,63 +583,45 @@ fn try_create_terrain_chunks(
                         // Global vertex index uses column-major layout: x * height + y
                         let global_idx = global_x * height + global_y;
 
-                        let pos = positions[global_idx];
-                        chunk_positions.push(pos);
+                        chunk_positions.push(positions[global_idx]);
                         chunk_normals.push(normals[global_idx]);
-
-                        // UV coordinates relative to global terrain
-                        chunk_uvs.push([
-                            global_x as f32 / (width - 1) as f32,
-                            global_y as f32 / (height - 1) as f32,
-                        ]);
-
-                        // Update AABB bounds
-                        let pos_vec = Vec3::from_array(pos);
-                        min_pos = min_pos.min(pos_vec);
-                        max_pos = max_pos.max(pos_vec);
                     }
                 }
 
-                // Generate indices for chunk (local indices, column-major layout)
-                let mut chunk_indices = Vec::new();
-                for local_x in 0..(chunk_width - 1) {
-                    for local_y in 0..(chunk_height - 1) {
-                        let top_left = (local_x * chunk_height + local_y) as u32;
-                        let top_right = ((local_x + 1) * chunk_height + local_y) as u32;
-                        let bottom_left = (local_x * chunk_height + (local_y + 1)) as u32;
-                        let bottom_right = ((local_x + 1) * chunk_height + (local_y + 1)) as u32;
+                // Generate meshes for all LOD levels
+                let mut lod_meshes: [Handle<Mesh>; LOD_LEVELS] =
+                    std::array::from_fn(|_| Handle::default());
+                let mut aabb_min = Vec3::splat(f32::MAX);
+                let mut aabb_max = Vec3::splat(f32::MIN);
 
-                        // First triangle
-                        chunk_indices.push(top_left);
-                        chunk_indices.push(bottom_left);
-                        chunk_indices.push(top_right);
+                for lod in 0..LOD_LEVELS {
+                    let (mesh, min_pos, max_pos) = generate_lod_mesh(
+                        &chunk_positions,
+                        &chunk_normals,
+                        chunk_width,
+                        chunk_height,
+                        start_x,
+                        start_y,
+                        width,
+                        height,
+                        lod,
+                    );
+                    lod_meshes[lod] = meshes.add(mesh);
 
-                        // Second triangle
-                        chunk_indices.push(top_right);
-                        chunk_indices.push(bottom_left);
-                        chunk_indices.push(bottom_right);
+                    // Use LOD 0 bounds for AABB (most accurate)
+                    if lod == 0 {
+                        aabb_min = min_pos;
+                        aabb_max = max_pos;
                     }
                 }
 
-                // Create chunk mesh
-                let mut mesh = Mesh::new(
-                    PrimitiveTopology::TriangleList,
-                    RenderAssetUsages::RENDER_WORLD,
-                );
-                mesh.insert_indices(Indices::U32(chunk_indices));
-                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, chunk_positions);
-                mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, chunk_normals);
-                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, chunk_uvs);
-
-                let mesh_handle = meshes.add(mesh);
-
-                // Calculate AABB from actual vertex positions
+                // Calculate AABB from LOD 0 vertex positions
                 use bevy::camera::primitives::Aabb;
-                let aabb = Aabb::from_min_max(min_pos, max_pos);
+                let aabb = Aabb::from_min_max(aabb_min, aabb_max);
 
-                // Spawn chunk entity
+                // Spawn chunk entity with LOD 0 mesh initially
                 parent.spawn((
-                    Mesh3d(mesh_handle),
+                    Mesh3d(lod_meshes[0].clone()),
                     MeshMaterial3d(pending.material_handle.clone()),
                     Transform::default(),
                     Visibility::Inherited,
@@ -607,6 +629,8 @@ fn try_create_terrain_chunks(
                     TerrainChunk {
                         chunk_x: cx,
                         chunk_y: cy,
+                        lod_meshes,
+                        current_lod: 0,
                     },
                 ));
             }
@@ -624,6 +648,201 @@ fn try_create_terrain_chunks(
     commands
         .entity(terrain_entity)
         .remove::<PendingTerrainChunks>();
+}
+
+/// Generate a terrain chunk mesh at a specific LOD level.
+/// Higher LOD levels sample fewer vertices (stride = 2^lod_level).
+fn generate_lod_mesh(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    chunk_width: usize,
+    chunk_height: usize,
+    start_x: usize,
+    start_y: usize,
+    full_width: usize,
+    full_height: usize,
+    lod_level: usize,
+) -> (Mesh, Vec3, Vec3) {
+    let stride = 1 << lod_level;
+
+    let lod_width = (chunk_width + stride - 1) / stride;
+    let lod_height = (chunk_height + stride - 1) / stride;
+
+    let mut lod_positions = Vec::with_capacity(lod_width * lod_height);
+    let mut lod_normals = Vec::with_capacity(lod_width * lod_height);
+    let mut lod_uvs = Vec::with_capacity(lod_width * lod_height);
+
+    let mut min_pos = Vec3::splat(f32::MAX);
+    let mut max_pos = Vec3::splat(f32::MIN);
+
+    // --- Sample LOD vertices ---
+    for lod_x in 0..lod_width {
+        for lod_y in 0..lod_height {
+            // Force edge vertices to be the actual chunk boundary to ensure
+            // adjacent chunks share identical edge vertices at all LOD levels
+            let local_x = if lod_x == lod_width - 1 {
+                chunk_width - 1
+            } else {
+                lod_x * stride
+            };
+            let local_y = if lod_y == lod_height - 1 {
+                chunk_height - 1
+            } else {
+                lod_y * stride
+            };
+
+            let local_idx = local_x * chunk_height + local_y;
+
+            let pos = positions[local_idx];
+            lod_positions.push(pos);
+            lod_normals.push(normals[local_idx]);
+
+            let global_x = start_x + local_x;
+            let global_y = start_y + local_y;
+            lod_uvs.push([
+                global_x as f32 / (full_width - 1) as f32,
+                global_y as f32 / (full_height - 1) as f32,
+            ]);
+
+            let pos_vec = Vec3::from_array(pos);
+            min_pos = min_pos.min(pos_vec);
+            max_pos = max_pos.max(pos_vec);
+        }
+    }
+
+    let idx = |x: usize, y: usize| -> u32 {
+        (x * lod_height + y) as u32
+    };
+
+    // --- Grid indices ---
+    let mut lod_indices = Vec::new();
+    for lod_x in 0..(lod_width - 1) {
+        for lod_y in 0..(lod_height - 1) {
+            let tl = idx(lod_x, lod_y);
+            let tr = idx(lod_x + 1, lod_y);
+            let bl = idx(lod_x, lod_y + 1);
+            let br = idx(lod_x + 1, lod_y + 1);
+
+            lod_indices.extend_from_slice(&[tl, bl, tr]);
+            lod_indices.extend_from_slice(&[tr, bl, br]);
+        }
+    }
+
+    // =========================
+    // ======= SKIRTS ==========
+    // =========================
+
+    let skirt_depth = stride as f32 * 5.0;
+    let mut skirt_base = Vec::new();
+
+    // Left
+    for y in 0..lod_height {
+        skirt_base.push(idx(0, y));
+    }
+    // Bottom
+    for x in 1..lod_width {
+        skirt_base.push(idx(x, lod_height - 1));
+    }
+    // Right
+    for y in (0..lod_height - 1).rev() {
+        skirt_base.push(idx(lod_width - 1, y));
+    }
+    // Top
+    for x in (1..lod_width - 1).rev() {
+        skirt_base.push(idx(x, 0));
+    }
+
+    let skirt_start = lod_positions.len() as u32;
+
+    for &base_idx in &skirt_base {
+        let pos = Vec3::from_array(lod_positions[base_idx as usize]);
+        let skirt_pos = pos - Vec3::Y * skirt_depth;
+
+        lod_positions.push(skirt_pos.to_array());
+        lod_normals.push([0.0, 0.0, 0.0]);
+        lod_uvs.push(lod_uvs[base_idx as usize]);
+    }
+
+    let skirt_len = skirt_base.len();
+    for i in 0..skirt_len {
+        let base0 = skirt_base[i];
+        let base1 = skirt_base[(i + 1) % skirt_len];
+
+        let skirt0 = skirt_start + i as u32;
+        let skirt1 = skirt_start + ((i + 1) % skirt_len) as u32;
+
+        lod_indices.extend_from_slice(&[
+            base0, base1, skirt0,
+            skirt0, base1, skirt1,
+        ]);
+    }
+
+    min_pos.y -= skirt_depth;
+
+    // --- Build mesh ---
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+
+    mesh.insert_indices(Indices::U32(lod_indices));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, lod_positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, lod_normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, lod_uvs);
+
+    (mesh, min_pos, max_pos)
+}
+
+/// System to update terrain chunk LOD based on camera distance.
+/// Optimizations:
+/// - Early exit when camera hasn't moved significantly (threshold-based)
+/// - Uses squared distances to avoid sqrt operations
+/// - Hysteresis to prevent LOD thrashing at boundaries
+fn update_terrain_lod(
+    camera_query: Query<&GlobalTransform, With<PlayerCamera>>,
+    mut chunk_query: Query<(&mut TerrainChunk, &mut Mesh3d, &bevy::camera::primitives::Aabb)>,
+    mut lod_state: ResMut<TerrainLodState>,
+) {
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+    let camera_pos = camera_transform.translation();
+
+    // Early exit if camera hasn't moved enough since last LOD update
+    let moved_sq = camera_pos.distance_squared(lod_state.last_camera_pos);
+    if moved_sq < lod_state.update_threshold_sq {
+        return;
+    }
+    lod_state.last_camera_pos = camera_pos;
+
+    for (mut chunk, mut mesh3d, aabb) in chunk_query.iter_mut() {
+        let chunk_center: Vec3 = aabb.center.into();
+        let distance_sq = camera_pos.distance_squared(chunk_center);
+
+        // LOD selection with hysteresis to prevent thrashing at boundaries
+        let current = chunk.current_lod;
+        let new_lod = if current > 0 {
+            // To increase detail (lower LOD), require being 10% closer than threshold
+            // 0.81 = 0.9^2 (squared because we're comparing squared distances)
+            let threshold_sq = LOD_DISTANCES_SQ[current - 1] * 0.81;
+            if distance_sq < threshold_sq {
+                current - 1
+            } else if current < LOD_LEVELS - 1 && distance_sq >= LOD_DISTANCES_SQ[current] {
+                current + 1
+            } else {
+                current
+            }
+        } else if distance_sq >= LOD_DISTANCES_SQ[0] {
+            1
+        } else {
+            0
+        };
+
+        if new_lod != chunk.current_lod {
+            mesh3d.0 = chunk.lod_meshes[new_lod].clone();
+            chunk.current_lod = new_lod;
+        }
+    }
 }
 
 // ==== RENDER WORLD SYSTEMS ====

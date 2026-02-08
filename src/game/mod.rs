@@ -4,7 +4,7 @@ use crate::{
     AppState, game::world::ToonMaterial, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
 };
 
-mod camera;
+pub mod camera;
 mod cutting_board;
 mod day_night;
 mod edit_mode;
