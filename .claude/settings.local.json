@@ -14,7 +14,9 @@
       "Bash(grep:*)",
       "Bash(cargo build:*)",
       "Bash(identify:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": [],

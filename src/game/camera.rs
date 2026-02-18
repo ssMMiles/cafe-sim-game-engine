@@ -3,6 +3,7 @@ use std::f32::consts::PI;
 use crate::{
     game::{post_process::EdgeDetectionSettings, simulation::Player},
     settings::{setting_ranges, MovementMode, UserSettings},
+    terrain::HeightmapData,
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -28,23 +29,6 @@ pub struct PlayerCamera {
 
 #[derive(Component)]
 pub struct RenderTextureSprite;
-
-// Movement speed is now controlled by UserSettings
-const ACCELERATION: f32 = 0.2;
-const MAX_VELOCITY: f32 = 1.0;
-const FLOOR_HEIGHT: f32 = 2.0;
-
-#[derive(Default)]
-struct MovementInput {
-    forward: bool,
-    backward: bool,
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-    toggle_mode: bool,
-    toggle_third_person: bool,
-}
 
 pub fn setup_camera(
     commands: &mut Commands,
@@ -177,91 +161,47 @@ pub fn setup_camera(
     ));
 }
 
-pub fn handle_movement(
+/// System 1: Mouse look + mode/view toggles. Applies to camera transform directly.
+pub fn handle_camera_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut mouse_motion: MessageReader<MouseMotion>,
     mut settings: ResMut<UserSettings>,
-    camera_query: Option<Single<(&mut Transform, &mut PlayerCamera), Without<Player>>>,
-    player_query: Option<Single<(&mut Transform), With<Player>>>,
+    mut camera_query: Query<(&mut Transform, &mut PlayerCamera), Without<Player>>,
+    mut player_query: Query<&mut Transform, With<Player>>,
+    heightmap: Option<Res<HeightmapData>>,
 ) {
-    let (mut camera_transform, mut camera) = match camera_query {
-        Some(query) => query.into_inner(),
-        None => {
-            warn!("No camera entity found for camera movement system.");
-            return;
-        }
+    let Ok((mut camera_transform, mut camera)) = camera_query.single_mut() else {
+        return;
     };
-    let mut player_transform = match player_query {
-        Some(query) => query.into_inner(),
-        None => {
-            warn!("No player entity found for camera movement system.");
-            return;
-        }
+    let Ok(mut player_transform) = player_query.single_mut() else {
+        return;
     };
 
-    let input = collect_movement_input(&keyboard_input);
+    // Mode toggles
+    let toggle_mode = keyboard_input.just_pressed(KeyCode::KeyM)
+        && keyboard_input.pressed(KeyCode::ShiftLeft);
+    let toggle_third_person = keyboard_input.just_pressed(KeyCode::KeyV)
+        && keyboard_input.pressed(KeyCode::ShiftLeft);
 
-    handle_mode_toggle(&input, &mut settings, &mut player_transform);
-    apply_movement(&input, &mut player_transform, &camera_transform, &settings);
-
-    if settings.third_person_view {
-        // Third-person camera with free rotation around player
-        // Allow both horizontal and vertical rotation with mouse
-        handle_mouse_look(&mut mouse_motion, &mut camera, &mut camera_transform, &settings);
-
-        // Calculate offset direction based on current camera rotation
-        let offset_direction = camera_transform.forward().as_vec3();
-
-        // Position camera at offset from player, looking at them
-        camera_transform.translation = player_transform.translation - offset_direction * settings.third_person_distance;
-    } else {
-        // First-person view: sync camera to player
-        camera_transform.translation = player_transform.translation;
-        handle_mouse_look(&mut mouse_motion, &mut camera, &mut camera_transform, &settings);
-    }
-}
-
-fn collect_movement_input(keyboard_input: &Res<ButtonInput<KeyCode>>) -> MovementInput {
-    MovementInput {
-        forward: keyboard_input.pressed(KeyCode::KeyW),
-        backward: keyboard_input.pressed(KeyCode::KeyS),
-        left: keyboard_input.pressed(KeyCode::KeyA),
-        right: keyboard_input.pressed(KeyCode::KeyD),
-        up: keyboard_input.pressed(KeyCode::Space),
-        down: keyboard_input.pressed(KeyCode::ControlLeft),
-        toggle_mode: keyboard_input.just_pressed(KeyCode::KeyM)
-            && keyboard_input.pressed(KeyCode::ShiftLeft),
-        toggle_third_person: keyboard_input.just_pressed(KeyCode::KeyV)
-            && keyboard_input.pressed(KeyCode::ShiftLeft),
-    }
-}
-
-fn handle_mode_toggle(
-    input: &MovementInput,
-    settings: &mut UserSettings,
-    transform: &mut Transform,
-) {
-    if input.toggle_mode {
+    if toggle_mode {
         match settings.movement_mode {
             MovementMode::FreeCam => {
-                // Snap to floor when switching to floor-based
-                transform.translation.y = FLOOR_HEIGHT;
+                // Snap to terrain when switching to floor-based
+                if let Some(ref hm) = heightmap {
+                    if let Some(h) = hm.sample_height(player_transform.translation.x, player_transform.translation.z) {
+                        player_transform.translation.y = h;
+                    }
+                }
             }
             MovementMode::FloorBased => {}
         };
         settings.toggle_movement_mode();
     }
-    if input.toggle_third_person {
+    if toggle_third_person {
         settings.third_person_view = !settings.third_person_view;
     }
-}
 
-fn handle_mouse_look(
-    mouse_motion: &mut MessageReader<MouseMotion>,
-    camera: &mut PlayerCamera,
-    transform: &mut Transform,
-    settings: &UserSettings,
-) {
+    // Mouse look — apply yaw/pitch to camera transform
     let mut mouse_delta = Vec2::ZERO;
     for motion in mouse_motion.read() {
         mouse_delta += motion.delta;
@@ -272,98 +212,77 @@ fn handle_mouse_look(
         camera.pitch -= mouse_delta.y * settings.mouse_sensitivity;
         camera.pitch = camera.pitch.clamp(-PI / 2.0 + 0.01, PI / 2.0 - 0.01);
 
-        // Apply rotation to transform
-        transform.rotation = Quat::from_euler(EulerRot::YXZ, camera.yaw, camera.pitch, 0.0);
+        camera_transform.rotation = Quat::from_euler(EulerRot::YXZ, camera.yaw, camera.pitch, 0.0);
     }
 }
 
-fn handle_mouse_look_isometric(
-    mouse_motion: &mut MessageReader<MouseMotion>,
-    camera: &mut PlayerCamera,
-    settings: &UserSettings,
+/// System 2: FreeCam movement — only active when movement mode is FreeCam.
+/// Reads keyboard, moves player transform directly (existing behavior).
+pub fn apply_freecam_movement(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    settings: Res<UserSettings>,
+    camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>)>,
+    mut player_query: Query<&mut Transform, With<Player>>,
 ) {
-    let mut mouse_delta = Vec2::ZERO;
-    for motion in mouse_motion.read() {
-        mouse_delta += motion.delta;
+    if settings.movement_mode != MovementMode::FreeCam {
+        return;
     }
 
-    if mouse_delta != Vec2::ZERO {
-        // Only apply horizontal (yaw) rotation for isometric view
-        camera.yaw -= mouse_delta.x * settings.mouse_sensitivity;
-        // Pitch stays locked at isometric angle
-    }
-}
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
+    let Ok(mut player_transform) = player_query.single_mut() else {
+        return;
+    };
 
-fn apply_movement(input: &MovementInput, transform: &mut Transform, camera_transform: &Transform, settings: &UserSettings) {
-    match settings.movement_mode {
-        MovementMode::FreeCam => apply_freecam_movement(input, transform, camera_transform, settings),
-        MovementMode::FloorBased => apply_floor_movement(input, transform, camera_transform, settings),
-    }
-}
-
-fn apply_freecam_movement(
-    input: &MovementInput,
-    transform: &mut Transform,
-    camera_transform: &Transform,
-    settings: &UserSettings,
-) {
     let mut movement = Vec3::ZERO;
 
-    if input.forward {
+    if keyboard_input.pressed(KeyCode::KeyW) {
         movement += camera_transform.forward().as_vec3();
     }
-    if input.backward {
+    if keyboard_input.pressed(KeyCode::KeyS) {
         movement -= camera_transform.forward().as_vec3();
     }
-    if input.left {
+    if keyboard_input.pressed(KeyCode::KeyA) {
         movement -= camera_transform.right().as_vec3();
     }
-    if input.right {
+    if keyboard_input.pressed(KeyCode::KeyD) {
         movement += camera_transform.right().as_vec3();
     }
-    if input.up {
+    if keyboard_input.pressed(KeyCode::Space) {
         movement += Vec3::Y;
     }
-    if input.down {
+    if keyboard_input.pressed(KeyCode::ControlLeft) {
         movement -= Vec3::Y;
     }
 
-    // Normalize and apply movement
     if movement.length() > 0.0 {
         movement = movement.normalize() * settings.movement_speed;
     }
 
-    transform.translation += movement;
+    player_transform.translation += movement;
 }
 
-fn apply_floor_movement(input: &MovementInput, transform: &mut Transform, camera_transform: &Transform, settings: &UserSettings) {
-    let mut movement = Vec3::ZERO;
+/// System 3: Position camera relative to player (runs after physics or freecam movement).
+pub fn camera_follow(
+    settings: Res<UserSettings>,
+    player_query: Query<&Transform, With<Player>>,
+    mut camera_query: Query<(&mut Transform, &PlayerCamera), Without<Player>>,
+) {
+    let Ok(player_transform) = player_query.single() else {
+        return;
+    };
+    let Ok((mut camera_transform, _camera)) = camera_query.single_mut() else {
+        return;
+    };
 
-    if input.forward {
-        movement += camera_transform.forward().as_vec3();
+    if settings.third_person_view {
+        let offset_direction = camera_transform.forward().as_vec3();
+        camera_transform.translation = player_transform.translation
+            - offset_direction * settings.third_person_distance;
+    } else {
+        camera_transform.translation = player_transform.translation;
     }
-    if input.backward {
-        movement -= camera_transform.forward().as_vec3();
-    }
-    if input.left {
-        movement -= camera_transform.right().as_vec3();
-    }
-    if input.right {
-        movement += camera_transform.right().as_vec3();
-    }
-
-    // Project movement to XZ plane and normalize
-    movement.y = 0.0;
-    if movement.length() > 0.0 {
-        movement = movement.normalize() * settings.movement_speed;
-    }
-
-    // Apply movement
-    transform.translation.x += movement.x;
-    transform.translation.z += movement.z;
-
-    // Keep camera at floor height
-    transform.translation.y = FLOOR_HEIGHT;
 }
 
 pub fn resize_render_texture_sprite(

@@ -7,6 +7,7 @@ use super::icons::{SvgTextureCache, load_svg_icons};
 use super::interaction::{HoveredOver, Interactable, InteractableType};
 use super::materials::create_arc_mesh;
 use super::{GameEntity, SimulationConfig};
+use super::physics::CharacterState;
 use crate::game::world::ToonMaterial;
 use crate::settings::UserSettings;
 use crate::terrain::Heightmap;
@@ -82,6 +83,7 @@ pub fn setup(
     let _player = commands.spawn((
         GameEntity,
         Player,
+        CharacterState::default(),
         Transform::default(),
         GlobalTransform::default(),
         SceneRoot(mr_windmill),

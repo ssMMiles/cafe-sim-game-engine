@@ -9,6 +9,7 @@ use crate::terrain::Heightmap;
 use super::day_night::Sun;
 use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
 use super::materials::PendingMaterial;
+use super::physics::Collider;
 use super::{GameEntity, simulation::TableMarker};
 
 // Define the Material Extension
@@ -137,6 +138,7 @@ fn spawn_environment(
     let sphere = meshes.add(Sphere::default());
     commands.spawn((
         GameEntity,
+        Collider::Sphere { radius: 1.0 },
         Interactable {
             name: "Red Sphere".to_string(),
             distance: 10.0,
@@ -256,6 +258,7 @@ fn spawn_cafe_building(
     let left_wall = meshes.add(Cuboid::new(8.0, 9.0, 0.8));
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(4.0, 4.5, 0.4) },
         Mesh3d(left_wall),
         MeshMaterial3d(brown_material.clone()),
         Transform::from_translation(Vec3::new(0.0, 4.5, -8.0)),
@@ -266,6 +269,7 @@ fn spawn_cafe_building(
     let right_wall = meshes.add(Cuboid::new(8.0, 9.0, 0.8));
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(4.0, 4.5, 0.4) },
         Mesh3d(right_wall),
         MeshMaterial3d(brown_material.clone()),
         Transform::from_translation(Vec3::new(16.0, 4.5, -8.0)),
@@ -276,6 +280,7 @@ fn spawn_cafe_building(
     let top_wall = meshes.add(Cuboid::new(8.0, 2.4, 0.8));
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(4.0, 1.2, 0.4) },
         Mesh3d(top_wall),
         MeshMaterial3d(brown_material.clone()),
         Transform::from_translation(Vec3::new(8.0, 7.8, -8.0)),
@@ -286,6 +291,7 @@ fn spawn_cafe_building(
     let back_wall = meshes.add(Cuboid::new(24.0, 9.0, 0.8));
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(12.0, 4.5, 0.4) },
         Mesh3d(back_wall),
         MeshMaterial3d(brown_material.clone()),
         Transform::from_translation(Vec3::new(8.0, 4.5, 8.0)),
@@ -296,6 +302,7 @@ fn spawn_cafe_building(
     let left_side_wall = meshes.add(Cuboid::new(0.8, 9.0, 16.0));
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(0.4, 4.5, 8.0) },
         Mesh3d(left_side_wall),
         MeshMaterial3d(brown_material.clone()),
         Transform::from_translation(Vec3::new(-4.0, 4.5, 0.0)),
@@ -306,6 +313,7 @@ fn spawn_cafe_building(
     let right_side_wall = meshes.add(Cuboid::new(0.8, 9.0, 16.0));
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(0.4, 4.5, 8.0) },
         Mesh3d(right_side_wall),
         MeshMaterial3d(brown_material.clone()),
         Transform::from_translation(Vec3::new(20.0, 4.5, 0.0)),
@@ -315,6 +323,7 @@ fn spawn_cafe_building(
     // Cafe roof (1.5x taller)
     commands.spawn((
         GameEntity,
+        Collider::Box { half_extents: Vec3::new(14.0, 0.5, 10.0) },
         Mesh3d(cafe_roof),
         MeshMaterial3d(red_material),
         Transform::from_translation(Vec3::new(8.0, 9.75, 0.0)),

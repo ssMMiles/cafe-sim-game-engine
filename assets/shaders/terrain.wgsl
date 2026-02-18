@@ -1,13 +1,8 @@
 #import bevy_pbr::{
     mesh_functions,
     view_transformations::position_world_to_clip,
+    forward_io::VertexOutput,
 }
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::prepass_io::VertexOutput
-#else
-#import bevy_pbr::forward_io::VertexOutput
-#endif
 
 @vertex
 fn vertex(
@@ -25,18 +20,11 @@ fn vertex(
 
     // Skirt vertices have zero normal — give them a downward-facing normal
     let is_skirt = dot(normal, normal) < 0.5;
-    var world_normal = normal;
     if is_skirt {
-        world_normal = vec3(0.0, -1.0, 0.0);
+        out.world_normal = vec3(0.0, -1.0, 0.0);
+    } else {
+        out.world_normal = normal;
     }
-
-#ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
-    out.world_normal = world_normal;
-#endif
-
-#ifndef PREPASS_PIPELINE
-    out.world_normal = world_normal;
-#endif
 
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = instance_index;
@@ -44,10 +32,3 @@ fn vertex(
 
     return out;
 }
-
-#ifdef PREPASS_PIPELINE
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-}
-#endif

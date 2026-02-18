@@ -1,5 +1,4 @@
 use bevy::{image::TextureFormatPixelInfo, pbr::ExtendedMaterial, prelude::*};
-use image::{DynamicImage, ImageBuffer, Rgba};
 
 use crate::game::camera::PlayerCamera;
 use crate::terrain::{
@@ -104,6 +103,13 @@ fn create_heightmap_mesh(
             }
             grid
         };
+
+        commands.insert_resource(HeightmapData {
+            heights: heights.iter().map(|h| h * HEIGHT_SCALE).collect(),
+            grid_w: width,
+            grid_h: height,
+            tile_size: TILE_SIZE,
+        });
 
         let material = terrain_materials.add(ExtendedMaterial {
             base: StandardMaterial {
@@ -253,105 +259,88 @@ fn update_terrain_lod(
     }
 }
 
-#[derive(Debug, Component, Reflect)]
+/// Runtime-queryable heightmap resource with bilinear interpolation.
+/// Heights are stored pre-scaled in column-major order: `heights[x * grid_h + y]`.
+#[derive(Debug, Resource)]
 pub struct HeightmapData {
-    pub tiles: Vec<Vec<f32>>,
+    pub heights: Vec<f32>,
+    pub grid_w: usize,
+    pub grid_h: usize,
     pub tile_size: (f32, f32),
-    pub height_scale: f32,
-    pub width: usize,
-    pub height: usize,
 }
 
 impl HeightmapData {
-    pub fn from_image(image: &Image) -> HeightmapData {
-        let width = image.width();
-        let height = image.height();
-
-        let mut tiles = vec![vec![0.; height as usize]; width as usize];
-
-        if let Some(data) = &image.data {
-            for x in 0..width {
-                let offset = (x * width * 4) as usize;
-                for y in 0..height {
-                    let pixel_offset = offset + (y * 4) as usize;
-                    let r = data[pixel_offset] as f32;
-                    tiles[x as usize][y as usize] = r / 255.0 * 10.0;
-                }
-            }
-        }
-
-        HeightmapData {
-            tiles,
-            width: width as usize,
-            height: height as usize,
-            height_scale: HEIGHT_SCALE,
-            tile_size: TILE_SIZE,
-        }
-    }
-
-    pub fn save_to_file(&self, path: &str) {
-        let mut buffer = ImageBuffer::new(self.width as u32, self.height as u32);
-
-        for (x, y, pixel) in buffer.enumerate_pixels_mut() {
-            let val = 255 - (self.tiles[x as usize][y as usize] * 50.0) as u8;
-            *pixel = Rgba([val, val, val, 255]);
-        }
-
-        let image = DynamicImage::from(buffer);
-        image.save(path).unwrap();
-    }
-
-    pub fn flat(width: usize, height: usize) -> HeightmapData {
-        let tiles = vec![vec![0.0; height]; width];
-
-        HeightmapData {
-            tiles,
-            width,
-            height,
-            height_scale: HEIGHT_SCALE,
-            tile_size: TILE_SIZE,
-        }
-    }
-
+    /// Get the pre-scaled height at grid coordinates (x, y).
     pub fn get_tile(&self, x: usize, y: usize) -> Option<f32> {
-        if x < self.width && y < self.height {
-            Some(self.tiles[x][y])
+        if x < self.grid_w && y < self.grid_h {
+            Some(self.heights[x * self.grid_h + y])
         } else {
             None
         }
     }
 
+    /// Set the pre-scaled height at grid coordinates (x, y).
     pub fn set_tile(&mut self, x: usize, y: usize, value: f32) {
-        if x < self.width && y < self.height {
-            self.tiles[x][y] = value;
+        if x < self.grid_w && y < self.grid_h {
+            self.heights[x * self.grid_h + y] = value;
         }
     }
 
-    pub fn get_tile_from_change(
-        &self,
-        point: (usize, usize),
-        change: (isize, isize),
-    ) -> Option<f32> {
-        let (x, y) = point;
-        let (dx, dy) = change;
+    /// Bilinear interpolation of terrain height at a world-space (x, z) position.
+    /// Returns `None` if the position is outside the heightmap bounds.
+    pub fn sample_height(&self, world_x: f32, world_z: f32) -> Option<f32> {
+        let fx = world_x / self.tile_size.0;
+        let fz = world_z / self.tile_size.1;
 
-        let neighbouring_point = (x as isize + dx, y as isize + dy);
-        if neighbouring_point.0 < 0 || neighbouring_point.1 < 0 {
+        // Need at least one cell of margin for interpolation
+        if fx < 0.0 || fz < 0.0 {
             return None;
         }
 
-        if neighbouring_point.0 >= self.width as isize
-            || neighbouring_point.1 >= self.height as isize
-        {
+        let ix = fx as usize;
+        let iz = fz as usize;
+
+        if ix + 1 >= self.grid_w || iz + 1 >= self.grid_h {
+            // Allow sampling exactly on the last grid line
+            if ix < self.grid_w && iz < self.grid_h && fx.fract() < f32::EPSILON && fz.fract() < f32::EPSILON {
+                return self.get_tile(ix, iz);
+            }
             return None;
         }
 
-        Some(self.tiles[neighbouring_point.0 as usize][neighbouring_point.1 as usize])
+        let tx = fx - ix as f32;
+        let tz = fz - iz as f32;
+
+        let h00 = self.heights[ix * self.grid_h + iz];
+        let h10 = self.heights[(ix + 1) * self.grid_h + iz];
+        let h01 = self.heights[ix * self.grid_h + (iz + 1)];
+        let h11 = self.heights[(ix + 1) * self.grid_h + (iz + 1)];
+
+        let h = h00 * (1.0 - tx) * (1.0 - tz)
+            + h10 * tx * (1.0 - tz)
+            + h01 * (1.0 - tx) * tz
+            + h11 * tx * tz;
+
+        Some(h)
     }
-}
 
-impl Default for HeightmapData {
-    fn default() -> Self {
-        HeightmapData::flat(25, 25)
+    /// Sample terrain surface normal and slope angle (radians) at a world-space position.
+    /// Uses central differences with a one-tile epsilon.
+    pub fn sample_normal(&self, world_x: f32, world_z: f32) -> Option<(Vec3, f32)> {
+        let eps_x = self.tile_size.0;
+        let eps_z = self.tile_size.1;
+
+        let h_left = self.sample_height(world_x - eps_x, world_z)?;
+        let h_right = self.sample_height(world_x + eps_x, world_z)?;
+        let h_back = self.sample_height(world_x, world_z - eps_z)?;
+        let h_front = self.sample_height(world_x, world_z + eps_z)?;
+
+        let dx = (h_right - h_left) / (2.0 * eps_x);
+        let dz = (h_front - h_back) / (2.0 * eps_z);
+
+        let normal = Vec3::new(-dx, 1.0, -dz).normalize();
+        let slope = normal.y.acos();
+
+        Some((normal, slope))
     }
 }

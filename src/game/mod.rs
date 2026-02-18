@@ -13,12 +13,14 @@ mod interaction;
 mod materials;
 mod outline;
 pub mod pause_menu;
+pub mod physics;
 mod post_process;
 mod simulation;
 mod ui_displays;
 mod world;
 
-use camera::{adjust_camera_distance, handle_movement, resize_render_texture_sprite};
+use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
+use physics::character_physics;
 use cutting_board::{
     ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
     update_cutting_board_menu_rotation,
@@ -98,7 +100,13 @@ impl Plugin for SimulationPlugin {
 
         app.add_systems(
             Update,
-            handle_movement
+            (
+                handle_camera_input,
+                apply_freecam_movement,
+                character_physics,
+                camera_follow,
+            )
+                .chain()
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(

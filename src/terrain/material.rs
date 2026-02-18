@@ -8,14 +8,6 @@ impl MaterialExtension for TerrainMaterial {
         "shaders/terrain.wgsl".into()
     }
 
-    fn prepass_vertex_shader() -> ShaderRef {
-        "shaders/terrain.wgsl".into()
-    }
-
-    fn prepass_fragment_shader() -> ShaderRef {
-        "shaders/terrain.wgsl".into()
-    }
-
     fn alpha_mode() -> Option<AlphaMode> {
         Some(AlphaMode::Opaque)
     }
