@@ -10,7 +10,7 @@ use super::{
 
 /// Marker indicating terrain has been processed (prevents re-running setup)
 #[derive(Component)]
-struct TerrainProcessed;
+pub struct TerrainProcessed;
 
 pub(crate) fn create_heightmap_mesh(
     heightmap_query: Query<(&Heightmap, Entity), Without<TerrainProcessed>>,
