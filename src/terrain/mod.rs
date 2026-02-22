@@ -6,12 +6,14 @@ use crate::terrain::{
     mesh::{generate_lod_mesh, LOD_LEVELS},
 };
 
+pub(crate) mod edit;
 mod material;
 mod mesh;
+mod save;
 pub mod storage;
 
 /// Chunk size in vertices per side (overlap of 1 between adjacent chunks)
-const CHUNK_SIZE: usize = 64;
+pub(crate) const CHUNK_SIZE: usize = 64;
 
 /// Squared distance thresholds for LOD switching (avoids sqrt in hot path)
 const LOD_DISTANCES_SQ: [f32; LOD_LEVELS] = [
@@ -21,8 +23,8 @@ const LOD_DISTANCES_SQ: [f32; LOD_LEVELS] = [
     16_000_000.0, // 4000^2
 ];
 
-const TILE_SIZE: (f32, f32) = (1.0, 1.0);
-const HEIGHT_SCALE: f32 = 10.0;
+pub(crate) const TILE_SIZE: (f32, f32) = (1.0, 1.0);
+pub(crate) const HEIGHT_SCALE: f32 = 10.0;
 
 #[derive(Debug, Component)]
 pub struct Heightmap(pub Handle<Image>);
@@ -64,8 +66,22 @@ impl Plugin for HeightmapPlugin {
         >::default());
 
         app.init_resource::<TerrainLodState>();
+        app.init_resource::<storage::WorldConfig>();
 
         app.add_systems(Update, (create_heightmap_mesh, update_terrain_lod));
+        app.add_systems(Update, save::save_terrain);
+
+        app.init_resource::<edit::TerrainBrushHit>();
+        app.add_systems(
+            Update,
+            (
+                edit::toggle_terrain_edit_mode,
+                edit::adjust_brush_size,
+                edit::raycast_terrain_hit,
+                edit::apply_terrain_brush,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -75,6 +91,7 @@ fn create_heightmap_mesh(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    world_config: Res<storage::WorldConfig>,
 ) {
     for (heightmap, entity) in heightmap_query.iter() {
         let Some(image) = images.get(&heightmap.0) else {
@@ -85,7 +102,8 @@ fn create_heightmap_mesh(
         let height = image.height() as usize;
 
         // Read pixel data into a flat height grid (column-major: heights[x * height + y])
-        let heights: Vec<f32> = {
+        // Heights are un-scaled (0.0–1.0) at this stage; HEIGHT_SCALE is applied later.
+        let mut heights: Vec<f32> = {
             let data = image.data.as_ref().expect("Heightmap image has no data");
             let pixel_size = image
                 .texture_descriptor
@@ -103,6 +121,45 @@ fn create_heightmap_mesh(
             }
             grid
         };
+
+        // Load saved terrain modifications (if any) and apply them on top of the base heights
+        let world_path = std::path::PathBuf::from("worlds").join(&world_config.world_id);
+        let metadata = if storage::world_exists(&world_path) {
+            match storage::load_world(&world_path) {
+                Ok(meta) => {
+                    apply_stored_modifications(&mut heights, &meta, width, height, &world_path);
+                    info!("Loaded terrain modifications from {:?}", world_path);
+                    meta
+                }
+                Err(e) => {
+                    warn!("Could not load world metadata, starting fresh: {e}");
+                    storage::create_world_metadata(
+                        world_config.world_id.clone(),
+                        world_config.heightmap_path.clone(),
+                        width as u32, height as u32,
+                        CHUNK_SIZE as u32,
+                        TILE_SIZE,
+                        HEIGHT_SCALE,
+                    )
+                }
+            }
+        } else {
+            storage::create_world_metadata(
+                world_config.world_id.clone(),
+                world_config.heightmap_path.clone(),
+                width as u32, height as u32,
+                CHUNK_SIZE as u32,
+                TILE_SIZE,
+                HEIGHT_SCALE,
+            )
+        };
+
+        commands.insert_resource(storage::TerrainWorld {
+            metadata,
+            world_path,
+            base_heightmap: heightmap.0.clone(),
+        });
+        commands.insert_resource(storage::TerrainChunkRegistry::default());
 
         commands.insert_resource(HeightmapData {
             heights: heights.iter().map(|h| h * HEIGHT_SCALE).collect(),
@@ -205,6 +262,70 @@ fn create_heightmap_mesh(
             chunks_x,
             chunks_y
         );
+    }
+}
+
+/// Apply stored chunk modifications from disk onto the raw un-scaled height grid.
+///
+/// Stored heights are pre-scaled (0.0–HEIGHT_SCALE); we divide by HEIGHT_SCALE
+/// to convert them back to the un-scaled (0.0–1.0) form used by `heights`.
+fn apply_stored_modifications(
+    heights: &mut Vec<f32>,
+    metadata: &storage::WorldMetadata,
+    grid_w: usize,
+    grid_h: usize,
+    world_path: &std::path::Path,
+) {
+    for entry in &metadata.chunk_index {
+        if entry.state == storage::ChunkState::Unmodified {
+            continue;
+        }
+        match storage::load_chunk(entry.chunk_x, entry.chunk_y, world_path) {
+            Ok(chunk_data) => apply_chunk_to_heights(heights, &chunk_data, grid_w, grid_h),
+            Err(e) => warn!(
+                "Failed to load saved chunk ({}, {}): {}",
+                entry.chunk_x, entry.chunk_y, e
+            ),
+        }
+    }
+}
+
+/// Overwrite heights from a single stored `ChunkData`.
+fn apply_chunk_to_heights(
+    heights: &mut Vec<f32>,
+    chunk_data: &storage::ChunkData,
+    grid_w: usize,
+    grid_h: usize,
+) {
+    let start_x = chunk_data.chunk_x as usize * (CHUNK_SIZE - 1);
+    let start_y = chunk_data.chunk_y as usize * (CHUNK_SIZE - 1);
+
+    match &chunk_data.height_data {
+        storage::HeightData::UseBase => {}
+        storage::HeightData::Delta(mods) => {
+            for m in mods {
+                let gx = start_x + m.local_x() as usize;
+                let gy = start_y + m.local_y() as usize;
+                if gx < grid_w && gy < grid_h {
+                    // Deltas are stored pre-scaled; convert to un-scaled
+                    heights[gx * grid_h + gy] += m.delta / HEIGHT_SCALE;
+                }
+            }
+        }
+        storage::HeightData::Full { heights: stored, height_min, height_max } => {
+            let dequantized = storage::dequantize_heights(stored, *height_min, *height_max);
+            let ch = chunk_data.height as usize;
+            for lx in 0..chunk_data.width as usize {
+                for ly in 0..ch {
+                    let gx = start_x + lx;
+                    let gy = start_y + ly;
+                    if gx < grid_w && gy < grid_h {
+                        // Stored values are pre-scaled; convert to un-scaled
+                        heights[gx * grid_h + gy] = dequantized[lx * ch + ly] / HEIGHT_SCALE;
+                    }
+                }
+            }
+        }
     }
 }
 

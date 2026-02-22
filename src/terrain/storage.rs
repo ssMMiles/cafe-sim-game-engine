@@ -177,7 +177,7 @@ pub struct TerrainChunkRegistry {
     pub dirty_chunks: HashSet<(u32, u32)>,
 }
 
-/// Component for chunks with runtime modifications
+/// Component for chunks with runtime modifications (used by terrain editing tools)
 #[derive(Component, Default)]
 pub struct ModifiedTerrainChunk {
     /// Pending height modifications
@@ -186,13 +186,23 @@ pub struct ModifiedTerrainChunk {
     pub needs_gpu_update: bool,
 }
 
-/// Events for chunk streaming
-#[derive(Event)]
-pub enum ChunkStreamEvent {
-    LoadChunk { x: u32, y: u32 },
-    UnloadChunk { x: u32, y: u32 },
-    SaveChunk { x: u32, y: u32 },
-    SaveWorld,
+/// Configuration for which world to load and save terrain data for.
+/// Set this resource before the terrain loads to control the save directory.
+#[derive(Resource, Debug, Clone)]
+pub struct WorldConfig {
+    /// Directory name inside "worlds/" for this world's save data
+    pub world_id: String,
+    /// Asset path to the base heightmap image
+    pub heightmap_path: String,
+}
+
+impl Default for WorldConfig {
+    fn default() -> Self {
+        Self {
+            world_id: "default".to_string(),
+            heightmap_path: "heightmaps/2.png".to_string(),
+        }
+    }
 }
 
 // ============================================================================

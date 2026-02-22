@@ -81,6 +81,8 @@ pub struct UserSettings {
     pub third_person_view: bool,
     pub third_person_distance: f32,
     pub edge_detection_enabled: bool,
+    pub terrain_edit_mode: bool,
+    pub brush_radius: f32,
 }
 
 impl Default for UserSettings {
@@ -96,6 +98,8 @@ impl Default for UserSettings {
             third_person_view: true,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
+            terrain_edit_mode: false,
+            brush_radius: 5.0,
         }
     }
 }
@@ -155,6 +159,11 @@ impl UserSettings {
                 keybind: "F2",
                 current_value: if self.edge_detection_enabled { "ON" } else { "OFF" }.to_string(),
             },
+            SettingInfo {
+                name: "Terrain Edit",
+                keybind: "Shift+G",
+                current_value: if self.terrain_edit_mode { "ON" } else { "OFF" }.to_string(),
+            },
         ]
     }
 
@@ -188,6 +197,13 @@ impl UserSettings {
 
     pub fn toggle_edge_detection(&mut self) {
         self.edge_detection_enabled = !self.edge_detection_enabled;
+    }
+
+    pub fn toggle_terrain_edit_mode(&mut self) {
+        self.terrain_edit_mode = !self.terrain_edit_mode;
+        if self.terrain_edit_mode {
+            self.edit_mode = false;
+        }
     }
 }
 
