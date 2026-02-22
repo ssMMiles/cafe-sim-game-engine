@@ -1,7 +1,7 @@
 use bevy::{pbr::ExtendedMaterial, prelude::*};
 
 use super::{
-    bootstrap::create_heightmap_mesh,
+    bootstrap::create_terrain,
     edit,
     lod::{TerrainLodState, update_terrain_lod},
     material::TerrainMaterial,
@@ -19,7 +19,7 @@ impl Plugin for HeightmapPlugin {
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();
 
-        app.add_systems(Update, (create_heightmap_mesh, update_terrain_lod));
+        app.add_systems(Update, (create_terrain, update_terrain_lod));
         app.add_systems(Update, save::save_terrain);
 
         app.init_resource::<edit::TerrainBrushHit>();

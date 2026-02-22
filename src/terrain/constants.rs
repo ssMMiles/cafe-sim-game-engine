@@ -12,4 +12,4 @@ pub(crate) const LOD_DISTANCES_SQ: [f32; LOD_LEVELS] = [
 ];
 
 pub(crate) const TILE_SIZE: (f32, f32) = (1.0, 1.0);
-pub(crate) const HEIGHT_SCALE: f32 = 10.0;
+pub(crate) const HEIGHT_SCALE: f32 = 200.0;

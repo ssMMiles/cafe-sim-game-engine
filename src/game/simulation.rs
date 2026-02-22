@@ -10,7 +10,6 @@ use super::{GameEntity, SimulationConfig};
 use super::physics::CharacterState;
 use crate::game::world::ToonMaterial;
 use crate::settings::UserSettings;
-use crate::terrain::Heightmap;
 
 #[derive(Component)]
 pub struct InteractionText;

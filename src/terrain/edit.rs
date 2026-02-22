@@ -11,7 +11,7 @@ use crate::terrain::{
 };
 
 /// Height change per second at falloff=1, in pre-scaled world units.
-const BRUSH_STRENGTH: f32 = 5.0;
+const BRUSH_STRENGTH: f32 = 50.0;
 
 /// Stores the world-space terrain hit point found this frame by the raycast system.
 /// `None` means no terrain was hit (or terrain edit mode is inactive).

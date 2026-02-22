@@ -4,7 +4,7 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 use bevy::{log, prelude::*};
 
-use crate::terrain::Heightmap;
+use crate::terrain::TerrainSetupMarker;
 
 use super::day_night::Sun;
 use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
@@ -185,11 +185,7 @@ fn spawn_environment(
     //     GlobalTransform::default(),
     // ));
 
-    let heightmap = commands.spawn(
-        (
-            Heightmap(asset_server.load("heightmaps/2.png")),
-        )
-    ).id();
+    commands.spawn((GameEntity, TerrainSetupMarker));
 
     let rock_mesh: Handle<Mesh> = asset_server.load("meshes/rock/bigrock.gltf#Mesh0/Primitive0");
     commands.spawn((

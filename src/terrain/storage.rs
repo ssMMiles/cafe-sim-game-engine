@@ -35,8 +35,6 @@ pub struct WorldMetadata {
     pub version: u32,
     /// World identifier
     pub world_id: String,
-    /// Original heightmap asset path (e.g., "heightmaps/2.png")
-    pub base_heightmap: String,
     /// Terrain generation config
     pub terrain_config: TerrainConfigData,
     /// Chunk grid dimensions
@@ -165,7 +163,6 @@ pub struct VertexMaterial {
 pub struct TerrainWorld {
     pub metadata: WorldMetadata,
     pub world_path: PathBuf,
-    pub base_heightmap: Handle<Image>,
 }
 
 /// Registry tracking loaded chunks
@@ -186,21 +183,24 @@ pub struct ModifiedTerrainChunk {
     pub needs_gpu_update: bool,
 }
 
-/// Configuration for which world to load and save terrain data for.
-/// Set this resource before the terrain loads to control the save directory.
+/// Configuration for the terrain world.
+/// Set this resource before the terrain loads to control world size and save directory.
 #[derive(Resource, Debug, Clone)]
 pub struct WorldConfig {
     /// Directory name inside "worlds/" for this world's save data
     pub world_id: String,
-    /// Asset path to the base heightmap image
-    pub heightmap_path: String,
+    /// Terrain grid width in tiles
+    pub grid_width: u32,
+    /// Terrain grid height in tiles
+    pub grid_height: u32,
 }
 
 impl Default for WorldConfig {
     fn default() -> Self {
         Self {
             world_id: "default".to_string(),
-            heightmap_path: "heightmaps/2.png".to_string(),
+            grid_width: 256,
+            grid_height: 256,
         }
     }
 }
@@ -418,7 +418,6 @@ pub fn world_exists(world_path: &Path) -> bool {
 /// Create a new world metadata with default chunk index
 pub fn create_world_metadata(
     world_id: String,
-    base_heightmap: String,
     grid_width: u32,
     grid_height: u32,
     chunk_size: u32,
@@ -442,7 +441,6 @@ pub fn create_world_metadata(
     WorldMetadata {
         version: FORMAT_VERSION,
         world_id,
-        base_heightmap,
         terrain_config: TerrainConfigData {
             grid_width,
             grid_height,
@@ -527,7 +525,6 @@ mod tests {
 
         let metadata = create_world_metadata(
             "test".to_string(),
-            "heightmaps/test.png".to_string(),
             256,
             256,
             64,

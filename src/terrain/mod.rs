@@ -10,7 +10,8 @@ mod save;
 pub mod storage;
 mod types;
 
+pub use bootstrap::TerrainSetupMarker;
 pub use plugin::HeightmapPlugin;
-pub use types::{Heightmap, HeightmapData, TerrainChunk};
+pub use types::{HeightmapData, TerrainChunk};
 
 pub(crate) use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};

@@ -2,9 +2,6 @@ use bevy::prelude::*;
 
 use super::mesh::LOD_LEVELS;
 
-#[derive(Debug, Component)]
-pub struct Heightmap(pub Handle<Image>);
-
 /// Marker component for terrain chunk entities
 #[derive(Component)]
 pub struct TerrainChunk {
