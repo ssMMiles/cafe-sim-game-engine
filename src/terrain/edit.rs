@@ -1,18 +1,13 @@
 use std::collections::HashSet;
 
-use bevy::{
-    camera::primitives::Aabb,
-    picking::mesh_picking::ray_cast::MeshRayCast,
-    prelude::*,
-};
+use bevy::{camera::primitives::Aabb, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*};
 
 use crate::game::camera::PlayerCamera;
 use crate::settings::UserSettings;
 use crate::terrain::{
-    mesh::{generate_lod_mesh, LOD_LEVELS},
+    mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::TerrainChunkRegistry,
-    {CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE},
-    {HeightmapData, TerrainChunk},
+    {CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE}, {HeightmapData, TerrainChunk},
 };
 
 /// Height change per second at falloff=1, in pre-scaled world units.
@@ -108,7 +103,9 @@ pub fn apply_terrain_brush(
         return;
     }
 
-    let Some(mut heightmap) = heightmap else { return };
+    let Some(mut heightmap) = heightmap else {
+        return;
+    };
 
     let radius = settings.brush_radius;
     let dt = time.delta_secs();
@@ -154,8 +151,7 @@ pub fn apply_terrain_brush(
             if ty as usize > 0 && ty as usize % cs == 0 {
                 affected.insert((cx, cy - 1));
             }
-            if tx as usize > 0 && tx as usize % cs == 0
-                && ty as usize > 0 && ty as usize % cs == 0
+            if tx as usize > 0 && tx as usize % cs == 0 && ty as usize > 0 && ty as usize % cs == 0
             {
                 affected.insert((cx - 1, cy - 1));
             }
@@ -184,9 +180,8 @@ pub fn apply_terrain_brush(
             let mut new_aabb = None;
             for lod in 0..LOD_LEVELS {
                 let (new_mesh, lod_aabb) = generate_lod_mesh(
-                    heights, grid_w, grid_h,
-                    start_x, start_y, chunk_w, chunk_h,
-                    TILE_SIZE, 1.0, lod,
+                    heights, grid_w, grid_h, start_x, start_y, chunk_w, chunk_h, TILE_SIZE, 1.0,
+                    lod,
                 );
                 if lod == 0 {
                     new_aabb = Some(lod_aabb);

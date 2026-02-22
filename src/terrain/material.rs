@@ -1,4 +1,6 @@
-use bevy::{pbr::MaterialExtension, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef};
+use bevy::{
+    pbr::MaterialExtension, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef,
+};
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct TerrainMaterial {}

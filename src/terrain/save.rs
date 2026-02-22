@@ -2,11 +2,11 @@
 
 use bevy::prelude::*;
 
-use super::{HeightmapData, CHUNK_SIZE};
 use super::storage::{
     ChunkData, ChunkState, HeightData, MaterialData, TerrainChunkRegistry, TerrainWorld,
     quantize_heights, save_chunk, save_world,
 };
+use super::{CHUNK_SIZE, HeightmapData};
 
 /// System: save all dirty terrain chunks to disk on Shift+S.
 pub fn save_terrain(
@@ -34,7 +34,11 @@ pub fn save_terrain(
     }
 
     let dirty: Vec<(u32, u32)> = registry.dirty_chunks.drain().collect();
-    info!("Saving {} dirty chunk(s) to {:?}", dirty.len(), terrain_world.world_path);
+    info!(
+        "Saving {} dirty chunk(s) to {:?}",
+        dirty.len(),
+        terrain_world.world_path
+    );
 
     for (cx, cy) in dirty {
         let chunk_data = extract_chunk_data(&heightmap, cx, cy);
@@ -92,7 +96,11 @@ fn extract_chunk_data(heightmap: &HeightmapData, chunk_x: u32, chunk_y: u32) -> 
         chunk_y,
         width,
         height,
-        height_data: HeightData::Full { heights: quantized, height_min, height_max },
+        height_data: HeightData::Full {
+            heights: quantized,
+            height_min,
+            height_max,
+        },
         material_data: MaterialData::Uniform,
     }
 }
