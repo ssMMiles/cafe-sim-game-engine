@@ -1,7 +1,13 @@
-use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
+use bevy::{
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    pbr::ExtendedMaterial,
+    prelude::*,
+};
 
 use crate::{
-    AppState, game::world::ToonMaterial, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
+    AppState,
+    game::world::ToonMaterial,
+    settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings},
 };
 
 pub mod camera;
@@ -19,13 +25,15 @@ mod simulation;
 mod ui_displays;
 mod world;
 
-use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
-use physics::character_physics;
+use camera::{
+    adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input,
+    resize_render_texture_sprite,
+};
 use cutting_board::{
     ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
     update_cutting_board_menu_rotation,
 };
-use day_night::{TimeOfDay, update_time_of_day, update_sun_transform, update_sun_properties};
+use day_night::{TimeOfDay, update_sun_properties, update_sun_transform, update_time_of_day};
 use edit_mode::{
     PlacementPreviewEntity, cleanup_placement_preview, handle_edit_mode_click,
     setup_placement_preview, toggle_edit_mode, toggle_placement_object, update_placement_preview,
@@ -38,6 +46,7 @@ use pause_menu::{
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
     update_slider_label,
 };
+use physics::character_physics;
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use simulation::{
     display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
@@ -82,7 +91,9 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(LogDiagnosticsPlugin::default());
-        app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
+        app.add_plugins(MaterialPlugin::<
+            ExtendedMaterial<StandardMaterial, ToonMaterial>,
+        >::default());
         app.add_plugins(EdgeDetectionPlugin);
         app.add_message::<InteractableClicked>();
         app.add_systems(
@@ -111,7 +122,11 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(
             Update,
-            (update_time_of_day, update_sun_transform, update_sun_properties)
+            (
+                update_time_of_day,
+                update_sun_transform,
+                update_sun_properties,
+            )
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(
@@ -148,8 +163,14 @@ impl Plugin for SimulationPlugin {
         app.add_systems(Update, toggle_crosshair.run_if(in_state(AppState::InGame)));
         app.add_systems(Update, toggle_outline.run_if(in_state(AppState::InGame)));
         app.add_systems(Update, toggle_edit_mode.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, toggle_edge_detection.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, sync_edge_detection_settings.run_if(in_state(AppState::InGame)));
+        app.add_systems(
+            Update,
+            toggle_edge_detection.run_if(in_state(AppState::InGame)),
+        );
+        app.add_systems(
+            Update,
+            sync_edge_detection_settings.run_if(in_state(AppState::InGame)),
+        );
         app.add_systems(
             Update,
             toggle_placement_object.run_if(in_state(AppState::InGame)),
