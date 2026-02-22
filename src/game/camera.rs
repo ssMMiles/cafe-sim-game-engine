@@ -17,8 +17,8 @@ use bevy::{
 };
 use bevy_modern_pixel_camera::prelude::*;
 
-const RENDER_TEXTURE_WIDTH: u32 = 1920;
-const RENDER_TEXTURE_HEIGHT: u32 = 1080;
+const RENDER_TEXTURE_WIDTH: u32 = 3840;
+const RENDER_TEXTURE_HEIGHT: u32 = 2160;
 
 #[derive(Component, Debug, Default)]
 pub struct PlayerCamera {

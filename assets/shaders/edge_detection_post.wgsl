@@ -15,89 +15,60 @@ struct EdgeSettings {
 @group(0) @binding(3) var texture_sampler: sampler;
 @group(0) @binding(4) var<uniform> settings: EdgeSettings;
 
-// Sobel kernels for edge detection
-const SOBEL_X: array<f32, 9> = array<f32, 9>(
-    -1.0, 0.0, 1.0,
-    -2.0, 0.0, 2.0,
-    -1.0, 0.0, 1.0
-);
+fn load_depth(pixel: vec2<i32>) -> f32 {
+    return textureLoad(depth_texture, pixel, 0);
+}
 
-const SOBEL_Y: array<f32, 9> = array<f32, 9>(
-    -1.0, -2.0, -1.0,
-     0.0,  0.0,  0.0,
-     1.0,  2.0,  1.0
-);
+fn load_normal(pixel: vec2<i32>) -> vec3<f32> {
+    let normal_sample = textureLoad(normal_texture, pixel, 0);
+    // Prepass normals are packed from [-1, 1] to [0, 1]
+    return normalize(normal_sample.xyz * 2.0 - vec3<f32>(1.0));
+}
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let resolution = vec2<f32>(textureDimensions(screen_texture));
-    let texel_size = settings.edge_thickness / resolution;
-
-    // Convert UV to pixel coordinates for textureLoad
+    let dims = vec2<i32>(textureDimensions(screen_texture));
     let pixel_coords = vec2<i32>(in.position.xy);
 
-    // Initialize Sobel accumulators
-    var depth_sobel_x = 0.0;
-    var depth_sobel_y = 0.0;
-    var normal_sobel_x = vec3<f32>(0.0);
-    var normal_sobel_y = vec3<f32>(0.0);
+    // Sample center values once and compare neighbors against them.
+    // This is more stable than Sobel over interpolated normals and reduces
+    // triangle artifacts that move as the camera rotates.
+    let center_depth = load_depth(pixel_coords);
+    let center_normal = load_normal(pixel_coords);
 
-    // Sample 3x3 neighborhood
-    var kernel_index = 0u;
+    let pixel_radius = max(1, i32(round(settings.edge_thickness)));
+
+    var max_depth_delta = 0.0;
+    var max_normal_delta = 0.0;
+
     for (var y: i32 = -1; y <= 1; y++) {
         for (var x: i32 = -1; x <= 1; x++) {
-            let sample_coords = pixel_coords + vec2<i32>(x, y);
+            if (x == 0 && y == 0) {
+                continue;
+            }
 
-            // Sample depth (using textureLoad for multisampled depth textures, sample index 0)
-            let depth = textureLoad(depth_texture, sample_coords, 0);
+            let offset = vec2<i32>(x, y) * pixel_radius;
+            let sample_coords = clamp(pixel_coords + offset, vec2<i32>(0), dims - vec2<i32>(1));
 
-            // Sample normal (stored as RGB10A2, need to unpack from [0,1] to [-1,1])
-            // For multisampled textures, we also need to specify the sample index
-            let normal_sample = textureLoad(normal_texture, sample_coords, 0);
-            let normal = normalize(normal_sample.xyz * 2.0 - vec3<f32>(1.0));
+            let sample_depth = load_depth(sample_coords);
+            let sample_normal = load_normal(sample_coords);
 
-            // Apply Sobel kernels
-            let sobel_weight_x = SOBEL_X[kernel_index];
-            let sobel_weight_y = SOBEL_Y[kernel_index];
+            max_depth_delta = max(max_depth_delta, abs(sample_depth - center_depth));
 
-            depth_sobel_x += depth * sobel_weight_x;
-            depth_sobel_y += depth * sobel_weight_y;
-
-            normal_sobel_x += normal * sobel_weight_x;
-            normal_sobel_y += normal * sobel_weight_y;
-
-            kernel_index++;
+            // Angular difference proxy: 0 for aligned normals, 1 for orthogonal,
+            // 2 for opposite.
+            let normal_delta = 1.0 - dot(center_normal, sample_normal);
+            max_normal_delta = max(max_normal_delta, normal_delta);
         }
     }
 
-    // Calculate edge strength from depth discontinuities
-    // This detects geometric boundaries (object edges)
-    let depth_edge = sqrt(
-        depth_sobel_x * depth_sobel_x +
-        depth_sobel_y * depth_sobel_y
-    ) * settings.depth_sensitivity;
-
-    // Calculate edge strength from normal discontinuities
-    // This detects surface angle changes (creases, folds)
-    let normal_edge_x = length(normal_sobel_x);
-    let normal_edge_y = length(normal_sobel_y);
-    let normal_edge = sqrt(
-        normal_edge_x * normal_edge_x +
-        normal_edge_y * normal_edge_y
-    ) * settings.normal_sensitivity;
-
-    // Combine edge signals (max for sharper edges)
-    // Using max ensures either geometric edges OR surface angle changes trigger detection
+    let depth_edge = max_depth_delta * settings.depth_sensitivity;
+    let normal_edge = max_normal_delta * settings.normal_sensitivity;
     let edge_strength = max(depth_edge, normal_edge);
 
-    // Threshold and sharpen
-    let edge = smoothstep(0.05, 0.15, edge_strength);
+    // Slightly higher threshold prevents crawling artifacts in shaded corners.
+    let edge = smoothstep(0.02, 0.04, edge_strength);
 
-    // Sample original toon-shaded color
     let base_color = textureSample(screen_texture, texture_sampler, in.uv);
-
-    // Composite: blend edge color over base
-    let final_color = mix(base_color, settings.edge_color, edge);
-
-    return final_color;
+    return mix(base_color, settings.edge_color, edge);
 }
