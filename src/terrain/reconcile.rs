@@ -1,4 +1,5 @@
 use super::{CHUNK_SIZE, HEIGHT_SCALE, storage};
+use bevy::prelude::*;
 
 /// Apply stored chunk modifications from disk onto the raw un-scaled height grid.
 ///
