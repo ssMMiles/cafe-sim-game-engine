@@ -199,8 +199,8 @@ impl Default for WorldConfig {
     fn default() -> Self {
         Self {
             world_id: "default".to_string(),
-            grid_width: 256,
-            grid_height: 256,
+            grid_width: 1024,
+            grid_height: 1024,
         }
     }
 }

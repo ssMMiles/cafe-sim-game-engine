@@ -80,7 +80,7 @@ pub(crate) fn create_terrain(
 
     let material = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
-            base_color: Color::srgb(1.0, 0.1, 0.1),
+            base_color: Color::srgb(0.81, 0.62, 0.60),
             perceptual_roughness: 1.0,
             metallic: 0.0,
             reflectance: 0.0,

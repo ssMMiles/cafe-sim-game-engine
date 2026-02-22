@@ -7,7 +7,7 @@ use bevy::{log, prelude::*};
 use crate::terrain::TerrainSetupMarker;
 
 use super::day_night::Sun;
-use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
+use super::interaction::{Interactable, spawn_interactable_scene};
 use super::materials::PendingMaterial;
 use super::physics::Collider;
 use super::{GameEntity, simulation::TableMarker};
@@ -42,10 +42,17 @@ pub fn setup(
 ) {
     log::info!("Setting up the game world");
 
-    spawn_lighting(commands, meshes, materials);
     spawn_environment(commands, meshes, toon_materials, asset_server);
-    spawn_cafe_building(commands, meshes, toon_materials);
-    spawn_table(commands, asset_server);
+    spawn_lighting(commands, meshes, materials);
+}
+
+fn spawn_environment(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
+    asset_server: &Res<AssetServer>,
+) {
+    commands.spawn((GameEntity, TerrainSetupMarker));
 }
 
 pub fn cleanup(mut commands: Commands, game_entities: Query<Entity, With<GameEntity>>) {
@@ -126,233 +133,4 @@ fn spawn_lighting(
         },
         Transform::from_translation(Vec3::new(8.0, 5.0, 0.0)), // Center of building, mid-height
     ));
-}
-
-fn spawn_environment(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
-    asset_server: &Res<AssetServer>,
-) {
-    // Test sphere
-    let sphere = meshes.add(Sphere::default());
-    commands.spawn((
-        GameEntity,
-        Collider::Sphere { radius: 1.0 },
-        Interactable {
-            name: "Red Sphere".to_string(),
-            distance: 10.0,
-            interactable_type: InteractableType::Table, // Default type for test sphere
-        },
-        Mesh3d(sphere),
-        MeshMaterial3d(toon_materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb(1.0, 0.1, 0.1),
-                perceptual_roughness: 1.0,
-                metallic: 0.0,
-                reflectance: 0.0,
-                ..Default::default()
-            },
-            extension: ToonMaterial {
-                color: Color::srgb(1.0, 0.1, 0.1).into(),
-            },
-        })),
-        Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Ground plane
-    // commands.spawn((
-    //     GameEntity,
-    //     Mesh3d(meshes.add(Plane3d {
-    //         normal: Dir3::Y,
-    //         half_size: Vec2 { x: 100.0, y: 100.0 },
-    //         ..Default::default()
-    //     })),
-    //     MeshMaterial3d(toon_materials.add(ExtendedMaterial {
-    //         base: StandardMaterial {
-    //             base_color: Color::srgb(0.74, 0.447, 0.207),
-    //             perceptual_roughness: 1.0,
-    //             metallic: 0.0,
-    //             reflectance: 0.0,
-    //             ..Default::default()
-    //         },
-    //         extension: ToonMaterial {
-    //             color: Color::srgb(0.74, 0.447, 0.207).into(),
-    //         },
-    //     })),
-    //     Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
-    //     GlobalTransform::default(),
-    // ));
-
-    commands.spawn((GameEntity, TerrainSetupMarker));
-
-    let rock_mesh: Handle<Mesh> = asset_server.load("meshes/rock/bigrock.gltf#Mesh0/Primitive0");
-    commands.spawn((
-        GameEntity,
-        Mesh3d(rock_mesh),
-        MeshMaterial3d(toon_materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb(0.5, 0.5, 0.5),
-                perceptual_roughness: 1.0,
-                metallic: 0.0,
-                reflectance: 0.0,
-                ..Default::default()
-            },
-            extension: ToonMaterial {
-                color: Color::srgb(0.5, 0.5, 0.5).into(),
-            },
-        })),
-        Transform::from_translation(Vec3::new(-10.0, 0.0, -10.0)).with_scale(Vec3::splat(2.0)),
-        GlobalTransform::default(),
-    ));
-}
-
-fn spawn_cafe_building(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
-) {
-    // Create a 4x bigger cafe building with door opening (2x shorter height)
-    let cafe_roof = meshes.add(Cuboid::new(28.0, 1.0, 20.0));
-
-    let brown_material = toon_materials.add(ExtendedMaterial {
-        base: StandardMaterial {
-            base_color: Color::srgb(0.340, 0.0782, 0.0782),
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            reflectance: 0.0,
-            ..Default::default()
-        },
-        extension: ToonMaterial {
-            color: Color::srgb(0.38, 0.26, 0.05).into(),
-        },
-    });
-
-    // let brown_material = materials.add(StandardMaterial {
-    //     base_color: Color::srgb(0.6, 0.4, 0.2),
-    //     cull_mode: None,
-    //     ..Default::default()
-    // });
-
-    let red_material = toon_materials.add(ExtendedMaterial {
-        base: StandardMaterial {
-            base_color: Color::srgb(0.8, 0.2, 0.2),
-            cull_mode: None,
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            reflectance: 0.0,
-            ..Default::default()
-        },
-        extension: ToonMaterial {
-            color: Color::srgb(0.8, 0.2, 0.2).into(),
-        },
-    });
-
-    // Cafe walls with door opening (front wall split into three parts) - 4x bigger, 1.5x taller
-    // Left front wall piece (8 units wide, 1.5x taller)
-    let left_wall = meshes.add(Cuboid::new(8.0, 9.0, 0.8));
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(4.0, 4.5, 0.4) },
-        Mesh3d(left_wall),
-        MeshMaterial3d(brown_material.clone()),
-        Transform::from_translation(Vec3::new(0.0, 4.5, -8.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Right front wall piece (8 units wide, 1.5x taller)
-    let right_wall = meshes.add(Cuboid::new(8.0, 9.0, 0.8));
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(4.0, 4.5, 0.4) },
-        Mesh3d(right_wall),
-        MeshMaterial3d(brown_material.clone()),
-        Transform::from_translation(Vec3::new(16.0, 4.5, -8.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Top piece above door (8 units wide, 1.5x taller)
-    let top_wall = meshes.add(Cuboid::new(8.0, 2.4, 0.8));
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(4.0, 1.2, 0.4) },
-        Mesh3d(top_wall),
-        MeshMaterial3d(brown_material.clone()),
-        Transform::from_translation(Vec3::new(8.0, 7.8, -8.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Back wall (1.5x taller)
-    let back_wall = meshes.add(Cuboid::new(24.0, 9.0, 0.8));
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(12.0, 4.5, 0.4) },
-        Mesh3d(back_wall),
-        MeshMaterial3d(brown_material.clone()),
-        Transform::from_translation(Vec3::new(8.0, 4.5, 8.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Left side wall (1.5x taller)
-    let left_side_wall = meshes.add(Cuboid::new(0.8, 9.0, 16.0));
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(0.4, 4.5, 8.0) },
-        Mesh3d(left_side_wall),
-        MeshMaterial3d(brown_material.clone()),
-        Transform::from_translation(Vec3::new(-4.0, 4.5, 0.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Right side wall (1.5x taller)
-    let right_side_wall = meshes.add(Cuboid::new(0.8, 9.0, 16.0));
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(0.4, 4.5, 8.0) },
-        Mesh3d(right_side_wall),
-        MeshMaterial3d(brown_material.clone()),
-        Transform::from_translation(Vec3::new(20.0, 4.5, 0.0)),
-        GlobalTransform::default(),
-    ));
-
-    // Cafe roof (1.5x taller)
-    commands.spawn((
-        GameEntity,
-        Collider::Box { half_extents: Vec3::new(14.0, 0.5, 10.0) },
-        Mesh3d(cafe_roof),
-        MeshMaterial3d(red_material),
-        Transform::from_translation(Vec3::new(8.0, 9.75, 0.0)),
-        GlobalTransform::default(),
-    ));
-}
-
-fn spawn_table(commands: &mut Commands, asset_server: &Res<AssetServer>) {
-    // Load the scene directly
-    let table_scene: Handle<Scene> = asset_server.load("meshes/table/result.gltf#Scene0");
-    log::info!("Loading scene from: meshes/table/result.gltf#Scene0");
-
-    spawn_interactable_scene(
-        commands,
-        (
-            GameEntity,
-            Interactable {
-                name: "Wooden Table".to_string(),
-                distance: 10.0,
-                interactable_type: InteractableType::Table,
-            },
-            SceneRoot(table_scene),
-            Transform::from_translation(Vec3::new(3.0, 0.0, 0.0)).with_scale(Vec3::splat(0.02)), // Scale down to 1/50th size
-            GlobalTransform::default(),
-            TableMarker, // Mark this as a table for material override
-            PendingMaterial {
-                base_color: Color::srgb(0.6, 0.4, 0.2), // Brown wood color
-                metallic: 0.0,
-                perceptual_roughness: 0.9,
-                alpha_mode: bevy::render::alpha::AlphaMode::Opaque,
-            },
-        ),
-    );
-
-    log::info!("Table entity spawned at position (3, 0, 0)");
 }

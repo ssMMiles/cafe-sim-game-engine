@@ -9,7 +9,7 @@ use bevy::{
 pub const LOD_LEVELS: usize = 4;
 
 /// Skirt depth multiplier per LOD stride unit
-const SKIRT_DEPTH_PER_STRIDE: f32 = 5.0;
+const SKIRT_DEPTH_PER_STRIDE: f32 = 1.0;
 
 /// Generate a chunk mesh at a specific LOD level with baked heights and normals.
 ///

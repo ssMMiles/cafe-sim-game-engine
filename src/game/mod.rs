@@ -1,11 +1,11 @@
 use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
-    AppState, game::world::ToonMaterial, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
+    AppState, game::{crosshair::{toggle_crosshair, update_crosshair_display}, interaction::{handle_interactable_clicks, show_interaction_text}, world::ToonMaterial}, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
 };
 
 pub mod camera;
-mod cutting_board;
+mod crosshair;
 mod day_night;
 mod edit_mode;
 mod icons;
@@ -21,10 +21,6 @@ mod world;
 
 use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 use physics::character_physics;
-use cutting_board::{
-    ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
-    update_cutting_board_menu_rotation,
-};
 use day_night::{TimeOfDay, update_time_of_day, update_sun_transform, update_sun_properties};
 use edit_mode::{
     PlacementPreviewEntity, cleanup_placement_preview, handle_edit_mode_click,
@@ -40,9 +36,7 @@ use pause_menu::{
 };
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use simulation::{
-    display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
-    toggle_crosshair, update_cooking_display_rotation, update_cooking_displays,
-    update_cooking_timers, update_crosshair_display,
+    exit, setup
 };
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
@@ -196,14 +190,6 @@ impl Plugin for SimulationPlugin {
             Update,
             (
                 handle_interactable_clicks,
-                update_cutting_board_menu_rotation,
-                animate_card_hover,
-                update_card_shadows,
-                check_menu_distances,
-                update_cooking_timers,
-                display_cooking_progress,
-                update_cooking_displays,
-                update_cooking_display_rotation,
             )
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
@@ -256,7 +242,6 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<SimulationConfig>();
         app.init_resource::<TimeOfDay>();
         app.init_resource::<PlacementPreviewEntity>();
-        app.init_resource::<ActiveCuttingBoardMenu>();
         app.init_resource::<SvgTextureCache>();
     }
 }

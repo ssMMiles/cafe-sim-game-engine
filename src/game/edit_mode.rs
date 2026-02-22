@@ -1,5 +1,5 @@
 use super::GameEntity;
-use super::interaction::{Interactable, InteractableType, spawn_interactable_scene};
+use super::interaction::{Interactable, spawn_interactable_scene};
 use super::materials::{PendingMaterial, update_mesh_materials_color};
 use super::simulation::{CookerMarker, CuttingBoardMarker, FridgeMarker, TableMarker};
 use crate::settings::{PlacementObjectType, UserSettings};
@@ -68,101 +68,14 @@ pub fn handle_edit_mode_click(
         }
     }
 
-    // Spawn object at determined location
-    if let Some(pos) = position {
-        let table_scene: Handle<Scene> = asset_server.load("meshes/table/result.gltf#Scene0");
+    if let None = position {
+        log::warn!("Could not determine placement position for new object");
+        return;
+    }
 
-        // Determine object properties based on current placement type
-        let (name, interactable_type) = match settings.current_placement_object {
-            PlacementObjectType::Table => ("Wooden Table", InteractableType::Table),
-            PlacementObjectType::Cooker => ("Cooker", InteractableType::Cooker),
-            PlacementObjectType::Fridge => ("Fridge", InteractableType::Fridge),
-            PlacementObjectType::CuttingBoard => ("Cutting Board", InteractableType::CuttingBoard),
-        };
-
-        // Build common components
-        let base_bundle = (
-            GameEntity,
-            Interactable {
-                name: name.to_string(),
-                distance: 10.0,
-                interactable_type,
-            },
-            SceneRoot(table_scene),
-            Transform::from_translation(Vec3::new(pos.x, 0.0, pos.z)).with_scale(Vec3::splat(0.02)),
-            GlobalTransform::default(),
-        );
-
-        // Spawn with type-specific components
-        match settings.current_placement_object {
-            PlacementObjectType::Table => {
-                spawn_interactable_scene(
-                    &mut commands,
-                    (
-                        base_bundle,
-                        TableMarker,
-                        PendingMaterial {
-                            base_color: Color::srgb(0.6, 0.4, 0.2),
-                            metallic: 0.0,
-                            perceptual_roughness: 0.9,
-                            alpha_mode: AlphaMode::Opaque,
-                        },
-                    ),
-                );
-            }
-            PlacementObjectType::Cooker => {
-                spawn_interactable_scene(
-                    &mut commands,
-                    (
-                        base_bundle,
-                        CookerMarker,
-                        PendingMaterial {
-                            base_color: Color::srgb(0.9, 0.2, 0.2),
-                            metallic: 0.3,
-                            perceptual_roughness: 0.5,
-                            alpha_mode: AlphaMode::Opaque,
-                        },
-                    ),
-                );
-            }
-            PlacementObjectType::Fridge => {
-                spawn_interactable_scene(
-                    &mut commands,
-                    (
-                        base_bundle,
-                        FridgeMarker,
-                        PendingMaterial {
-                            base_color: Color::srgb(0.2, 0.4, 0.8),
-                            metallic: 0.5,
-                            perceptual_roughness: 0.3,
-                            alpha_mode: AlphaMode::Opaque,
-                        },
-                    ),
-                );
-            }
-            PlacementObjectType::CuttingBoard => {
-                spawn_interactable_scene(
-                    &mut commands,
-                    (
-                        base_bundle,
-                        CuttingBoardMarker,
-                        PendingMaterial {
-                            base_color: Color::srgb(0.2, 0.8, 0.3),
-                            metallic: 0.0,
-                            perceptual_roughness: 0.8,
-                            alpha_mode: AlphaMode::Opaque,
-                        },
-                    ),
-                );
-            }
-        };
-
-        log::info!(
-            "Spawned {} at position ({:.1}, 0.0, {:.1})",
-            name,
-            pos.x,
-            pos.z
-        );
+    if true {
+        log::warn!("Object placement is currently disabled.");
+        return;
     }
 }
 

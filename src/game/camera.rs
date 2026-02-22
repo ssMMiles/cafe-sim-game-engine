@@ -15,7 +15,6 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
     window::PrimaryWindow,
 };
-use bevy_modern_pixel_camera::prelude::*;
 
 const RENDER_TEXTURE_WIDTH: u32 = 3840;
 const RENDER_TEXTURE_HEIGHT: u32 = 2160;
@@ -34,7 +33,6 @@ pub fn setup_camera(
     commands: &mut Commands,
     images: &mut ResMut<Assets<Image>>,
     meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
@@ -70,7 +68,7 @@ pub fn setup_camera(
 
     // The camera to render all entities on render layer #0, which is the default layer for
     // entities, unless otherwise specified.
-    let camera_entity = commands.spawn((
+    let _camera_entity = commands.spawn((
         Camera3d::default(),
         Camera::default(),
         RenderTarget::Image(render_texture_handle.clone().into()),
@@ -93,49 +91,6 @@ pub fn setup_camera(
         Fxaa::default(),
     )).id();
 
-    // Add atmosphere components separately to avoid bundle size limit
-    // DISABLED: Atmosphere system conflicts with render-to-texture setup
-    // commands.entity(camera_entity).insert((
-    //     Atmosphere::EARTH,
-    //     AtmosphereSettings::default(),
-    //     Exposure { ev100: 13.0 },
-    //     Tonemapping::AcesFitted,
-    //     Bloom::NATURAL,
-    //     AtmosphereEnvironmentMapLight::default(),
-    // ));
-
-    let cube_size = 4.0;
-    let cube_handle = meshes.add(Cuboid::new(cube_size, cube_size, cube_size));
-
-    // This material has the texture that has been rendered.
-    // let material_handle = materials.add(StandardMaterial {
-    //     base_color_texture: Some(render_texture_handle),
-    //     reflectance: 0.02,
-    //     unlit: false,
-    //     ..default()
-    // });
-
-    // let alt_material_handle = materials.add(StandardMaterial {
-    //     base_color: Color::srgb(0.8, 0.2, 0.2),
-    //     reflectance: 0.02,
-    //     unlit: false,
-    //     ..default()
-    // });
-
-    // Main pass cube, with material containing the rendered first pass texture.
-    // commands.spawn((
-    //     Mesh3d(cube_handle),
-    //     MeshMaterial3d(material_handle),
-    //     Transform::from_xyz(0.0, 0.0, 1.5).with_rotation(Quat::from_rotation_x(-PI / 5.0)),
-    //     RenderLayers::layer(1),
-    // ));
-
-    // commands.spawn((
-    //     Camera3d::default(),
-    //     Transform::from_xyz(0.0, 0.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-    //     RenderLayers::layer(1),
-    // ));
-
     //
     // A sprite and orthographic camera is used to present the render texture.
     // These are on render layer #1
@@ -146,8 +101,6 @@ pub fn setup_camera(
         RenderLayers::layer(1),
     ));
 
-    // commands.spawn((Camera2d::default(), RenderLayers::layer(1)));
-
     commands.spawn((
         IsDefaultUiCamera,
         Camera2d::default(),
@@ -157,7 +110,7 @@ pub fn setup_camera(
         // },
         // PixelViewport,
         RenderLayers::layer(1),
-        // Fxaa::default(),
+        Fxaa::default(),
     ));
 }
 

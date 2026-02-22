@@ -10,6 +10,14 @@ impl MaterialExtension for TerrainMaterial {
         "shaders/terrain.wgsl".into()
     }
 
+    fn fragment_shader() -> ShaderRef {
+        "shaders/terrain_toon.wgsl".into()
+    }
+
+    fn deferred_fragment_shader() -> ShaderRef {
+        "shaders/terrain_toon.wgsl".into()
+    }
+
     fn alpha_mode() -> Option<AlphaMode> {
         Some(AlphaMode::Opaque)
     }
