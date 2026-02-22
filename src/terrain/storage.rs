@@ -11,7 +11,7 @@
 //! ```
 
 use bevy::prelude::*;
-use rkyv::{rancor::Error as RkyvError, Archive, Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -231,7 +231,11 @@ impl std::fmt::Display for StorageError {
             StorageError::Io(e) => write!(f, "I/O error: {}", e),
             StorageError::InvalidMagic => write!(f, "Invalid file magic bytes"),
             StorageError::VersionMismatch { expected, found } => {
-                write!(f, "Version mismatch: expected {}, found {}", expected, found)
+                write!(
+                    f,
+                    "Version mismatch: expected {}, found {}",
+                    expected, found
+                )
             }
             StorageError::ChecksumMismatch => write!(f, "Checksum mismatch"),
             StorageError::SerializationError(s) => write!(f, "Serialization error: {}", s),
@@ -246,8 +250,8 @@ pub fn save_world(world: &WorldMetadata, world_path: &Path) -> Result<(), Storag
     fs::create_dir_all(world_path)?;
     let meta_path = world_path.join("world.meta");
 
-    let bytes =
-        rkyv::to_bytes::<RkyvError>(world).map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let bytes = rkyv::to_bytes::<RkyvError>(world)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let checksum = crc32fast::hash(&bytes);
 
     let mut file = File::create(&meta_path)?;
@@ -316,8 +320,8 @@ pub fn save_chunk(chunk: &ChunkData, world_path: &Path) -> Result<(), StorageErr
 
     let chunk_path = chunks_dir.join(format!("chunk_{}_{}.terrain", chunk.chunk_x, chunk.chunk_y));
 
-    let bytes =
-        rkyv::to_bytes::<RkyvError>(chunk).map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let bytes = rkyv::to_bytes::<RkyvError>(chunk)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let checksum = crc32fast::hash(&bytes);
 
     let mut file = File::create(&chunk_path)?;
@@ -333,7 +337,11 @@ pub fn save_chunk(chunk: &ChunkData, world_path: &Path) -> Result<(), StorageErr
 }
 
 /// Load chunk data from disk
-pub fn load_chunk(chunk_x: u32, chunk_y: u32, world_path: &Path) -> Result<ChunkData, StorageError> {
+pub fn load_chunk(
+    chunk_x: u32,
+    chunk_y: u32,
+    world_path: &Path,
+) -> Result<ChunkData, StorageError> {
     let chunk_path = world_path
         .join("chunks")
         .join(format!("chunk_{}_{}.terrain", chunk_x, chunk_y));
@@ -465,7 +473,11 @@ pub fn create_default_chunk_data(chunk_x: u32, chunk_y: u32, width: u32, height:
 }
 
 /// Apply height modifications to a base height array
-pub fn apply_height_deltas(base_heights: &mut [f32], chunk_height: u32, mods: &[HeightModification]) {
+pub fn apply_height_deltas(
+    base_heights: &mut [f32],
+    chunk_height: u32,
+    mods: &[HeightModification],
+) {
     for m in mods {
         let local_x = m.local_x();
         let local_y = m.local_y();
