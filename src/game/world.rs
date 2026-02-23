@@ -1,3 +1,4 @@
+use bevy::light::NotShadowCaster;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::render::alpha::AlphaMode;
 use bevy::render::render_resource::AsBindGroup;
@@ -42,17 +43,9 @@ pub fn setup(
 ) {
     log::info!("Setting up the game world");
 
-    spawn_environment(commands, meshes, toon_materials, asset_server);
-    spawn_lighting(commands, meshes, materials);
-}
-
-fn spawn_environment(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
-    asset_server: &Res<AssetServer>,
-) {
     commands.spawn((GameEntity, TerrainSetupMarker));
+
+    spawn_lighting(commands, meshes, materials);
 }
 
 pub fn cleanup(mut commands: Commands, game_entities: Query<Entity, With<GameEntity>>) {
@@ -69,17 +62,24 @@ fn spawn_lighting(
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
-    let moon_position = Vec3::new(25.0, 50.0, -150.0);
+    // Add ambient light for diffusion
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.9, 0.9, 1.0), // Very dim, slightly blue for nighttime
+        brightness: 100.0,                     // Very low ambient for dark nighttime
+        ..default()
+    });
+
+    let sun_position = Vec3::new(25.0, 50.0, -150.0);
 
     // Calculate rotation to point at origin
     let target = Vec3::new(0.0, 0.0, 0.0);
-    let direction = (target - moon_position).normalize();
-    let moon_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction);
+    let direction = (target - sun_position).normalize();
+    let sun_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction);
 
-    // Add directional light (moonlight)
-    let moon_transform = Transform {
-        translation: moon_position,
-        rotation: moon_rotation,
+    // Add directional light (sunlight)
+    let sun_transform = Transform {
+        translation: sun_position,
+        rotation: sun_rotation,
         ..default()
     };
 
@@ -87,50 +87,29 @@ fn spawn_lighting(
         GameEntity,
         Sun,
         DirectionalLight {
-            color: Color::srgb(0.3, 0.3, 0.4), // Saturated blue for moonlight hue
-            illuminance: 20.0, // Very low illuminance for dark nighttime
+            color: Color::srgb(1.0, 1.0, 0.9), // Warm sunlight hue
+            illuminance: 2000.0, // Bright sunlight
             shadows_enabled: true,
             ..default()
         },
-        moon_transform,
+        sun_transform,
     ));
 
     // Debug sun position with yellow cone
-    // commands.spawn((
-    //     GameEntity,
-    //     Mesh3d(meshes.add(Cone::new(1.0, 3.0))),
-    //     MeshMaterial3d(materials.add(StandardMaterial {
-    //         base_color: Color::srgb(1.0, 1.0, 0.0),      // Bright yellow
-    //         emissive: Color::srgb(1.0, 1.0, 0.0).into(), // Fully emissive so it glows
-    //         cull_mode: None,                             // Show both sides
-    //         ..Default::default()
-    //     })),
-    //     NotShadowCaster, // Prevent casting shadows
-    //     Transform {
-    //         translation: sun_transform.translation,
-    //         rotation: sun_transform.rotation * Quat::from_rotation_x(-std::f32::consts::PI / 2.0), // Point the cone downwards
-    //         scale: Vec3::splat(3.0), // Make it bigger
-    //     },
-    // ));
-
-    // Add ambient light for diffusion
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.05, 0.05, 0.1), // Very dim, slightly blue for nighttime
-        brightness: 0.02,                     // Very low ambient for dark nighttime
-        ..default()
-    });
-
-    // Add warm point light inside the building (lamp)
     commands.spawn((
         GameEntity,
-        PointLight {
-            color: Color::srgb(1.0, 0.7, 0.4), // Warm orange/yellow lamp
-            intensity: 10000.0, // Bright lamp
-            range: 2500.0,
-            radius: 0.5,
-            shadows_enabled: true,
-            ..default()
+        Mesh3d(meshes.add(Cone::new(1.0, 3.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 1.0, 0.0),      // Bright yellow
+            emissive: Color::srgb(1.0, 1.0, 0.0).into(), // Fully emissive so it glows
+            cull_mode: None,                             // Show both sides
+            ..Default::default()
+        })),
+        NotShadowCaster, // Prevent casting shadows
+        Transform {
+            translation: sun_transform.translation,
+            rotation: sun_transform.rotation * Quat::from_rotation_x(-std::f32::consts::PI / 2.0), // Point the cone downwards
+            scale: Vec3::splat(3.0), // Make it bigger
         },
-        Transform::from_translation(Vec3::new(8.0, 5.0, 0.0)), // Center of building, mid-height
     ));
 }

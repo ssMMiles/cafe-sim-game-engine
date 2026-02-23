@@ -19,13 +19,14 @@
 }
 #endif
 
-// Helper function to quantize a color into discrete bands
-fn quantize_color(color: vec3<f32>, bands: f32) -> vec3<f32> {
-    return vec3<f32>(
-        floor(color.r * bands) / bands,
-        floor(color.g * bands) / bands,
-        floor(color.b * bands) / bands
-    );
+// Perceptual luminance from a linear RGB color
+fn luminance(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// Quantize a scalar value into discrete toon bands
+fn toon_band(value: f32, bands: f32) -> f32 {
+    return floor(clamp(value, 0.0, 1.0) * bands) / bands;
 }
 
 @fragment
@@ -33,10 +34,7 @@ fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
-    // Generate a PbrInput struct from the StandardMaterial bindings
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-
-    // Alpha discard
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
 #ifdef PREPASS_PIPELINE
@@ -45,7 +43,7 @@ fn fragment(
     var out: FragmentOutput;
 
     let base_color = pbr_input.material.base_color.rgb;
-    var lit_color = vec3<f32>(0.0);
+    let N = normalize(pbr_input.N);
 
     let view_z = dot(vec4<f32>(
         view_bindings::view.view_from_world[0].z,
@@ -54,38 +52,27 @@ fn fragment(
         view_bindings::view.view_from_world[3].z
     ), pbr_input.world_position);
 
-    // Process directional lights
+    // Accumulate a scalar lighting intensity in HDR lux space.
+    // Using luminance so the sun's color tint doesn't cause per-channel hue shifts.
+    var lighting = 0.0;
+
+    // Directional lights
     let n_directional_lights = view_bindings::lights.n_directional_lights;
     for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
         let light = &view_bindings::lights.directional_lights[i];
-
-        let L = (*light).direction_to_light;
-        let N = normalize(pbr_input.N);
-        let NdotL = max(dot(N, L), 0.0);
-
-        let diffuse = base_color * (*light).color.rgb * NdotL;
+        let NdotL = max(dot(N, (*light).direction_to_light), 0.0);
 
         var shadow = 1.0;
         if ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-            shadow = shadows::fetch_directional_shadow(
-                i,
-                pbr_input.world_position,
-                pbr_input.world_normal,
-                view_z
-            );
+            shadow = shadows::fetch_directional_shadow(i, pbr_input.world_position, pbr_input.world_normal, view_z);
         }
 
-        lit_color += diffuse * shadow;
+        lighting += NdotL * luminance((*light).color.rgb) * shadow;
     }
 
-    // Process point lights
-    let cluster_index = clustering::fragment_cluster_index(
-        pbr_input.frag_coord.xy,
-        view_z,
-        pbr_input.is_orthographic
-    );
-    var clusterable_object_index_ranges =
-        clustering::unpack_clusterable_object_index_ranges(cluster_index);
+    // Point lights
+    let cluster_index = clustering::fragment_cluster_index(pbr_input.frag_coord.xy, view_z, pbr_input.is_orthographic);
+    var clusterable_object_index_ranges = clustering::unpack_clusterable_object_index_ranges(cluster_index);
 
     for (var i: u32 = clusterable_object_index_ranges.first_point_light_index_offset;
          i < clusterable_object_index_ranges.first_spot_light_index_offset;
@@ -93,40 +80,31 @@ fn fragment(
         let light_id = clustering::get_clusterable_object_id(i);
         let light = &view_bindings::clusterable_objects.data[light_id];
 
-        let light_position = (*light).position_radius.xyz;
-        let light_to_frag = light_position - pbr_input.world_position.xyz;
+        let light_to_frag = (*light).position_radius.xyz - pbr_input.world_position.xyz;
         let distance_squared = dot(light_to_frag, light_to_frag);
-        let L = normalize(light_to_frag);
-        let N = normalize(pbr_input.N);
-        let NdotL = max(dot(N, L), 0.0);
+        let NdotL = max(dot(N, normalize(light_to_frag)), 0.0);
 
-        let light_color = (*light).color_inverse_square_range.rgb;
         let inverse_range_squared = (*light).color_inverse_square_range.w;
         let attenuation = 1.0 / max(distance_squared, 0.0001);
         let smooth_attenuation = 1.0 - min(distance_squared * inverse_range_squared, 1.0);
         let range_attenuation = attenuation * smooth_attenuation * smooth_attenuation;
 
-        let diffuse = base_color * light_color * NdotL * range_attenuation;
-
         var shadow = 1.0;
         if ((*light).flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-            shadow = shadows::fetch_point_shadow(
-                light_id,
-                pbr_input.world_position,
-                pbr_input.world_normal
-            );
+            shadow = shadows::fetch_point_shadow(light_id, pbr_input.world_position, pbr_input.world_normal);
         }
 
-        lit_color += diffuse * shadow;
+        lighting += NdotL * luminance((*light).color_inverse_square_range.rgb) * range_attenuation * shadow;
     }
 
-    // Ambient
-    lit_color += base_color * view_bindings::lights.ambient_color.rgb;
+    // Bring from HDR lux space to display range, then quantize into toon bands
+    lighting *= view_bindings::view.exposure;
+    let toon_factor = toon_band(lighting, 5.0);
 
-    // Apply camera exposure to convert HDR illuminance values to display range,
-    // then quantize into toon bands
-    lit_color *= view_bindings::view.exposure;
-    out.color = vec4<f32>(quantize_color(lit_color, 5.0), pbr_input.material.base_color.a);
+    // Ambient is a continuous floor so unlit areas aren't pitch black
+    let ambient_floor = luminance(view_bindings::lights.ambient_color.rgb) * view_bindings::view.exposure;
+
+    out.color = vec4<f32>(base_color * max(toon_factor, ambient_floor), pbr_input.material.base_color.a);
 #endif
 
     return out;

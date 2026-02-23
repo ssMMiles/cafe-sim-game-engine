@@ -103,11 +103,11 @@ impl Plugin for SimulationPlugin {
                 .chain()
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
-        app.add_systems(
-            Update,
-            (update_time_of_day, update_sun_transform, update_sun_properties)
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
+        // app.add_systems(
+        //     Update,
+        //     (update_time_of_day, update_sun_transform, update_sun_properties)
+        //         .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        // );
         app.add_systems(
             Update,
             resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
