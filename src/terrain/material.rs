@@ -3,7 +3,11 @@ use bevy::{
 };
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct TerrainMaterial {}
+pub struct TerrainMaterial {
+    #[texture(100)]
+    #[sampler(101)]
+    pub stone_texture: Handle<Image>,
+}
 
 impl MaterialExtension for TerrainMaterial {
     fn vertex_shader() -> ShaderRef {

@@ -1,4 +1,8 @@
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::{
+    image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
+    pbr::ExtendedMaterial,
+    prelude::*,
+};
 
 use super::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE,
@@ -22,6 +26,7 @@ pub(crate) fn create_terrain(
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
     world_config: Res<storage::WorldConfig>,
+    asset_server: Res<AssetServer>,
 ) {
     let Ok(entity) = marker_query.single() else {
         return;
@@ -78,6 +83,17 @@ pub(crate) fn create_terrain(
         tile_size: TILE_SIZE,
     });
 
+    let stone_texture: Handle<Image> = asset_server.load_with_settings(
+        "textures/terrain.png",
+        |s: &mut ImageLoaderSettings| {
+            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                address_mode_u: ImageAddressMode::Repeat,
+                address_mode_v: ImageAddressMode::Repeat,
+                ..ImageSamplerDescriptor::default()
+            });
+        },
+    );
+
     let material = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::srgb(0.81, 0.62, 0.60),
@@ -86,7 +102,7 @@ pub(crate) fn create_terrain(
             reflectance: 0.0,
             ..default()
         },
-        extension: TerrainMaterial {},
+        extension: TerrainMaterial { stone_texture },
     });
 
     let chunks_x = (width + CHUNK_SIZE - 2) / (CHUNK_SIZE - 1);
