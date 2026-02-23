@@ -7,17 +7,20 @@ use crate::{
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
-    camera::{visibility::RenderLayers, RenderTarget},
+    camera::{RenderTarget, visibility::RenderLayers},
     core_pipeline::prepass::{DepthPrepass, NormalPrepass},
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
+    light::VolumetricFog,
+    pbr::{DistanceFog, FogFalloff},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
+    render::{render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}, view::Hdr},
     window::PrimaryWindow,
 };
 
 const RENDER_TEXTURE_WIDTH: u32 = 3840;
 const RENDER_TEXTURE_HEIGHT: u32 = 2160;
+const CAMERA_CLEARANCE: f32 = 0.5; // Min camera height above terrain in FloorBased mode
 
 #[derive(Component, Debug, Default)]
 pub struct PlayerCamera {
@@ -89,6 +92,21 @@ pub fn setup_camera(
         // Edge detection post-processing settings
         EdgeDetectionSettings::new(),
         Fxaa::default(),
+        // HDR intermediate render target — required by VolumetricFog
+        Hdr,
+        // Distance fog fading distant terrain into the warm horizon haze
+        DistanceFog {
+            color: Color::srgba(0.85, 0.80, 0.72, 1.0),
+            directional_light_color: Color::srgba(1.0, 0.85, 0.65, 0.5),
+            directional_light_exponent: 6.0,
+            falloff: FogFalloff::Exponential { density: 0.003 },
+        },
+        // Volumetric fog enables light-shaft rendering through cloud FogVolumes
+        VolumetricFog {
+            step_count: 64,
+            ambient_intensity: 0.1,
+            ..default()
+        },
     )).id();
 
     //
@@ -219,6 +237,7 @@ pub fn apply_freecam_movement(
 /// System 3: Position camera relative to player (runs after physics or freecam movement).
 pub fn camera_follow(
     settings: Res<UserSettings>,
+    heightmap: Option<Res<HeightmapData>>,
     player_query: Query<&Transform, With<Player>>,
     mut camera_query: Query<(&mut Transform, &PlayerCamera), Without<Player>>,
 ) {
@@ -231,8 +250,22 @@ pub fn camera_follow(
 
     if settings.third_person_view {
         let offset_direction = camera_transform.forward().as_vec3();
-        camera_transform.translation = player_transform.translation
+        let mut desired_pos = player_transform.translation
             - offset_direction * settings.third_person_distance;
+
+        // In FloorBased mode, prevent the camera from clipping into terrain.
+        if settings.movement_mode == MovementMode::FloorBased {
+            if let Some(ref hm) = heightmap {
+                if let Some(terrain_h) = hm.sample_height(desired_pos.x, desired_pos.z) {
+                    let min_y = terrain_h + CAMERA_CLEARANCE;
+                    if desired_pos.y < min_y {
+                        desired_pos.y = min_y;
+                    }
+                }
+            }
+        }
+
+        camera_transform.translation = desired_pos;
     } else {
         camera_transform.translation = player_transform.translation;
     }

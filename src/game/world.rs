@@ -1,4 +1,4 @@
-use bevy::light::NotShadowCaster;
+use bevy::light::{NotShadowCaster, VolumetricLight};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::render::alpha::AlphaMode;
 use bevy::render::render_resource::AsBindGroup;
@@ -92,6 +92,7 @@ fn spawn_lighting(
             shadows_enabled: true,
             ..default()
         },
+        VolumetricLight, // Enables light-shaft scattering through cloud FogVolumes
         sun_transform,
     ));
 

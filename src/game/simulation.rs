@@ -59,7 +59,7 @@ pub fn setup(
     cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
     cursor_options.visible = false;
 
-    let mr_windmill: Handle<Scene> = asset_server.load("meshes/character/mr windmill.gltf#Scene0");
+    let mr_windmill: Handle<Scene> = asset_server.load("meshes/character/robotv2.gltf#Scene0");
 
     let material = toon_materials.add(ExtendedMaterial {
         base: StandardMaterial {

@@ -18,7 +18,9 @@
       "Bash(cargo clippy:*)",
       "WebFetch(domain:github.com)",
       "Bash(echo:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(ls -la /c/Users/Miles/Documents/projects/bevy/crates/bevy_*/src/lib.rs 2>/dev/null | wc -l && find /c/Users/Miles/Documents/projects/bevy -name \"lib.rs\" -path \"*/bevy/src/*\" 2>/dev/null)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": [],

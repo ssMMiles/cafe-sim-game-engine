@@ -176,7 +176,8 @@ fn init_edge_detection_pipeline(
         fragment: Some(FragmentState {
             shader,
             targets: vec![Some(ColorTargetState {
-                format: TextureFormat::bevy_default(),
+                // Camera has Hdr enabled, so the view target uses Rgba16Float.
+                format: TextureFormat::Rgba16Float,
                 blend: None,
                 write_mask: ColorWrites::ALL,
             })],

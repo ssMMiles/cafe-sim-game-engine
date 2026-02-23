@@ -5,6 +5,7 @@ use crate::{
 };
 
 pub mod camera;
+mod animation;
 mod crosshair;
 mod day_night;
 mod edit_mode;
@@ -16,9 +17,11 @@ pub mod pause_menu;
 pub mod physics;
 mod post_process;
 mod simulation;
+mod sky;
 mod ui_displays;
 mod world;
 
+use animation::{init_animation_player, pause_animations, resume_animations, setup_character_animations, update_character_animation};
 use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 use physics::character_physics;
 use day_night::{TimeOfDay, update_time_of_day, update_sun_transform, update_sun_properties};
@@ -38,6 +41,7 @@ use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edg
 use simulation::{
     exit, setup
 };
+use sky::{SkyDomeMaterial, setup_sky, sync_sky_dome};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
     setup_position_display, setup_time_display, update_dynamic_backgrounds, update_fps_display,
@@ -77,6 +81,7 @@ impl Plugin for SimulationPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
+        app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default());
         app.add_plugins(EdgeDetectionPlugin);
         app.add_message::<InteractableClicked>();
         app.add_systems(
@@ -88,6 +93,8 @@ impl Plugin for SimulationPlugin {
                 setup_time_display,
                 setup_interaction_info_display,
                 setup_position_display,
+                setup_sky.after(setup),
+                setup_character_animations.after(setup),
             ),
         );
         app.add_systems(OnExit(AppState::InGame), exit);
@@ -99,9 +106,14 @@ impl Plugin for SimulationPlugin {
                 apply_freecam_movement,
                 character_physics,
                 camera_follow,
+                update_character_animation,
             )
                 .chain()
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
+        app.add_systems(
+            Update,
+            init_animation_player.run_if(in_state(AppState::InGame)),
         );
         // app.add_systems(
         //     Update,
@@ -111,6 +123,10 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
+        );
+        app.add_systems(
+            Update,
+            sync_sky_dome.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,
@@ -204,8 +220,8 @@ impl Plugin for SimulationPlugin {
             handle_pause_input.run_if(in_state(AppState::InGame)),
         );
 
-        app.add_systems(OnEnter(SimulationState::Paused), setup_pause_menu);
-        app.add_systems(OnExit(SimulationState::Paused), cleanup_pause_menu);
+        app.add_systems(OnEnter(SimulationState::Paused), (setup_pause_menu, pause_animations));
+        app.add_systems(OnExit(SimulationState::Paused), (cleanup_pause_menu, resume_animations));
         app.add_systems(
             Update,
             handle_pause_menu
