@@ -1,0 +1,39 @@
+name: Deploy to Personal Website
+
+on:
+    push:
+        branches:
+            - main
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  path: game-engine
+
+            - name: Checkout website repo
+              uses: actions/checkout@v4
+              with:
+                  repository: ssMMiles/simple-website
+                  token: ${{ secrets.WEBSITE_GITHUB_TOKEN }}
+                  path: simple-website
+
+            - run: |
+                  cd game-engine
+                  npm install -g wasm-pack wasm-opt
+                  wasm-pack build --target web --no-opt
+                  wasm-opt -Oz -o pkg/cafe_sim_bg_optimised.wasm pkg/cafe_sim_bg.wasm
+
+                  mv pkg/cafe_sim_bg_optimised.wasm pkg/cafe_sim_bg.wasm
+                  cp -r pkg/. ../simple-website/game
+
+                  cd ../simple-website
+                  git config --global user.name "GitHub Actions"
+                  git config --global user.email "actions@github.com"
+                  rm game/.gitignore 
+                  git add game
+                  git commit -m "(ACTIONS) Deploy game engine"
+                  git push origin main

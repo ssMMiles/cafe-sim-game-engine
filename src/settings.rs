@@ -49,6 +49,27 @@ pub trait SliderSetting {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraView {
+    FirstPerson,
+    ThirdPerson,
+}
+
+impl Default for CameraView {
+    fn default() -> Self {
+        CameraView::ThirdPerson
+    }
+}
+
+impl std::fmt::Display for CameraView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CameraView::FirstPerson => write!(f, "First Person"),
+            CameraView::ThirdPerson => write!(f, "Third Person"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovementMode {
     FreeCam,
     FloorBased,
@@ -78,7 +99,7 @@ pub struct UserSettings {
     pub edit_mode: bool,
     pub current_placement_object: PlacementObjectType,
     pub outline_visible: bool,
-    pub third_person_view: bool,
+    pub camera_view: CameraView,
     pub third_person_distance: f32,
     pub edge_detection_enabled: bool,
     pub terrain_edit_mode: bool,
@@ -95,7 +116,7 @@ impl Default for UserSettings {
             edit_mode: false,
             current_placement_object: PlacementObjectType::default(),
             outline_visible: false,
-            third_person_view: true,
+            camera_view: CameraView::ThirdPerson,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
             terrain_edit_mode: false,
@@ -150,9 +171,9 @@ impl UserSettings {
                 current_value: format!("{:.2}", self.movement_speed),
             },
             SettingInfo {
-                name: "Third Person View",
+                name: "Camera View",
                 keybind: "Shift+V",
-                current_value: if self.third_person_view { "ON" } else { "OFF" }.to_string(),
+                current_value: self.camera_view.to_string(),
             },
             SettingInfo {
                 name: "Edge Detection",
@@ -173,6 +194,13 @@ impl UserSettings {
 
     pub fn toggle_outline(&mut self) {
         self.outline_visible = !self.outline_visible;
+    }
+
+    pub fn toggle_camera_view(&mut self) {
+        self.camera_view = match self.camera_view {
+            CameraView::FirstPerson => CameraView::ThirdPerson,
+            CameraView::ThirdPerson => CameraView::FirstPerson,
+        };
     }
 
     pub fn toggle_movement_mode(&mut self) {

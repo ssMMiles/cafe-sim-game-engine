@@ -78,6 +78,7 @@ pub fn setup(
         CharacterState::default(),
         Transform::default(),
         GlobalTransform::default(),
+        Visibility::Inherited,
         SceneRoot(mr_windmill),
     )).id();
 

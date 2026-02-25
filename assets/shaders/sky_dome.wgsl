@@ -21,7 +21,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Below horizon — earthy undertone (hidden by terrain)
-    if in.world_position.y < 0.0 {
+    if in.world_position.y < -2000.0 {
         color = vec3(0.55, 0.45, 0.35);
     }
 

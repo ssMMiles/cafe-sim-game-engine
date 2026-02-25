@@ -1,4 +1,4 @@
-use bevy::light::{NotShadowCaster, VolumetricLight};
+use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster, VolumetricLight};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::render::alpha::AlphaMode;
 use bevy::render::render_resource::AsBindGroup;
@@ -92,6 +92,12 @@ fn spawn_lighting(
             shadows_enabled: true,
             ..default()
         },
+        CascadeShadowConfigBuilder {
+            maximum_distance: 600.0,
+            first_cascade_far_bound: 50.0,
+            ..default()
+        }
+        .build(),
         VolumetricLight, // Enables light-shaft scattering through cloud FogVolumes
         sun_transform,
     ));

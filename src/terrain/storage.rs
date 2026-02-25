@@ -199,8 +199,8 @@ impl Default for WorldConfig {
     fn default() -> Self {
         Self {
             world_id: "default".to_string(),
-            grid_width: 1024,
-            grid_height: 1024,
+            grid_width: 4096,
+            grid_height: 4096,
         }
     }
 }
@@ -451,10 +451,7 @@ pub fn create_world_metadata(
         chunks_x,
         chunks_y,
         chunk_index,
-        last_saved: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
+        last_saved: 0,
     }
 }
 

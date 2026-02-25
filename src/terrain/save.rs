@@ -57,10 +57,7 @@ pub fn save_terrain(
         }
     }
 
-    terrain_world.metadata.last_saved = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    terrain_world.metadata.last_saved = 0;
 
     match save_world(&terrain_world.metadata, &terrain_world.world_path) {
         Ok(()) => info!("Terrain saved successfully"),

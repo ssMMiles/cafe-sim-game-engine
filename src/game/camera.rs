@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 
 use crate::{
     game::{post_process::EdgeDetectionSettings, simulation::Player},
-    settings::{setting_ranges, MovementMode, UserSettings},
+    settings::{setting_ranges, CameraView, MovementMode, UserSettings},
     terrain::HeightmapData,
 };
 use bevy::{
@@ -21,6 +21,9 @@ use bevy::{
 const RENDER_TEXTURE_WIDTH: u32 = 3840;
 const RENDER_TEXTURE_HEIGHT: u32 = 2160;
 const CAMERA_CLEARANCE: f32 = 0.5; // Min camera height above terrain in FloorBased mode
+const EYE_HEIGHT: f32 = 1.7;        // Camera offset above player origin in first-person
+const FOV_FIRST_PERSON: f32 = PI / 2.5; // ~72 degrees
+const FOV_THIRD_PERSON: f32 = PI / 5.0; // ~36 degrees (original)
 
 #[derive(Component, Debug, Default)]
 pub struct PlayerCamera {
@@ -169,7 +172,7 @@ pub fn handle_camera_input(
         settings.toggle_movement_mode();
     }
     if toggle_third_person {
-        settings.third_person_view = !settings.third_person_view;
+        settings.toggle_camera_view();
     }
 
     // Mouse look — apply yaw/pitch to camera transform
@@ -238,36 +241,57 @@ pub fn apply_freecam_movement(
 pub fn camera_follow(
     settings: Res<UserSettings>,
     heightmap: Option<Res<HeightmapData>>,
-    player_query: Query<&Transform, With<Player>>,
-    mut camera_query: Query<(&mut Transform, &PlayerCamera), Without<Player>>,
+    mut player_query: Query<(&Transform, &mut Visibility), With<Player>>,
+    mut camera_query: Query<(&mut Transform, &PlayerCamera, &mut Projection), Without<Player>>,
 ) {
-    let Ok(player_transform) = player_query.single() else {
+    let Ok((player_transform, mut player_visibility)) = player_query.single_mut() else {
         return;
     };
-    let Ok((mut camera_transform, _camera)) = camera_query.single_mut() else {
+    let Ok((mut camera_transform, _camera, mut projection)) = camera_query.single_mut() else {
         return;
     };
 
-    if settings.third_person_view {
-        let offset_direction = camera_transform.forward().as_vec3();
-        let mut desired_pos = player_transform.translation
-            - offset_direction * settings.third_person_distance;
+    match settings.camera_view {
+        CameraView::FirstPerson => {
+            // Hide the character model to avoid seeing inside it
+            *player_visibility = Visibility::Hidden;
 
-        // In FloorBased mode, prevent the camera from clipping into terrain.
-        if settings.movement_mode == MovementMode::FloorBased {
-            if let Some(ref hm) = heightmap {
-                if let Some(terrain_h) = hm.sample_height(desired_pos.x, desired_pos.z) {
-                    let min_y = terrain_h + CAMERA_CLEARANCE;
-                    if desired_pos.y < min_y {
-                        desired_pos.y = min_y;
+            // Place camera at eye level
+            camera_transform.translation =
+                player_transform.translation + Vec3::Y * EYE_HEIGHT;
+
+            // Use a wider FOV appropriate for first-person
+            if let Projection::Perspective(ref mut persp) = *projection {
+                persp.fov = FOV_FIRST_PERSON;
+            }
+        }
+        CameraView::ThirdPerson => {
+            // Show the character model
+            *player_visibility = Visibility::Inherited;
+
+            let offset_direction = camera_transform.forward().as_vec3();
+            let mut desired_pos = player_transform.translation
+                - offset_direction * settings.third_person_distance;
+
+            // In FloorBased mode, prevent the camera from clipping into terrain.
+            if settings.movement_mode == MovementMode::FloorBased {
+                if let Some(ref hm) = heightmap {
+                    if let Some(terrain_h) = hm.sample_height(desired_pos.x, desired_pos.z) {
+                        let min_y = terrain_h + CAMERA_CLEARANCE;
+                        if desired_pos.y < min_y {
+                            desired_pos.y = min_y;
+                        }
                     }
                 }
             }
-        }
 
-        camera_transform.translation = desired_pos;
-    } else {
-        camera_transform.translation = player_transform.translation;
+            camera_transform.translation = desired_pos;
+
+            // Restore third-person FOV
+            if let Projection::Perspective(ref mut persp) = *projection {
+                persp.fov = FOV_THIRD_PERSON;
+            }
+        }
     }
 }
 
@@ -287,7 +311,7 @@ pub fn adjust_camera_distance(
     mut settings: ResMut<UserSettings>,
 ) {
     // Only adjust distance when in third person view
-    if !settings.third_person_view {
+    if settings.camera_view != CameraView::ThirdPerson {
         return;
     }
 

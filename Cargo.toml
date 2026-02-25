@@ -3,6 +3,14 @@
 # [profile.dev]
 # codegen-backend = "cranelift"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 'z'
+
 [package]
 name = "cafe-sim"
 version = "0.1.0"
@@ -12,6 +20,9 @@ edition = "2024"
 argh = "0.1.12"
 rand = { version = "0.9.0", features = [] }
 getrandom = { version = "0.4.1", features = ["wasm_js"] }
+# Force wasm_js/js features onto transitive getrandom versions for WASM compatibility
+getrandom3 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom2 = { package = "getrandom", version = "0.2", features = ["js"] }
 image = "0.25.6"
 anyhow = "1.0.97"
 resvg = "0.45"
@@ -19,11 +30,15 @@ usvg = "0.45"
 tiny-skia = "0.11"
 
 bevy_modern_pixel_camera = "0.5.1"
-bevy = { version = "0.18.0", default-features = true, features = ["debug"] }
+bevy = { version = "0.18.0", default-features = true, features = ["debug", "web", "webgpu"] }
 
 # Terrain storage
 rkyv = { version = "0.8", features = ["bytecheck"] }
 crc32fast = "1.4"
+winit = "0.30.12"
+env_logger = "0.11.9"
+log = "0.4.29"
+wasm-bindgen = "0.2.111"
 
 [dev-dependencies]
 tempfile = "3"
