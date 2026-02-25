@@ -10,5 +10,5 @@ opt-level = 3
 [profile.dev.package.objc2]
 debug-assertions = false
 
-[target.'cfg(not(target_os = "macos"))']
-rustflags = ["-Zcodegen-backend=cranelift"]
+# [target.'cfg(not(target_os = "macos"))']
+# rustflags = ["-Zcodegen-backend=cranelift"]

@@ -1,22 +1,14 @@
+use crate::game::{GameEntity};
+
 use super::materials::{PendingMaterial, apply_material_to_meshes};
 use bevy::{
     log, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*, scene::SceneInstanceReady,
 };
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum InteractableType {
-    Cooker,
-    Fridge,
-    Table,
-    CuttingBoard,
-    RecipeCard(String), // Store the recipe name
-}
-
 #[derive(Component, Clone)]
 pub struct Interactable {
     pub name: String,
     pub distance: f32,
-    pub interactable_type: InteractableType,
 }
 
 #[derive(Component)]
@@ -257,9 +249,8 @@ pub fn detect_interactable_clicks(
     if mouse_input.just_pressed(MouseButton::Left) {
         for (entity, interactable) in hovered_query.iter() {
             log::info!(
-                "Clicked on interactable: {} of type {:?}",
-                interactable.name,
-                interactable.interactable_type
+                "Clicked on interactable: {}",
+                interactable.name
             );
 
             // Emit event
@@ -268,5 +259,47 @@ pub fn detect_interactable_clicks(
                 interactable: interactable.clone(),
             });
         }
+    }
+}
+
+#[derive(Component)]
+pub struct InteractionText;
+
+pub fn show_interaction_text(
+    mut commands: Commands,
+    interactable_query: Query<(Entity, &Transform), (With<Interactable>, With<HoveredOver>)>,
+    text_query: Query<Entity, With<InteractionText>>,
+) {
+    // Remove existing interaction text
+    for entity in text_query.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    // Add text for any interactable being interacted with
+    for (_, transform) in interactable_query.iter() {
+        let text_position = transform.translation + Vec3::new(0.0, 2.0, 0.0); // Hover above the object
+
+        commands.spawn((
+            GameEntity,
+            InteractionText,
+            Text2d::new("Boo!"),
+            TextFont {
+                font_size: 60.0,
+                ..default()
+            },
+            TextColor(Color::srgb(1.0, 1.0, 1.0)), // White text
+            Transform::from_translation(text_position),
+            GlobalTransform::default(),
+        ));
+    }
+}
+
+// Main handler for all interactable clicks
+pub fn handle_interactable_clicks(
+    mut click_events: MessageReader<super::interaction::InteractableClicked>,
+) {
+    for event in click_events.read() {
+        let _entity = event.entity;
+
     }
 }

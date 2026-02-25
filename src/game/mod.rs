@@ -1,11 +1,12 @@
 use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
-    AppState, game::world::ToonMaterial, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
+    AppState, game::{crosshair::{toggle_crosshair, update_crosshair_display}, interaction::{handle_interactable_clicks, show_interaction_text}, world::ToonMaterial}, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
 };
 
 pub mod camera;
-mod cutting_board;
+mod animation;
+mod crosshair;
 mod day_night;
 mod edit_mode;
 mod icons;
@@ -16,15 +17,13 @@ pub mod pause_menu;
 pub mod physics;
 mod post_process;
 mod simulation;
+mod sky;
 mod ui_displays;
 mod world;
 
+use animation::{init_animation_player, pause_animations, resume_animations, setup_character_animations, update_character_animation};
 use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 use physics::character_physics;
-use cutting_board::{
-    ActiveCuttingBoardMenu, animate_card_hover, check_menu_distances, update_card_shadows,
-    update_cutting_board_menu_rotation,
-};
 use day_night::{TimeOfDay, update_time_of_day, update_sun_transform, update_sun_properties};
 use edit_mode::{
     PlacementPreviewEntity, cleanup_placement_preview, handle_edit_mode_click,
@@ -40,10 +39,9 @@ use pause_menu::{
 };
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use simulation::{
-    display_cooking_progress, exit, handle_interactable_clicks, setup, show_interaction_text,
-    toggle_crosshair, update_cooking_display_rotation, update_cooking_displays,
-    update_cooking_timers, update_crosshair_display,
+    exit, setup
 };
+use sky::{SkyDomeMaterial, setup_sky, sync_sky_dome};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
     setup_position_display, setup_time_display, update_dynamic_backgrounds, update_fps_display,
@@ -83,6 +81,7 @@ impl Plugin for SimulationPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
+        app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default());
         app.add_plugins(EdgeDetectionPlugin);
         app.add_message::<InteractableClicked>();
         app.add_systems(
@@ -94,6 +93,8 @@ impl Plugin for SimulationPlugin {
                 setup_time_display,
                 setup_interaction_info_display,
                 setup_position_display,
+                setup_sky.after(setup),
+                setup_character_animations.after(setup),
             ),
         );
         app.add_systems(OnExit(AppState::InGame), exit);
@@ -105,18 +106,27 @@ impl Plugin for SimulationPlugin {
                 apply_freecam_movement,
                 character_physics,
                 camera_follow,
+                update_character_animation,
             )
                 .chain()
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
         app.add_systems(
             Update,
-            (update_time_of_day, update_sun_transform, update_sun_properties)
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+            init_animation_player.run_if(in_state(AppState::InGame)),
         );
+        // app.add_systems(
+        //     Update,
+        //     (update_time_of_day, update_sun_transform, update_sun_properties)
+        //         .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        // );
         app.add_systems(
             Update,
             resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
+        );
+        app.add_systems(
+            Update,
+            sync_sky_dome.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,
@@ -196,14 +206,6 @@ impl Plugin for SimulationPlugin {
             Update,
             (
                 handle_interactable_clicks,
-                update_cutting_board_menu_rotation,
-                animate_card_hover,
-                update_card_shadows,
-                check_menu_distances,
-                update_cooking_timers,
-                display_cooking_progress,
-                update_cooking_displays,
-                update_cooking_display_rotation,
             )
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
@@ -218,8 +220,8 @@ impl Plugin for SimulationPlugin {
             handle_pause_input.run_if(in_state(AppState::InGame)),
         );
 
-        app.add_systems(OnEnter(SimulationState::Paused), setup_pause_menu);
-        app.add_systems(OnExit(SimulationState::Paused), cleanup_pause_menu);
+        app.add_systems(OnEnter(SimulationState::Paused), (setup_pause_menu, pause_animations));
+        app.add_systems(OnExit(SimulationState::Paused), (cleanup_pause_menu, resume_animations));
         app.add_systems(
             Update,
             handle_pause_menu
@@ -256,7 +258,6 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<SimulationConfig>();
         app.init_resource::<TimeOfDay>();
         app.init_resource::<PlacementPreviewEntity>();
-        app.init_resource::<ActiveCuttingBoardMenu>();
         app.init_resource::<SvgTextureCache>();
     }
 }

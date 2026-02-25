@@ -2,23 +2,28 @@ use std::f32::consts::PI;
 
 use crate::{
     game::{post_process::EdgeDetectionSettings, simulation::Player},
-    settings::{setting_ranges, MovementMode, UserSettings},
+    settings::{setting_ranges, CameraView, MovementMode, UserSettings},
     terrain::HeightmapData,
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
-    camera::{visibility::RenderLayers, RenderTarget},
+    camera::{RenderTarget, visibility::RenderLayers},
     core_pipeline::prepass::{DepthPrepass, NormalPrepass},
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
+    light::VolumetricFog,
+    pbr::{DistanceFog, FogFalloff},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
+    render::{render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}, view::Hdr},
     window::PrimaryWindow,
 };
-use bevy_modern_pixel_camera::prelude::*;
 
-const RENDER_TEXTURE_WIDTH: u32 = 1920;
-const RENDER_TEXTURE_HEIGHT: u32 = 1080;
+const RENDER_TEXTURE_WIDTH: u32 = 3840;
+const RENDER_TEXTURE_HEIGHT: u32 = 2160;
+const CAMERA_CLEARANCE: f32 = 0.5; // Min camera height above terrain in FloorBased mode
+const EYE_HEIGHT: f32 = 1.7;        // Camera offset above player origin in first-person
+const FOV_FIRST_PERSON: f32 = PI / 2.5; // ~72 degrees
+const FOV_THIRD_PERSON: f32 = PI / 5.0; // ~36 degrees (original)
 
 #[derive(Component, Debug, Default)]
 pub struct PlayerCamera {
@@ -34,7 +39,6 @@ pub fn setup_camera(
     commands: &mut Commands,
     images: &mut ResMut<Assets<Image>>,
     meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
@@ -70,7 +74,7 @@ pub fn setup_camera(
 
     // The camera to render all entities on render layer #0, which is the default layer for
     // entities, unless otherwise specified.
-    let camera_entity = commands.spawn((
+    let _camera_entity = commands.spawn((
         Camera3d::default(),
         Camera::default(),
         RenderTarget::Image(render_texture_handle.clone().into()),
@@ -91,50 +95,22 @@ pub fn setup_camera(
         // Edge detection post-processing settings
         EdgeDetectionSettings::new(),
         Fxaa::default(),
+        // HDR intermediate render target — required by VolumetricFog
+        Hdr,
+        // Distance fog fading distant terrain into the warm horizon haze
+        DistanceFog {
+            color: Color::srgba(0.85, 0.80, 0.72, 1.0),
+            directional_light_color: Color::srgba(1.0, 0.85, 0.65, 0.5),
+            directional_light_exponent: 6.0,
+            falloff: FogFalloff::Exponential { density: 0.003 },
+        },
+        // Volumetric fog enables light-shaft rendering through cloud FogVolumes
+        VolumetricFog {
+            step_count: 64,
+            ambient_intensity: 0.1,
+            ..default()
+        },
     )).id();
-
-    // Add atmosphere components separately to avoid bundle size limit
-    // DISABLED: Atmosphere system conflicts with render-to-texture setup
-    // commands.entity(camera_entity).insert((
-    //     Atmosphere::EARTH,
-    //     AtmosphereSettings::default(),
-    //     Exposure { ev100: 13.0 },
-    //     Tonemapping::AcesFitted,
-    //     Bloom::NATURAL,
-    //     AtmosphereEnvironmentMapLight::default(),
-    // ));
-
-    let cube_size = 4.0;
-    let cube_handle = meshes.add(Cuboid::new(cube_size, cube_size, cube_size));
-
-    // This material has the texture that has been rendered.
-    // let material_handle = materials.add(StandardMaterial {
-    //     base_color_texture: Some(render_texture_handle),
-    //     reflectance: 0.02,
-    //     unlit: false,
-    //     ..default()
-    // });
-
-    // let alt_material_handle = materials.add(StandardMaterial {
-    //     base_color: Color::srgb(0.8, 0.2, 0.2),
-    //     reflectance: 0.02,
-    //     unlit: false,
-    //     ..default()
-    // });
-
-    // Main pass cube, with material containing the rendered first pass texture.
-    // commands.spawn((
-    //     Mesh3d(cube_handle),
-    //     MeshMaterial3d(material_handle),
-    //     Transform::from_xyz(0.0, 0.0, 1.5).with_rotation(Quat::from_rotation_x(-PI / 5.0)),
-    //     RenderLayers::layer(1),
-    // ));
-
-    // commands.spawn((
-    //     Camera3d::default(),
-    //     Transform::from_xyz(0.0, 0.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-    //     RenderLayers::layer(1),
-    // ));
 
     //
     // A sprite and orthographic camera is used to present the render texture.
@@ -146,8 +122,6 @@ pub fn setup_camera(
         RenderLayers::layer(1),
     ));
 
-    // commands.spawn((Camera2d::default(), RenderLayers::layer(1)));
-
     commands.spawn((
         IsDefaultUiCamera,
         Camera2d::default(),
@@ -157,7 +131,7 @@ pub fn setup_camera(
         // },
         // PixelViewport,
         RenderLayers::layer(1),
-        // Fxaa::default(),
+        Fxaa::default(),
     ));
 }
 
@@ -198,7 +172,7 @@ pub fn handle_camera_input(
         settings.toggle_movement_mode();
     }
     if toggle_third_person {
-        settings.third_person_view = !settings.third_person_view;
+        settings.toggle_camera_view();
     }
 
     // Mouse look — apply yaw/pitch to camera transform
@@ -266,22 +240,58 @@ pub fn apply_freecam_movement(
 /// System 3: Position camera relative to player (runs after physics or freecam movement).
 pub fn camera_follow(
     settings: Res<UserSettings>,
-    player_query: Query<&Transform, With<Player>>,
-    mut camera_query: Query<(&mut Transform, &PlayerCamera), Without<Player>>,
+    heightmap: Option<Res<HeightmapData>>,
+    mut player_query: Query<(&Transform, &mut Visibility), With<Player>>,
+    mut camera_query: Query<(&mut Transform, &PlayerCamera, &mut Projection), Without<Player>>,
 ) {
-    let Ok(player_transform) = player_query.single() else {
+    let Ok((player_transform, mut player_visibility)) = player_query.single_mut() else {
         return;
     };
-    let Ok((mut camera_transform, _camera)) = camera_query.single_mut() else {
+    let Ok((mut camera_transform, _camera, mut projection)) = camera_query.single_mut() else {
         return;
     };
 
-    if settings.third_person_view {
-        let offset_direction = camera_transform.forward().as_vec3();
-        camera_transform.translation = player_transform.translation
-            - offset_direction * settings.third_person_distance;
-    } else {
-        camera_transform.translation = player_transform.translation;
+    match settings.camera_view {
+        CameraView::FirstPerson => {
+            // Hide the character model to avoid seeing inside it
+            *player_visibility = Visibility::Hidden;
+
+            // Place camera at eye level
+            camera_transform.translation =
+                player_transform.translation + Vec3::Y * EYE_HEIGHT;
+
+            // Use a wider FOV appropriate for first-person
+            if let Projection::Perspective(ref mut persp) = *projection {
+                persp.fov = FOV_FIRST_PERSON;
+            }
+        }
+        CameraView::ThirdPerson => {
+            // Show the character model
+            *player_visibility = Visibility::Inherited;
+
+            let offset_direction = camera_transform.forward().as_vec3();
+            let mut desired_pos = player_transform.translation
+                - offset_direction * settings.third_person_distance;
+
+            // In FloorBased mode, prevent the camera from clipping into terrain.
+            if settings.movement_mode == MovementMode::FloorBased {
+                if let Some(ref hm) = heightmap {
+                    if let Some(terrain_h) = hm.sample_height(desired_pos.x, desired_pos.z) {
+                        let min_y = terrain_h + CAMERA_CLEARANCE;
+                        if desired_pos.y < min_y {
+                            desired_pos.y = min_y;
+                        }
+                    }
+                }
+            }
+
+            camera_transform.translation = desired_pos;
+
+            // Restore third-person FOV
+            if let Projection::Perspective(ref mut persp) = *projection {
+                persp.fov = FOV_THIRD_PERSON;
+            }
+        }
     }
 }
 
@@ -301,7 +311,7 @@ pub fn adjust_camera_distance(
     mut settings: ResMut<UserSettings>,
 ) {
     // Only adjust distance when in third person view
-    if !settings.third_person_view {
+    if settings.camera_view != CameraView::ThirdPerson {
         return;
     }
 

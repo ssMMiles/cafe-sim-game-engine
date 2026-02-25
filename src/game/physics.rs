@@ -7,6 +7,7 @@ use super::simulation::Player;
 
 // Physics constants
 const GRAVITY: f32 = 19.6;
+const TURN_SPEED: f32 = 12.0; // radians/sec — snappy but not instant
 const JUMP_VELOCITY: f32 = 8.0;
 const MAX_SLOPE: f32 = 0.78; // ~45 degrees in radians
 const CHAR_HEIGHT: f32 = 1.8;
@@ -240,6 +241,12 @@ pub fn character_physics(
         } else {
             break;
         }
+    }
+
+    // 9. Rotate player to face movement direction
+    if wish_dir.length_squared() > 0.0 {
+        let target_rot = Quat::from_rotation_arc(Vec3::Z, wish_dir);
+        player_tf.rotation = player_tf.rotation.slerp(target_rot, (TURN_SPEED * dt).min(1.0));
     }
 }
 

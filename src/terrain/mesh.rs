@@ -9,7 +9,7 @@ use bevy::{
 pub const LOD_LEVELS: usize = 4;
 
 /// Skirt depth multiplier per LOD stride unit
-const SKIRT_DEPTH_PER_STRIDE: f32 = 5.0;
+const SKIRT_DEPTH_PER_STRIDE: f32 = 1.0;
 
 /// Generate a chunk mesh at a specific LOD level with baked heights and normals.
 ///
@@ -173,7 +173,7 @@ pub fn generate_lod_mesh(
     // --- Build mesh ---
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_indices(Indices::U32(indices));
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);

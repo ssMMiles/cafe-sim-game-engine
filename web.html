@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WGPU Web Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+        }
+        
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        canvas {
+            background-color: black;
+            display: block;  /* Prevents extra space below canvas */
+            width: 100vw !important;
+            height: 100vh !important;
+        }
+    </style>
+</head>
+
+<body id="wasm-example">
+    <script type="module">
+        import init from "/pkg/cafe_sim.js";
+        
+        async function run() {
+            try {
+                const wasm = await init();
+
+                const canvas = document.querySelector('canvas');
+                
+                // // Handle high DPI displays
+                // const dpr = window.devicePixelRatio || 1;
+                // canvas.width = canvas.clientWidth * dpr;
+                // canvas.height = canvas.clientHeight * dpr;
+                
+                // Handle visibility changes
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden) {
+                        console.log("Page hidden");
+                    } else {
+                        console.log("Page visible");
+                        // Force a resize when becoming visible again
+                        window.dispatchEvent(new Event('resize'));
+                    }
+                });
+
+                console.log("WASM Loaded");
+            } catch (e) {
+                console.error("Failed to load WASM:", e);
+            }
+        }
+        
+        run();
+    </script>
+</body>
+
+</html>
