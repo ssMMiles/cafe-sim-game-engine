@@ -34,8 +34,8 @@ use interaction::{InteractableClicked, check_interactions, detect_interactable_c
 use outline::{toggle_outline, update_outline};
 use pause_menu::{
     PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
-    handle_pause_menu, handle_settings_menu, handle_slider, reacquire_pointer_lock,
-    setup_pause_menu, setup_pause_settings, update_slider_label,
+    handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
+    update_slider_label,
 };
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use simulation::{
@@ -218,11 +218,6 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             handle_pause_input.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            reacquire_pointer_lock
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
 
         app.add_systems(OnEnter(SimulationState::Paused), (setup_pause_menu, pause_animations));

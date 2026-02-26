@@ -63,21 +63,6 @@ impl<T: Component> Default for SliderTrack<T> {
     }
 }
 
-/// Re-requests pointer lock when the user clicks while in-game and the cursor is not locked.
-/// On web, the browser requires a user gesture before granting pointer lock, so the initial
-/// lock attempt in setup() fails silently. This system catches that and re-locks on first click.
-pub fn reacquire_pointer_lock(
-    mouse_input: Res<ButtonInput<MouseButton>>,
-    mut cursor_options: Single<&mut CursorOptions>,
-) {
-    if cursor_options.grab_mode != CursorGrabMode::Locked
-        && mouse_input.just_pressed(MouseButton::Left)
-    {
-        cursor_options.grab_mode = CursorGrabMode::Locked;
-        cursor_options.visible = false;
-    }
-}
-
 pub fn handle_cursor_lock(
     mut windows: Query<&mut Window>,
     mut cursor_options: Single<&mut CursorOptions>,
