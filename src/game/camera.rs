@@ -1,9 +1,8 @@
 use std::f32::consts::PI;
 
 use crate::{
-    game::{post_process::EdgeDetectionSettings, simulation::Player},
-    settings::{setting_ranges, CameraView, MovementMode, UserSettings},
-    terrain::HeightmapData,
+    game::{GameEntity, gfx::post_process::EdgeDetectionSettings, simulation::Player, world::terrain::HeightmapData},
+    settings::{CameraView, MovementMode, UserSettings, setting_ranges},
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -75,6 +74,7 @@ pub fn setup_camera(
     // The camera to render all entities on render layer #0, which is the default layer for
     // entities, unless otherwise specified.
     let _camera_entity = commands.spawn((
+        GameEntity,
         Camera3d::default(),
         Camera::default(),
         RenderTarget::Image(render_texture_handle.clone().into()),
@@ -117,12 +117,14 @@ pub fn setup_camera(
     // These are on render layer #1
     //
     commands.spawn((
+        GameEntity,
         Sprite::from_image(render_texture_handle),
         RenderTextureSprite,
         RenderLayers::layer(1),
     ));
 
     commands.spawn((
+        GameEntity,
         IsDefaultUiCamera,
         Camera2d::default(),
         // PixelZoom::FitSize {
@@ -309,9 +311,14 @@ pub fn resize_render_texture_sprite(
 pub fn adjust_camera_distance(
     mut scroll_events: MessageReader<MouseWheel>,
     mut settings: ResMut<UserSettings>,
+    input: Res<ButtonInput<KeyCode>>,
 ) {
-    // Only adjust distance when in third person view
-    if settings.camera_view != CameraView::ThirdPerson {
+    // Only adjust distance when in third person view, and not when Shift is held
+    // (Shift+scroll is reserved for placement scale adjustment)
+    if settings.camera_view != CameraView::ThirdPerson
+        || input.pressed(KeyCode::ShiftLeft)
+        || input.pressed(KeyCode::ShiftRight)
+    {
         return;
     }
 

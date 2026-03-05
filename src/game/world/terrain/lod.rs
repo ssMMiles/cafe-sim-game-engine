@@ -6,7 +6,7 @@ use super::{TerrainChunk, constants::LOD_DISTANCES_SQ, mesh::LOD_LEVELS};
 
 /// Tracks camera position for LOD update throttling
 #[derive(Resource)]
-pub(crate) struct TerrainLodState {
+pub struct TerrainLodState {
     last_camera_pos: Vec3,
     update_threshold_sq: f32,
 }
@@ -21,7 +21,7 @@ impl Default for TerrainLodState {
 }
 
 /// System to update terrain chunk LOD based on camera distance.
-pub(crate) fn update_terrain_lod(
+pub fn update_terrain_lod(
     camera_query: Query<&GlobalTransform, With<PlayerCamera>>,
     mut chunk_query: Query<(
         &mut TerrainChunk,

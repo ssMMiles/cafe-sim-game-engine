@@ -2,7 +2,6 @@ use bevy::{
     camera::primitives::Aabb, diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin}, log, prelude::*
 };
 
-use super::day_night::TimeOfDay;
 use super::interaction::{HoveredOver, Interactable};
 use super::{GameEntity, camera::PlayerCamera};
 use crate::settings::UserSettings;
@@ -10,9 +9,6 @@ use crate::settings::UserSettings;
 // Display components
 #[derive(Component)]
 pub struct FpsDisplay;
-
-#[derive(Component)]
-pub struct TimeDisplay;
 
 #[derive(Component)]
 pub struct KeybindsDisplay;
@@ -144,45 +140,6 @@ fn create_fps_display(commands: &mut Commands, fps: &str) {
         .build(commands, FpsDisplay, |parent| {
             parent.spawn((
                 Text::new(format!("FPS: {}", fps)),
-                TextFont {
-                    font_size: 16.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 1.0, 1.0)),
-            ));
-        });
-}
-
-// Time Display
-pub fn setup_time_display(mut commands: Commands, time_of_day: Res<TimeOfDay>) {
-    create_time_display(&mut commands, &time_of_day);
-}
-
-pub fn update_time_display(
-    mut commands: Commands,
-    time_of_day: Res<TimeOfDay>,
-    time_query: Query<Entity, With<TimeDisplay>>,
-) {
-    // Remove existing time display
-    for entity in time_query.iter() {
-        commands.entity(entity).despawn();
-    }
-
-    // Recreate time display with current time
-    create_time_display(&mut commands, &time_of_day);
-}
-
-fn create_time_display(commands: &mut Commands, time_of_day: &TimeOfDay) {
-    let time_str = time_of_day.format_time();
-
-    DisplayBuilder::new()
-        .position(DisplayPosition::TopLeft {
-            top: 70.0,
-            left: 20.0,
-        })
-        .build(commands, TimeDisplay, |parent| {
-            parent.spawn((
-                Text::new(format!("Time: {}", time_str)),
                 TextFont {
                     font_size: 16.0,
                     ..default()

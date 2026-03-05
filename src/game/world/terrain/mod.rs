@@ -1,16 +1,27 @@
+pub mod bootstrap;
+pub mod constants;
+pub mod edit;
+pub mod lod;
+pub mod material;
+pub mod mesh;
+pub mod reconcile;
+pub mod save;
+pub mod storage;
+pub mod types;
+
 use bevy::{pbr::ExtendedMaterial, prelude::*};
+pub use types::{HeightmapData, TerrainChunk};
 
-use super::{
-    bootstrap::create_terrain,
-    edit,
-    lod::{TerrainLodState, update_terrain_lod},
-    material::TerrainMaterial,
-    save, storage,
-};
+pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
 
-pub struct HeightmapPlugin;
+use lod::{TerrainLodState, update_terrain_lod};
+use material::TerrainMaterial;
 
-impl Plugin for HeightmapPlugin {
+use bootstrap::create_terrain;
+
+pub struct TerrainPlugin;
+
+impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<
             ExtendedMaterial<StandardMaterial, TerrainMaterial>,

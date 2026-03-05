@@ -5,6 +5,7 @@ use crate::{
     AppState,
     menu::ui_builder::{ButtonStyle, MenuCommandsExt, MenuContainerExt, UIColors},
     settings::{
+        EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting,
         MouseSensitivitySetting, MovementSpeedSetting, SliderSetting, UserSettings,
         slider_constants,
     },
@@ -152,6 +153,24 @@ pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>)
                 SliderHandle::<MovementSpeedSetting>::default(),
                 SliderLabel::<MovementSpeedSetting>::default(),
                 SliderTrack::<MovementSpeedSetting>::default(),
+            );
+            parent.spawn_slider(
+                EdgeDepthSensitivitySetting::get_label(),
+                EdgeDepthSensitivitySetting::get_value(&settings),
+                EdgeDepthSensitivitySetting::get_range().0,
+                EdgeDepthSensitivitySetting::get_range().1,
+                SliderHandle::<EdgeDepthSensitivitySetting>::default(),
+                SliderLabel::<EdgeDepthSensitivitySetting>::default(),
+                SliderTrack::<EdgeDepthSensitivitySetting>::default(),
+            );
+            parent.spawn_slider(
+                EdgeNormalSensitivitySetting::get_label(),
+                EdgeNormalSensitivitySetting::get_value(&settings),
+                EdgeNormalSensitivitySetting::get_range().0,
+                EdgeNormalSensitivitySetting::get_range().1,
+                SliderHandle::<EdgeNormalSensitivitySetting>::default(),
+                SliderLabel::<EdgeNormalSensitivitySetting>::default(),
+                SliderTrack::<EdgeNormalSensitivitySetting>::default(),
             );
             parent.spawn_button("Back", SettingsButton::Back, ButtonStyle::Primary);
         });
@@ -311,6 +330,8 @@ pub fn update_slider_label<T: Component + SliderSetting>(
                 format!("{:.3}", current_value)
             } else if format_str == "{:.2}" {
                 format!("{:.2}", current_value)
+            } else if format_str == "{:.1}" {
+                format!("{:.1}", current_value)
             } else {
                 format!("{}", current_value)
             };

@@ -12,31 +12,8 @@ pub mod setting_ranges {
     pub const MOUSE_SENSITIVITY: (f32, f32) = (0.001, 0.01);
     pub const MOVEMENT_SPEED: (f32, f32) = (0.05, 5.0);
     pub const THIRD_PERSON_DISTANCE: (f32, f32) = (5.0, 50.0);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementObjectType {
-    Table,
-    Cooker,
-    Fridge,
-    CuttingBoard,
-}
-
-impl Default for PlacementObjectType {
-    fn default() -> Self {
-        PlacementObjectType::Table
-    }
-}
-
-impl std::fmt::Display for PlacementObjectType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PlacementObjectType::Table => write!(f, "Table"),
-            PlacementObjectType::Cooker => write!(f, "Cooker"),
-            PlacementObjectType::Fridge => write!(f, "Fridge"),
-            PlacementObjectType::CuttingBoard => write!(f, "Cutting Board"),
-        }
-    }
+    pub const EDGE_DEPTH_SENSITIVITY: (f32, f32) = (0.1, 10.0);
+    pub const EDGE_NORMAL_SENSITIVITY: (f32, f32) = (0.1, 10.0);
 }
 
 // Trait for abstracting slider setting access
@@ -97,11 +74,12 @@ pub struct UserSettings {
     pub mouse_sensitivity: f32,
     pub movement_speed: f32,
     pub edit_mode: bool,
-    pub current_placement_object: PlacementObjectType,
     pub outline_visible: bool,
     pub camera_view: CameraView,
     pub third_person_distance: f32,
     pub edge_detection_enabled: bool,
+    pub edge_depth_sensitivity: f32,
+    pub edge_normal_sensitivity: f32,
     pub terrain_edit_mode: bool,
     pub brush_radius: f32,
 }
@@ -114,11 +92,12 @@ impl Default for UserSettings {
             mouse_sensitivity: 0.002,
             movement_speed: 0.1,
             edit_mode: false,
-            current_placement_object: PlacementObjectType::default(),
             outline_visible: false,
             camera_view: CameraView::ThirdPerson,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
+            edge_depth_sensitivity: 2.0,
+            edge_normal_sensitivity: 1.5,
             terrain_edit_mode: false,
             brush_radius: 5.0,
         }
@@ -154,11 +133,6 @@ impl UserSettings {
                 name: "Edit Mode",
                 keybind: "Shift+E",
                 current_value: if self.edit_mode { "ON" } else { "OFF" }.to_string(),
-            },
-            SettingInfo {
-                name: "Placement Object",
-                keybind: "Shift+R",
-                current_value: self.current_placement_object.to_string(),
             },
             SettingInfo {
                 name: "Mouse Sensitivity",
@@ -212,15 +186,6 @@ impl UserSettings {
 
     pub fn toggle_edit_mode(&mut self) {
         self.edit_mode = !self.edit_mode;
-    }
-
-    pub fn cycle_placement_object(&mut self) {
-        self.current_placement_object = match self.current_placement_object {
-            PlacementObjectType::Table => PlacementObjectType::Cooker,
-            PlacementObjectType::Cooker => PlacementObjectType::Fridge,
-            PlacementObjectType::Fridge => PlacementObjectType::CuttingBoard,
-            PlacementObjectType::CuttingBoard => PlacementObjectType::Table,
-        };
     }
 
     pub fn toggle_edge_detection(&mut self) {
@@ -292,5 +257,55 @@ impl SliderSetting for MovementSpeedSetting {
 
     fn get_format() -> &'static str {
         "{:.2}"
+    }
+}
+
+#[derive(Component)]
+pub struct EdgeDepthSensitivitySetting;
+
+impl SliderSetting for EdgeDepthSensitivitySetting {
+    fn get_value(settings: &UserSettings) -> f32 {
+        settings.edge_depth_sensitivity
+    }
+
+    fn set_value(settings: &mut UserSettings, value: f32) {
+        settings.edge_depth_sensitivity = value;
+    }
+
+    fn get_range() -> (f32, f32) {
+        setting_ranges::EDGE_DEPTH_SENSITIVITY
+    }
+
+    fn get_label() -> &'static str {
+        "Edge Depth Sensitivity"
+    }
+
+    fn get_format() -> &'static str {
+        "{:.1}"
+    }
+}
+
+#[derive(Component)]
+pub struct EdgeNormalSensitivitySetting;
+
+impl SliderSetting for EdgeNormalSensitivitySetting {
+    fn get_value(settings: &UserSettings) -> f32 {
+        settings.edge_normal_sensitivity
+    }
+
+    fn set_value(settings: &mut UserSettings, value: f32) {
+        settings.edge_normal_sensitivity = value;
+    }
+
+    fn get_range() -> (f32, f32) {
+        setting_ranges::EDGE_NORMAL_SENSITIVITY
+    }
+
+    fn get_label() -> &'static str {
+        "Edge Normal Sensitivity"
+    }
+
+    fn get_format() -> &'static str {
+        "{:.1}"
     }
 }

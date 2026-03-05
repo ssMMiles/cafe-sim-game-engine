@@ -1,10 +1,14 @@
-use super::GameEntity;
-use super::interaction::{Interactable, spawn_interactable_scene};
-use super::materials::{PendingMaterial, update_mesh_materials_color};
-use super::simulation::{CookerMarker, CuttingBoardMarker, FridgeMarker, TableMarker};
-use crate::settings::{PlacementObjectType, UserSettings};
+use super::objects::{
+    PlacedObject, PlacedObjectRegistry, PlacementConfig, spawn_placed_object, world_pos_to_chunk,
+};
+use crate::game::GameEntity;
+use crate::game::camera::PlayerCamera;
+use crate::game::interaction::spawn_interactable_scene;
+use crate::game::materials::PendingMaterial;
+use crate::settings::UserSettings;
+use bevy::input::mouse::MouseScrollUnit;
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
-use bevy::{log, prelude::*};
+use bevy::{input::mouse::MouseWheel, log, prelude::*};
 
 pub fn toggle_edit_mode(mut settings: ResMut<UserSettings>, input: Res<ButtonInput<KeyCode>>) {
     if input.just_pressed(KeyCode::KeyE)
@@ -20,9 +24,11 @@ pub fn handle_edit_mode_click(
     mouse_input: Res<ButtonInput<MouseButton>>,
     preview_entity: Res<PlacementPreviewEntity>,
     preview_query: Query<&Transform, With<PlacementPreview>>,
-    camera_query: Query<&Transform, With<super::camera::PlayerCamera>>,
+    camera_query: Query<&Transform, With<PlayerCamera>>,
     mut raycast: MeshRayCast,
     asset_server: Res<AssetServer>,
+    config: Res<PlacementConfig>,
+    mut registry: ResMut<PlacedObjectRegistry>,
 ) {
     // Only proceed if edit mode is active and left mouse button was just clicked
     if !settings.edit_mode || !mouse_input.just_pressed(MouseButton::Left) {
@@ -68,15 +74,24 @@ pub fn handle_edit_mode_click(
         }
     }
 
-    if let None = position {
+    let Some(pos) = position else {
         log::warn!("Could not determine placement position for new object");
         return;
-    }
+    };
 
-    if true {
-        log::warn!("Object placement is currently disabled.");
-        return;
-    }
+    let chunk = world_pos_to_chunk(pos.x, pos.z);
+    let id = registry.alloc_id();
+    let transform =
+        Transform::from_translation(Vec3::new(pos.x, 0.0, pos.z)).with_scale(config.scale);
+    spawn_placed_object(
+        &mut commands,
+        &asset_server,
+        &mut registry,
+        config.asset_path.clone(),
+        id,
+        chunk,
+        transform,
+    );
 }
 
 #[derive(Component)]
@@ -90,34 +105,25 @@ pub fn setup_placement_preview(
     mut preview_entity: ResMut<PlacementPreviewEntity>,
     asset_server: Res<AssetServer>,
     settings: Res<UserSettings>,
+    config: Res<PlacementConfig>,
 ) {
     // Only setup preview if edit mode just turned on and we don't already have one
     if !settings.is_changed() || !settings.edit_mode || preview_entity.0.is_some() {
         return;
     }
 
-    // Load the table mesh (same as actual placement)
-    let table_scene: Handle<Scene> = asset_server.load("meshes/table/result.gltf#Scene0");
+    let scene: Handle<Scene> = asset_server.load(&config.asset_path);
+    let base_color = Color::srgba(0.8, 0.8, 0.8, 0.4);
 
-    // Get the color for the current placement type
-    let base_color = match settings.current_placement_object {
-        PlacementObjectType::Table => Color::srgba(0.6, 0.4, 0.2, 0.5), // Brown
-        PlacementObjectType::Cooker => Color::srgba(0.9, 0.2, 0.2, 0.5), // Red
-        PlacementObjectType::Fridge => Color::srgba(0.2, 0.4, 0.8, 0.5), // Blue
-        PlacementObjectType::CuttingBoard => Color::srgba(0.2, 0.8, 0.3, 0.5), // Green
-    };
-
-    // Spawn preview entity
     let entity = spawn_interactable_scene(
         &mut commands,
         (
             GameEntity,
             PlacementPreview,
-            SceneRoot(table_scene),
-            Transform::from_translation(Vec3::new(0.0, 0.05, 0.0)) // Slightly elevated to prevent z-fighting
-                .with_scale(Vec3::splat(0.02)),
+            SceneRoot(scene),
+            Transform::from_translation(Vec3::new(0.0, 0.05, 0.0)).with_scale(config.scale),
             GlobalTransform::default(),
-            Visibility::Hidden, // Start hidden until we have a valid position
+            Visibility::Hidden,
             PendingMaterial {
                 base_color,
                 metallic: 0.0,
@@ -127,15 +133,13 @@ pub fn setup_placement_preview(
         ),
     );
 
-    // Store the entity for later reference
     preview_entity.0 = Some(entity);
-
     log::info!("Placement preview entity created");
 }
 
 pub fn update_placement_preview(
     mut preview_query: Query<(&mut Transform, &mut Visibility), With<PlacementPreview>>,
-    camera_query: Query<&Transform, (With<super::camera::PlayerCamera>, Without<PlacementPreview>)>,
+    camera_query: Query<&Transform, (With<PlayerCamera>, Without<PlacementPreview>)>,
     mut raycast: MeshRayCast,
     preview_entity: Res<PlacementPreviewEntity>,
     settings: Res<UserSettings>,
@@ -206,45 +210,41 @@ pub fn cleanup_placement_preview(
     }
 }
 
-pub fn toggle_placement_object(
-    mut settings: ResMut<UserSettings>,
+/// Shift + scroll wheel adjusts PlacementConfig.scale uniformly.
+pub fn adjust_placement_scale(
+    settings: Res<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
-    mut preview_query: Query<
-        (Entity, Option<&mut PendingMaterial>, Option<&Children>),
-        With<PlacementPreview>,
-    >,
-    children_query: Query<&Children>,
-    mut mesh_material_query: Query<&mut MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut scroll_events: MessageReader<MouseWheel>,
+    mut config: ResMut<PlacementConfig>,
+    preview_entity: Res<PlacementPreviewEntity>,
+    mut preview_query: Query<&mut Transform, With<PlacementPreview>>,
 ) {
-    if input.just_pressed(KeyCode::KeyR)
-        && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight))
-    {
-        settings.cycle_placement_object();
+    if !settings.edit_mode {
+        scroll_events.clear();
+        return;
+    }
 
-        // Update preview material color
-        let new_color = match settings.current_placement_object {
-            PlacementObjectType::Table => Color::srgba(0.6, 0.4, 0.2, 0.5), // Brown
-            PlacementObjectType::Cooker => Color::srgba(0.9, 0.2, 0.2, 0.5), // Red
-            PlacementObjectType::Fridge => Color::srgba(0.2, 0.4, 0.8, 0.5), // Blue
-            PlacementObjectType::CuttingBoard => Color::srgba(0.2, 0.8, 0.3, 0.5), // Green
+    let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+
+    let mut delta = 0.0_f32;
+    for event in scroll_events.read() {
+        let y = match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y / 53.0, // normalise pixels to ~lines
         };
+        delta += y;
+    }
 
-        // Update any preview entities
-        for (_entity, pending_material, children) in preview_query.iter_mut() {
-            if let Some(mut pending) = pending_material {
-                // Update the pending material component
-                pending.base_color = new_color;
-            } else if let Some(children) = children {
-                // Update existing materials on mesh children
-                update_mesh_materials_color(
-                    children,
-                    new_color,
-                    &children_query,
-                    &mut mesh_material_query,
-                    &mut materials,
-                );
-            }
+    if !shift || delta == 0.0 {
+        return;
+    }
+
+    let factor = 1.15_f32.powf(delta);
+    config.scale = (config.scale * factor).clamp(Vec3::splat(0.001), Vec3::splat(100.0));
+
+    if let Some(entity) = preview_entity.0 {
+        if let Ok(mut transform) = preview_query.get_mut(entity) {
+            transform.scale = config.scale;
         }
     }
 }
