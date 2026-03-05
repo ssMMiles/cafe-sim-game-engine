@@ -82,7 +82,7 @@ pub fn handle_edit_mode_click(
     let chunk = world_pos_to_chunk(pos.x, pos.z);
     let id = registry.alloc_id();
     let transform =
-        Transform::from_translation(Vec3::new(pos.x, 0.0, pos.z)).with_scale(config.scale);
+        Transform::from_translation(pos).with_scale(config.scale);
     spawn_placed_object(
         &mut commands,
         &asset_server,
