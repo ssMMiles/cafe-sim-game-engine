@@ -305,7 +305,7 @@ pub fn delete_hovered_object(
     for (entity, obj) in hovered.iter() {
         registry.by_id.remove(&obj.id);
         registry.dirty_chunks.insert(obj.chunk);
-        commands.entity(entity).despawn();
+        commands.entity(entity).despawn_recursive();
         info!(
             "Deleted placed object id={} from chunk {:?}",
             obj.id, obj.chunk
