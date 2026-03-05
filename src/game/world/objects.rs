@@ -27,7 +27,7 @@ const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 const CHUNK_OBJECTS_VERSION: u32 = 1;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
-const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE;
+const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
 
 // ============================================================================
 // Serializable Data Structures
@@ -306,7 +306,7 @@ pub fn delete_hovered_object(
     for (entity, obj) in hovered.iter() {
         registry.by_id.remove(&obj.id);
         registry.dirty_chunks.insert(obj.chunk);
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
         info!(
             "Deleted placed object id={} from chunk {:?}",
             obj.id, obj.chunk
