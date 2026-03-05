@@ -46,6 +46,7 @@ pub fn character_physics(
     mut player_query: Query<(Entity, &mut Transform, &mut CharacterState), With<Player>>,
     camera_query: Query<&Transform, (With<super::camera::PlayerCamera>, Without<Player>)>,
     spatial_query: SpatialQuery,
+    mut capsule_cache: Local<Option<Collider>>,
 ) {
     if settings.movement_mode != MovementMode::FloorBased {
         return;
@@ -129,7 +130,8 @@ pub fn character_physics(
     }
 
     // 5. Move-and-slide — sweep before moving to avoid penetration entirely
-    let capsule_shape = Collider::capsule(CHAR_RADIUS, CHAR_HEIGHT - 2.0 * CHAR_RADIUS);
+    let capsule_shape = capsule_cache
+        .get_or_insert_with(|| Collider::capsule(CHAR_RADIUS, CHAR_HEIGHT - 2.0 * CHAR_RADIUS));
 
     // 5a. Horizontal move-and-slide (up to 3 iterations for corner sliding)
     let h_disp = Vec3::new(state.velocity.x, 0.0, state.velocity.z) * dt;
