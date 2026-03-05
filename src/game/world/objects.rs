@@ -20,13 +20,14 @@ use crate::game::{
 };
 
 use crate::game::world::terrain::storage::TerrainWorld;
+use crate::game::world::terrain::{CHUNK_SIZE, TILE_SIZE};
 
 // File format constants
 const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 const CHUNK_OBJECTS_VERSION: u32 = 1;
 
-// Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE = 255 * 0.25
-const CHUNK_WORLD_SIZE: f32 = 63.75;
+// Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
+const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE;
 
 // ============================================================================
 // Serializable Data Structures
