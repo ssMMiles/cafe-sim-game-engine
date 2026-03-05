@@ -5,6 +5,7 @@ use crate::{
     AppState,
     menu::ui_builder::{ButtonStyle, MenuCommandsExt, MenuContainerExt, UIColors},
     settings::{
+        EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting,
         MouseSensitivitySetting, MovementSpeedSetting, SliderSetting, UserSettings,
         slider_constants,
     },
@@ -60,21 +61,6 @@ impl<T: Component> Default for SliderLabel<T> {
 impl<T: Component> Default for SliderTrack<T> {
     fn default() -> Self {
         Self(std::marker::PhantomData)
-    }
-}
-
-/// Re-requests pointer lock when the user clicks while in-game and the cursor is not locked.
-/// On web, the browser requires a user gesture before granting pointer lock, so the initial
-/// lock attempt in setup() fails silently. This system catches that and re-locks on first click.
-pub fn reacquire_pointer_lock(
-    mouse_input: Res<ButtonInput<MouseButton>>,
-    mut cursor_options: Single<&mut CursorOptions>,
-) {
-    if cursor_options.grab_mode != CursorGrabMode::Locked
-        && mouse_input.just_pressed(MouseButton::Left)
-    {
-        cursor_options.grab_mode = CursorGrabMode::Locked;
-        cursor_options.visible = false;
     }
 }
 
@@ -167,6 +153,24 @@ pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>)
                 SliderHandle::<MovementSpeedSetting>::default(),
                 SliderLabel::<MovementSpeedSetting>::default(),
                 SliderTrack::<MovementSpeedSetting>::default(),
+            );
+            parent.spawn_slider(
+                EdgeDepthSensitivitySetting::get_label(),
+                EdgeDepthSensitivitySetting::get_value(&settings),
+                EdgeDepthSensitivitySetting::get_range().0,
+                EdgeDepthSensitivitySetting::get_range().1,
+                SliderHandle::<EdgeDepthSensitivitySetting>::default(),
+                SliderLabel::<EdgeDepthSensitivitySetting>::default(),
+                SliderTrack::<EdgeDepthSensitivitySetting>::default(),
+            );
+            parent.spawn_slider(
+                EdgeNormalSensitivitySetting::get_label(),
+                EdgeNormalSensitivitySetting::get_value(&settings),
+                EdgeNormalSensitivitySetting::get_range().0,
+                EdgeNormalSensitivitySetting::get_range().1,
+                SliderHandle::<EdgeNormalSensitivitySetting>::default(),
+                SliderLabel::<EdgeNormalSensitivitySetting>::default(),
+                SliderTrack::<EdgeNormalSensitivitySetting>::default(),
             );
             parent.spawn_button("Back", SettingsButton::Back, ButtonStyle::Primary);
         });
@@ -326,6 +330,8 @@ pub fn update_slider_label<T: Component + SliderSetting>(
                 format!("{:.3}", current_value)
             } else if format_str == "{:.2}" {
                 format!("{:.2}", current_value)
+            } else if format_str == "{:.1}" {
+                format!("{:.1}", current_value)
             } else {
                 format!("{}", current_value)
             };

@@ -1,26 +1,15 @@
+use avian3d::prelude::*;
 use bevy::math::VectorSpace;
 use bevy::pbr::ExtendedMaterial;
 use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
 use super::icons::{SvgTextureCache, load_svg_icons};
-use super::materials::create_arc_mesh;
 use super::{GameEntity, SimulationConfig};
-use super::physics::CharacterState;
-use crate::game::world::ToonMaterial;
+use super::physics::{CHAR_HEIGHT, CHAR_RADIUS, CharacterState};
+use crate::game::gfx::toon_material::ToonMaterial;
+use crate::game::world::objects::{ObjectsLoaded, PlacedObjectRegistry};
 use crate::settings::UserSettings;
-
-#[derive(Component)]
-pub struct TableMarker;
-
-#[derive(Component)]
-pub struct CookerMarker;
-
-#[derive(Component)]
-pub struct FridgeMarker;
-
-#[derive(Component)]
-pub struct CuttingBoardMarker;
 
 #[derive(Component, Debug)]
 pub struct ActiveCooking {
@@ -72,6 +61,8 @@ pub fn setup(
         },
     });
 
+    // Capsule length = cylindrical portion only (total height - 2 * radius)
+    let capsule_cylinder_height = CHAR_HEIGHT - 2.0 * CHAR_RADIUS;
     let _player = commands.spawn((
         GameEntity,
         Player,
@@ -80,6 +71,8 @@ pub fn setup(
         GlobalTransform::default(),
         Visibility::Inherited,
         SceneRoot(mr_windmill),
+        RigidBody::Kinematic,
+        Collider::capsule(CHAR_RADIUS, capsule_cylinder_height),
     )).id();
 
     super::camera::setup_camera(&mut commands, &mut images, &mut meshes);
@@ -89,7 +82,7 @@ pub fn setup(
     load_svg_icons(images, svg_cache);
 
     // Setup the game world
-    super::world::setup(&mut commands, &mut meshes, &mut materials, &asset_server, &mut toon_materials);
+    crate::game::world::setup(&mut commands, &mut meshes, &mut materials, &asset_server, &mut toon_materials);
 }
 
 
@@ -97,10 +90,14 @@ pub fn setup(
 pub fn exit(
     mut commands: Commands,
     game_entities: Query<Entity, With<GameEntity>>,
-    mut cursor_options: Single<&mut CursorOptions>
+    mut cursor_options: Single<&mut CursorOptions>,
+    mut registry: ResMut<PlacedObjectRegistry>,
+    mut loaded: ResMut<ObjectsLoaded>,
 ) {
-    // Use world::cleanup to despawn all game entities
-    super::world::cleanup(commands.reborrow(), game_entities);
+    // Despawn all game entities
+    for entity in game_entities.iter() {
+        commands.entity(entity).despawn();
+    }
 
     // Cleanup the simulation environment
     commands.remove_resource::<SimulationConfig>();
@@ -108,4 +105,8 @@ pub fn exit(
     // Unlock cursor when exiting game
     cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
     cursor_options.visible = true;
+
+    // Reset object placement state so re-entering the game reloads cleanly
+    *registry = PlacedObjectRegistry::default();
+    loaded.0 = false;
 }

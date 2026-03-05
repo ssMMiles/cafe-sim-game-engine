@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 // use bevy_mod_outline::OutlineVolume;
 
-use super::interaction::{HoveredOver, Interactable};
-use crate::settings::UserSettings;
+use crate::{
+    game::interaction::{HoveredOver, Interactable},
+    settings::UserSettings,
+};
 
 pub fn update_outline(
     mut commands: Commands,

@@ -1,3 +1,4 @@
+use avian3d::prelude::*;
 use bevy::{
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     pbr::ExtendedMaterial,
@@ -20,7 +21,7 @@ pub struct TerrainProcessed;
 #[derive(Component)]
 pub struct TerrainSetupMarker;
 
-pub(crate) fn create_terrain(
+pub fn create_terrain(
     marker_query: Query<Entity, (With<TerrainSetupMarker>, Without<TerrainProcessed>)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -83,16 +84,14 @@ pub(crate) fn create_terrain(
         tile_size: TILE_SIZE,
     });
 
-    let stone_texture: Handle<Image> = asset_server.load_with_settings(
-        "textures/terrain.png",
-        |s: &mut ImageLoaderSettings| {
+    let stone_texture: Handle<Image> =
+        asset_server.load_with_settings("textures/terrain.png", |s: &mut ImageLoaderSettings| {
             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,
                 address_mode_v: ImageAddressMode::Repeat,
                 ..ImageSamplerDescriptor::default()
             });
-        },
-    );
+        });
 
     let material = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
@@ -164,19 +163,50 @@ pub(crate) fn create_terrain(
 
                 let aabb = chunk_aabb.unwrap();
 
-                parent.spawn((
-                    Mesh3d(lod_meshes[0].clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_translation(offset),
-                    Visibility::Inherited,
-                    aabb,
-                    super::TerrainChunk {
-                        chunk_x: cx,
-                        chunk_y: cy,
-                        lod_meshes,
-                        current_lod: 0,
-                    },
-                ));
+                // Build avian heightfield collider for this chunk.
+                // HeightmapData stores raw (unscaled) heights in column-major order: heights[x * grid_h + y].
+                // avian3d Collider::heightfield expects rows=X subdivisions, cols=Z subdivisions.
+                // Heights must be pre-scaled; the `scale` parameter controls the XZ physical footprint.
+                let hf_heights: Vec<Vec<f32>> = (0..chunk_width)
+                    .map(|lx| {
+                        (0..chunk_height)
+                            .map(|ly| {
+                                heights[(start_x + lx) * height + (start_y + ly)] * HEIGHT_SCALE
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                let physical_width = (chunk_width - 1) as f32 * TILE_SIZE.0;
+                let physical_depth = (chunk_height - 1) as f32 * TILE_SIZE.1;
+                let hf_collider = Collider::heightfield(
+                    hf_heights,
+                    Vec3::new(physical_width, 1.0, physical_depth),
+                );
+
+                // avian heightfield is centered at local origin, but the mesh starts at (0,0).
+                // Spawn the collider as a child entity with a local offset to align them.
+                let hf_local_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
+
+                parent
+                    .spawn((
+                        Mesh3d(lod_meshes[0].clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::from_translation(offset),
+                        Visibility::Inherited,
+                        aabb,
+                        super::TerrainChunk {
+                            chunk_x: cx,
+                            chunk_y: cy,
+                            lod_meshes,
+                            current_lod: 0,
+                        },
+                        RigidBody::Static,
+                    ))
+                    .with_children(|chunk_parent| {
+                        chunk_parent
+                            .spawn((hf_collider, Transform::from_translation(hf_local_offset)));
+                    });
             }
         }
     });

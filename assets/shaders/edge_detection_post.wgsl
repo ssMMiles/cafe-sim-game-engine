@@ -66,8 +66,13 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let normal_edge = max_normal_delta * settings.normal_sensitivity;
     let edge_strength = max(depth_edge, normal_edge);
 
-    // Slightly higher threshold prevents crawling artifacts in shaded corners.
-    let edge = smoothstep(0.02, 0.04, edge_strength);
+    // Gradient-based analytic AA: adapt the smoothstep ramp to ~1 screen pixel wide.
+    // dpdx/dpdy gives the rate-of-change of edge_strength across the current 2x2 pixel
+    // quad, letting us compute fractional coverage at the detected-edge boundary.
+    let gradient_len = length(vec2f(dpdx(edge_strength), dpdy(edge_strength)));
+    let half_width = max(gradient_len * 0.5, 0.01);
+    let threshold = 0.03;
+    let edge = smoothstep(threshold - half_width, threshold + half_width, edge_strength);
 
     let base_color = textureSample(screen_texture, texture_sampler, in.uv);
     return mix(base_color, settings.edge_color, edge);

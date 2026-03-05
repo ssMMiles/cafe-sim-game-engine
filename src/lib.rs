@@ -1,9 +1,9 @@
+use avian3d::prelude::PhysicsPlugins;
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 
 mod game;
 mod menu;
 mod settings;
-mod terrain;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -27,10 +27,10 @@ pub fn run() {
                 }),
         )
         // .add_plugins(OutlinePlugin)
+        .add_plugins(PhysicsPlugins::default())
         .add_plugins(settings::SettingsPlugin)
         .add_plugins(menu::MenuPlugin)
         .add_plugins(game::SimulationPlugin)
-        .add_plugins(terrain::HeightmapPlugin)
         .add_systems(Startup, initialize)
         .init_state::<AppState>()
         .run();

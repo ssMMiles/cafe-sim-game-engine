@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use bevy::{camera::primitives::Aabb, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*};
 
 use crate::game::camera::PlayerCamera;
-use crate::settings::UserSettings;
-use crate::terrain::{
+use crate::game::world::terrain::{
     mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::TerrainChunkRegistry,
     {CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE}, {HeightmapData, TerrainChunk},
 };
+use crate::settings::UserSettings;
 
 /// Height change per second at falloff=1, in pre-scaled world units.
 const BRUSH_STRENGTH: f32 = 50.0;

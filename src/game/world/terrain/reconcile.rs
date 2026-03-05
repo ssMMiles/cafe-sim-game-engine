@@ -5,7 +5,7 @@ use bevy::prelude::*;
 ///
 /// Stored heights are pre-scaled (0.0–HEIGHT_SCALE); we divide by HEIGHT_SCALE
 /// to convert them back to the un-scaled (0.0–1.0) form used by `heights`.
-pub(crate) fn apply_stored_modifications(
+pub fn apply_stored_modifications(
     heights: &mut Vec<f32>,
     metadata: &storage::WorldMetadata,
     grid_w: usize,

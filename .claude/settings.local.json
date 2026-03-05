@@ -21,7 +21,14 @@
       "Bash(cd:*)",
       "Bash(ls -la /c/Users/Miles/Documents/projects/bevy/crates/bevy_*/src/lib.rs 2>/dev/null | wc -l && find /c/Users/Miles/Documents/projects/bevy -name \"lib.rs\" -path \"*/bevy/src/*\" 2>/dev/null)",
       "Bash(python3:*)",
-      "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo update -p getrandom@0.3.2 2>&1)"
+      "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo update -p getrandom@0.3.2 2>&1)",
+      "Bash(head:*)",
+      "WebFetch(domain:parry.rs)",
+      "WebFetch(domain:www.parry.rs)",
+      "WebFetch(domain:avianphysics.com)",
+      "WebFetch(domain:avian.rs)",
+      "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo fetch 2>&1)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": [],

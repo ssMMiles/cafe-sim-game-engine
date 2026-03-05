@@ -1,52 +1,39 @@
 use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
-    AppState, game::{crosshair::{toggle_crosshair, update_crosshair_display}, interaction::{handle_interactable_clicks, show_interaction_text}, world::ToonMaterial}, settings::{MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
+    AppState, game::{crosshair::{toggle_crosshair, update_crosshair_display}, gfx::GfxPlugin, interaction::{handle_interactable_clicks, show_interaction_text}, world::WorldPlugin}, settings::{EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
 };
 
 pub mod camera;
 mod animation;
 mod crosshair;
-mod day_night;
-mod edit_mode;
 mod icons;
 mod interaction;
 mod materials;
-mod outline;
 pub mod pause_menu;
 pub mod physics;
-mod post_process;
 mod simulation;
-mod sky;
 mod ui_displays;
-mod world;
+pub mod world;
+mod gfx;
 
 use animation::{init_animation_player, pause_animations, resume_animations, setup_character_animations, update_character_animation};
 use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 use physics::character_physics;
-use day_night::{TimeOfDay, update_time_of_day, update_sun_transform, update_sun_properties};
-use edit_mode::{
-    PlacementPreviewEntity, cleanup_placement_preview, handle_edit_mode_click,
-    setup_placement_preview, toggle_edit_mode, toggle_placement_object, update_placement_preview,
-};
 use icons::SvgTextureCache;
 use interaction::{InteractableClicked, check_interactions, detect_interactable_clicks};
-use outline::{toggle_outline, update_outline};
 use pause_menu::{
     PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
-    handle_pause_menu, handle_settings_menu, handle_slider, reacquire_pointer_lock,
-    setup_pause_menu, setup_pause_settings, update_slider_label,
+    handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
+    update_slider_label,
 };
-use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use simulation::{
     exit, setup
 };
-use sky::{SkyDomeMaterial, setup_sky, sync_sky_dome};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
-    setup_position_display, setup_time_display, update_dynamic_backgrounds, update_fps_display,
+    setup_position_display, update_dynamic_backgrounds, update_fps_display,
     update_interaction_info_display, update_keybinds_display, update_position_display,
-    update_time_display,
 };
 
 pub struct SimulationPlugin;
@@ -78,11 +65,10 @@ fn edit_mode_active(settings: Res<UserSettings>) -> bool {
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(WorldPlugin);
+        app.add_plugins(GfxPlugin);
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(LogDiagnosticsPlugin::default());
-        app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, ToonMaterial>>::default());
-        app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default());
-        app.add_plugins(EdgeDetectionPlugin);
         app.add_message::<InteractableClicked>();
         app.add_systems(
             OnEnter(AppState::InGame),
@@ -90,10 +76,8 @@ impl Plugin for SimulationPlugin {
                 setup,
                 setup_keybinds_display,
                 setup_fps_display,
-                setup_time_display,
                 setup_interaction_info_display,
                 setup_position_display,
-                setup_sky.after(setup),
                 setup_character_animations.after(setup),
             ),
         );
@@ -115,18 +99,9 @@ impl Plugin for SimulationPlugin {
             Update,
             init_animation_player.run_if(in_state(AppState::InGame)),
         );
-        // app.add_systems(
-        //     Update,
-        //     (update_time_of_day, update_sun_transform, update_sun_properties)
-        //         .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        // );
         app.add_systems(
             Update,
             resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            sync_sky_dome.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,
@@ -139,44 +114,10 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(
             Update,
-            handle_edit_mode_click.run_if(
-                edit_mode_active
-                    .and(in_state(AppState::InGame))
-                    .and(in_state(SimulationState::Running)),
-            ),
-        );
-        app.add_systems(
-            Update,
             show_interaction_text
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
-        app.add_systems(
-            Update,
-            update_outline
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
         app.add_systems(Update, toggle_crosshair.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, toggle_outline.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, toggle_edit_mode.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, toggle_edge_detection.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, sync_edge_detection_settings.run_if(in_state(AppState::InGame)));
-        app.add_systems(
-            Update,
-            toggle_placement_object.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            setup_placement_preview.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            cleanup_placement_preview.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            update_placement_preview
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
         app.add_systems(
             Update,
             update_crosshair_display.run_if(in_state(AppState::InGame)),
@@ -188,10 +129,6 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             update_fps_display.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            update_time_display.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,
@@ -218,11 +155,6 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             handle_pause_input.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            reacquire_pointer_lock
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
 
         app.add_systems(OnEnter(SimulationState::Paused), (setup_pause_menu, pause_animations));
@@ -252,8 +184,12 @@ impl Plugin for SimulationPlugin {
             (
                 handle_slider::<MouseSensitivitySetting>,
                 handle_slider::<MovementSpeedSetting>,
+                handle_slider::<EdgeDepthSensitivitySetting>,
+                handle_slider::<EdgeNormalSensitivitySetting>,
                 update_slider_label::<MouseSensitivitySetting>,
                 update_slider_label::<MovementSpeedSetting>,
+                update_slider_label::<EdgeDepthSensitivitySetting>,
+                update_slider_label::<EdgeNormalSensitivitySetting>,
             )
                 .run_if(in_state(SimulationState::Paused).and(in_state(PauseMenuState::Settings))),
         );
@@ -261,8 +197,6 @@ impl Plugin for SimulationPlugin {
         app.init_state::<SimulationState>();
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
-        app.init_resource::<TimeOfDay>();
-        app.init_resource::<PlacementPreviewEntity>();
         app.init_resource::<SvgTextureCache>();
     }
 }

@@ -29,14 +29,14 @@
 
 <body id="wasm-example">
     <script type="module">
-        import init from "/pkg/cafe_sim.js";
+            import init from "./cafe_sim.js";
         
         async function run() {
             try {
                 const wasm = await init();
 
                 const canvas = document.querySelector('canvas');
-                
+
                 // // Handle high DPI displays
                 // const dpr = window.devicePixelRatio || 1;
                 // canvas.width = canvas.clientWidth * dpr;
@@ -53,12 +53,20 @@
                     }
                 });
 
+                function requestLock() {
+                    if (document.pointerLockElement !== canvas) {
+                        canvas.requestPointerLock();
+                    }
+                }
+
+                canvas.addEventListener('click', requestLock);
+
                 console.log("WASM Loaded");
             } catch (e) {
                 console.error("Failed to load WASM:", e);
             }
         }
-        
+
         run();
     </script>
 </body>

@@ -225,10 +225,13 @@ pub fn sync_edge_detection_settings(
     user_settings: Res<crate::settings::UserSettings>,
     mut query: Query<&mut EdgeDetectionSettings>,
 ) {
+    if !user_settings.is_changed() {
+        return;
+    }
     let enabled = if user_settings.edge_detection_enabled { 1 } else { 0 };
     for mut settings in &mut query {
-        if settings.enabled != enabled {
-            settings.enabled = enabled;
-        }
+        settings.enabled = enabled;
+        settings.depth_sensitivity = user_settings.edge_depth_sensitivity;
+        settings.normal_sensitivity = user_settings.edge_normal_sensitivity;
     }
 }
