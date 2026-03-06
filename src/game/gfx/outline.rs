@@ -2,7 +2,7 @@ use bevy::prelude::*;
 // use bevy_mod_outline::OutlineVolume;
 
 use crate::{
-    game::interaction::{HoveredOver, Interactable},
+    game::gltf_loading::{HoveredOver, Interactable},
     settings::UserSettings,
 };
 

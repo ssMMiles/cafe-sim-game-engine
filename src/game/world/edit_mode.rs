@@ -2,9 +2,8 @@ use super::objects::{
     PlacedObject, PlacedObjectRegistry, PlacementConfig, spawn_placed_object, world_pos_to_chunk,
 };
 use crate::game::GameEntity;
-use crate::game::camera::PlayerCamera;
-use crate::game::interaction::spawn_interactable_scene;
-use crate::game::materials::PendingMaterial;
+use crate::game::gfx::camera::PlayerCamera;
+use crate::game::gltf_loading::{PendingMaterial, spawn_interactable_scene};
 use crate::settings::UserSettings;
 use bevy::input::mouse::MouseScrollUnit;
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;

@@ -204,8 +204,11 @@ pub fn create_terrain(
                         RigidBody::Static,
                     ))
                     .with_children(|chunk_parent| {
-                        chunk_parent
-                            .spawn((hf_collider, Transform::from_translation(hf_local_offset)));
+                        chunk_parent.spawn((
+                            hf_collider,
+                            Transform::from_translation(hf_local_offset),
+                            avian3d::debug_render::DebugRender::none(),
+                        ));
                     });
             }
         }

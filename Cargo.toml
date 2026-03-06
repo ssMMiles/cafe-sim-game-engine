@@ -39,7 +39,7 @@ env_logger = "0.11.9"
 log = "0.4.29"
 wasm-bindgen = "0.2.111"
 
-avian3d = { version = "0.5", features = [] }
+avian3d = { version = "0.5", features = ["debug-plugin"] }
 
 [dev-dependencies]
 tempfile = "3"

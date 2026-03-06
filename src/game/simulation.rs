@@ -7,6 +7,7 @@ use bevy::{log, prelude::*};
 use super::icons::{SvgTextureCache, load_svg_icons};
 use super::{GameEntity, SimulationConfig};
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS, CharacterState};
+use crate::game::gfx::camera::setup_camera;
 use crate::game::gfx::toon_material::ToonMaterial;
 use crate::game::world::objects::{ObjectsLoaded, PlacedObjectRegistry};
 use crate::settings::UserSettings;
@@ -31,6 +32,9 @@ pub struct ProgressArc;
 
 #[derive(Component)]
 pub struct Player;
+
+#[derive(Component)]
+pub struct PlayerCollider;
 
 pub fn setup(
     mut commands: Commands,
@@ -63,7 +67,7 @@ pub fn setup(
 
     // Capsule length = cylindrical portion only (total height - 2 * radius)
     let capsule_cylinder_height = CHAR_HEIGHT - 2.0 * CHAR_RADIUS;
-    let _player = commands.spawn((
+    let player = commands.spawn((
         GameEntity,
         Player,
         CharacterState::default(),
@@ -72,10 +76,17 @@ pub fn setup(
         Visibility::Inherited,
         SceneRoot(mr_windmill),
         RigidBody::Kinematic,
-        Collider::capsule(CHAR_RADIUS, capsule_cylinder_height),
     )).id();
 
-    super::camera::setup_camera(&mut commands, &mut images, &mut meshes);
+    // Offset the collider upward so its bottom aligns with the player's feet (entity origin).
+    // avian centers the capsule at the child entity origin, so offset by half the total height.
+    commands.entity(player).with_child((
+        PlayerCollider,
+        Collider::capsule(CHAR_RADIUS, capsule_cylinder_height),
+        Transform::from_translation(Vec3::Y * CHAR_HEIGHT * 0.5),
+    ));
+
+    setup_camera(&mut commands, &mut images, &mut meshes);
     commands.insert_resource(SimulationConfig::default());
 
     // Load SVG icons

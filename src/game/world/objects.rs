@@ -15,7 +15,7 @@ use std::{
 
 use crate::game::{
     GameEntity,
-    interaction::{HoveredOver, Interactable, spawn_interactable_scene},
+    gltf_loading::{HoveredOver, Interactable, spawn_interactable_scene},
     world::terrain::storage::StorageError,
 };
 

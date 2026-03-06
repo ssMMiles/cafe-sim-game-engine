@@ -82,6 +82,7 @@ pub struct UserSettings {
     pub edge_normal_sensitivity: f32,
     pub terrain_edit_mode: bool,
     pub brush_radius: f32,
+    pub physics_debug: bool,
 }
 
 impl Default for UserSettings {
@@ -100,6 +101,7 @@ impl Default for UserSettings {
             edge_normal_sensitivity: 1.5,
             terrain_edit_mode: false,
             brush_radius: 5.0,
+            physics_debug: false,
         }
     }
 }
@@ -159,6 +161,11 @@ impl UserSettings {
                 keybind: "Shift+G",
                 current_value: if self.terrain_edit_mode { "ON" } else { "OFF" }.to_string(),
             },
+            SettingInfo {
+                name: "Physics Debug",
+                keybind: "Shift+P",
+                current_value: if self.physics_debug { "ON" } else { "OFF" }.to_string(),
+            },
         ]
     }
 
@@ -197,6 +204,10 @@ impl UserSettings {
         if self.terrain_edit_mode {
             self.edit_mode = false;
         }
+    }
+
+    pub fn toggle_physics_debug(&mut self) {
+        self.physics_debug = !self.physics_debug;
     }
 }
 

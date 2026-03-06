@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::{game::world::terrain::HeightmapData, settings::{MovementMode, UserSettings}};
 
-use super::simulation::Player;
+use super::{gfx::camera::PlayerCamera, simulation::{Player, PlayerCollider}};
 
 // Physics constants
 const GRAVITY: f32 = 19.6;
@@ -16,9 +16,9 @@ const GROUND_DECEL: f32 = 60.0;
 const AIR_ACCEL: f32 = 8.0;
 
 /// Total height of the player capsule (including hemispherical caps).
-pub const CHAR_HEIGHT: f32 = 1.8;
+pub const CHAR_HEIGHT: f32 = 1.5;
 /// Radius of the player capsule.
-pub const CHAR_RADIUS: f32 = 0.4;
+pub const CHAR_RADIUS: f32 = 0.3;
 
 #[derive(Component, Debug)]
 pub struct CharacterState {
@@ -44,7 +44,8 @@ pub fn character_physics(
     time: Res<Time>,
     heightmap: Option<Res<HeightmapData>>,
     mut player_query: Query<(Entity, &mut Transform, &mut CharacterState), With<Player>>,
-    camera_query: Query<&Transform, (With<super::camera::PlayerCamera>, Without<Player>)>,
+    player_collider_query: Query<Entity, With<PlayerCollider>>,
+    camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>)>,
     spatial_query: SpatialQuery,
     mut capsule_cache: Local<Option<Collider>>,
 ) {
@@ -63,6 +64,14 @@ pub fn character_physics(
     let Ok(camera_tf) = camera_query.single() else {
         return;
     };
+
+    // Build a shared spatial query filter that excludes both the player root and its
+    // collider child. Without this the collider child (on a separate entity) is not
+    // excluded by the player_entity entry and shapes cast from inside it would self-hit.
+    let collider_entity = player_collider_query.single().ok();
+    let query_filter = SpatialQueryFilter::from_excluded_entities(
+        [player_entity].into_iter().chain(collider_entity),
+    );
 
     // 1. Read input — WASD wish direction on XZ, oriented by camera yaw
     let mut wish_dir = Vec3::ZERO;
@@ -133,16 +142,15 @@ pub fn character_physics(
     let capsule_shape = capsule_cache
         .get_or_insert_with(|| Collider::capsule(CHAR_RADIUS, CHAR_HEIGHT - 2.0 * CHAR_RADIUS));
 
-    // 5a. Horizontal move-and-slide (up to 3 iterations for corner sliding)
-    let h_disp = Vec3::new(state.velocity.x, 0.0, state.velocity.z) * dt;
-    let mut remaining = h_disp;
+    // 5. Move-and-slide — true 3D (up to 3 iterations for floor + wall + ceiling)
+    let mut displacement = state.velocity * dt;
 
     for _ in 0..3 {
-        if remaining.length_squared() < 1e-8 {
+        if displacement.length_squared() < 1e-8 {
             break;
         }
-        let dist = remaining.length();
-        let Ok(dir) = Dir3::new(remaining / dist) else { break };
+        let dist = displacement.length();
+        let Ok(dir) = Dir3::new(displacement / dist) else { break };
         let capsule_center = player_tf.translation + Vec3::Y * (CHAR_HEIGHT * 0.5);
 
         if let Some(hit) = spatial_query.cast_shape(
@@ -155,34 +163,42 @@ pub fn character_physics(
                 ignore_origin_penetration: true,
                 ..Default::default()
             },
-            &SpatialQueryFilter::from_excluded_entities([player_entity]),
+            &query_filter,
         ) {
-            let wall_normal_h = Vec3::new(hit.normal2.x, 0.0, hit.normal2.z).normalize_or_zero();
-            // A surface is a "wall" only if it's too steep to walk on. Walkable surfaces
-            // (terrain slopes, object tops) are handled by ground detection — skip them here.
-            let is_wall = wall_normal_h.length_squared() > 0.01
-                && hit.normal2.y.abs() < MAX_SLOPE.cos();
-            if is_wall {
-                // Wall hit — advance to surface and slide along it
-                player_tf.translation += dir.as_vec3() * (hit.distance - 0.001_f32).max(0.0);
-                remaining -= remaining.dot(wall_normal_h) * wall_normal_h;
-                let into_wall = state.velocity.dot(wall_normal_h).min(0.0);
-                state.velocity.x -= wall_normal_h.x * into_wall;
-                state.velocity.z -= wall_normal_h.z * into_wall;
-            } else {
-                // Walkable surface or floor/ceiling during horizontal sweep.
-                // Apply remaining freely; vertical constraint is handled by ground detection.
-                player_tf.translation += remaining;
+            let n = hit.normal2;
+            let dot_n = displacement.dot(n);
+
+            if n.y > MAX_SLOPE.cos() && (state.grounded || dot_n >= 0.0) {
+                // Floor hit while grounded, or not moving into the floor.
+                // Step 6 is the authority on vertical positioning — apply remaining
+                // displacement and exit the sweep loop.
+                player_tf.translation += displacement;
                 break;
             }
+
+            // Moving into the surface: advance to just before it, then project.
+            player_tf.translation += dir.as_vec3() * (hit.distance - 0.001_f32).max(0.0);
+
+            if n.y > MAX_SLOPE.cos() {
+                // Moving into a walkable floor — slide along surface
+                let vel_into = state.velocity.dot(n).min(0.0);
+                state.velocity -= n * vel_into;
+                displacement -= n * dot_n;
+            } else if n.y < -MAX_SLOPE.cos() {
+                // Ceiling — kill upward velocity, project displacement
+                state.velocity.y = state.velocity.y.min(0.0);
+                displacement -= n * dot_n;
+            } else {
+                // Wall — project displacement and velocity onto wall plane
+                displacement -= n * dot_n;
+                let vel_into = state.velocity.dot(n).min(0.0);
+                state.velocity -= n * vel_into;
+            }
         } else {
-            player_tf.translation += remaining;
+            player_tf.translation += displacement;
             break;
         }
     }
-
-    // 5b. Vertical movement (separate axis)
-    player_tf.translation.y += state.velocity.y * dt;
 
     // 6. Ground resolve — terrain heightmap sampling (primary, fast path)
     let feet_y = player_tf.translation.y;
@@ -217,10 +233,10 @@ pub fn character_physics(
             Dir3::NEG_Y,
             &ShapeCastConfig {
                 max_distance: GROUND_SNAP + 0.5,
-                ignore_origin_penetration: true,
+                ignore_origin_penetration: false,
                 ..Default::default()
             },
-            &SpatialQueryFilter::from_excluded_entities([player_entity]),
+            &query_filter,
         )
         .map(|hit| feet_y - hit.distance);
 

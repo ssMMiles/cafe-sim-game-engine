@@ -9,7 +9,7 @@ use bevy::{
     shader::ShaderRef,
 };
 
-use crate::game::{GameEntity, camera::PlayerCamera};
+use crate::game::{GameEntity, gfx::camera::PlayerCamera};
 
 /// Marker for the sky dome entity, used by `sync_sky_dome` to keep it centred on the camera.
 #[derive(Component)]

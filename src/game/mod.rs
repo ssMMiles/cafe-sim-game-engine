@@ -1,15 +1,12 @@
 use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
-    AppState, game::{crosshair::{toggle_crosshair, update_crosshair_display}, gfx::GfxPlugin, interaction::{handle_interactable_clicks, show_interaction_text}, world::WorldPlugin}, settings::{EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
+    AppState, game::{gfx::GfxPlugin, gltf_loading::{handle_interactable_clicks, show_interaction_text}, world::WorldPlugin}, settings::{EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
 };
 
-pub mod camera;
 mod animation;
-mod crosshair;
 mod icons;
-mod interaction;
-mod materials;
+mod gltf_loading;
 pub mod pause_menu;
 pub mod physics;
 mod simulation;
@@ -18,10 +15,9 @@ pub mod world;
 mod gfx;
 
 use animation::{init_animation_player, pause_animations, resume_animations, setup_character_animations, update_character_animation};
-use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 use physics::character_physics;
 use icons::SvgTextureCache;
-use interaction::{InteractableClicked, check_interactions, detect_interactable_clicks};
+use gltf_loading::{InteractableClicked, check_interactions, detect_interactable_clicks};
 use pause_menu::{
     PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
@@ -86,10 +82,7 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             Update,
             (
-                handle_camera_input,
-                apply_freecam_movement,
                 character_physics,
-                camera_follow,
                 update_character_animation,
             )
                 .chain()
@@ -101,14 +94,6 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(
             Update,
-            resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            adjust_camera_distance.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
             (check_interactions, detect_interactable_clicks)
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
         );
@@ -116,11 +101,6 @@ impl Plugin for SimulationPlugin {
             Update,
             show_interaction_text
                 .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(Update, toggle_crosshair.run_if(in_state(AppState::InGame)));
-        app.add_systems(
-            Update,
-            update_crosshair_display.run_if(in_state(AppState::InGame)),
         );
         app.add_systems(
             Update,

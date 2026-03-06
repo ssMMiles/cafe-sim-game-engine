@@ -1,9 +1,44 @@
-use crate::game::{GameEntity};
+use crate::game::GameEntity;
 
-use super::materials::{PendingMaterial, apply_material_to_meshes};
+use super::gfx::camera::PlayerCamera;
 use bevy::{
     log, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*, scene::SceneInstanceReady,
 };
+
+#[derive(Component, Clone)]
+pub struct PendingMaterial {
+    pub base_color: Color,
+    pub metallic: f32,
+    pub perceptual_roughness: f32,
+    pub alpha_mode: bevy::render::alpha::AlphaMode,
+}
+
+pub fn apply_material_to_meshes(
+    commands: &mut Commands,
+    children: &Children,
+    material: &Handle<StandardMaterial>,
+    mesh_query: &Query<Entity, With<Mesh3d>>,
+    children_query: &Query<&Children>,
+) {
+    for child in children.iter() {
+        if mesh_query.contains(child) {
+            commands
+                .entity(child)
+                .insert(MeshMaterial3d(material.clone()));
+        }
+
+        // Recursively apply to grandchildren
+        if let Ok(grandchildren) = children_query.get(child) {
+            apply_material_to_meshes(
+                commands,
+                grandchildren,
+                material,
+                mesh_query,
+                children_query,
+            );
+        }
+    }
+}
 
 #[derive(Component, Clone)]
 pub struct Interactable {
@@ -118,7 +153,7 @@ fn propagate_to_mesh_children(
 
 pub fn check_interactions(
     mut commands: Commands,
-    camera_query: Query<&Transform, With<super::camera::PlayerCamera>>,
+    camera_query: Query<&Transform, With<PlayerCamera>>,
     interactable_query: Query<
         (
             Entity,
@@ -126,7 +161,7 @@ pub fn check_interactions(
             &Interactable,
             Option<&InteractableParent>,
         ),
-        Without<super::camera::PlayerCamera>,
+        Without<PlayerCamera>,
     >,
     marked_query: Query<Entity, With<HoveredOver>>,
     mut raycast: MeshRayCast,
@@ -248,10 +283,7 @@ pub fn detect_interactable_clicks(
 ) {
     if mouse_input.just_pressed(MouseButton::Left) {
         for (entity, interactable) in hovered_query.iter() {
-            log::info!(
-                "Clicked on interactable: {}",
-                interactable.name
-            );
+            log::info!("Clicked on interactable: {}", interactable.name);
 
             // Emit event
             click_events.write(InteractableClicked {
@@ -296,10 +328,9 @@ pub fn show_interaction_text(
 
 // Main handler for all interactable clicks
 pub fn handle_interactable_clicks(
-    mut click_events: MessageReader<super::interaction::InteractableClicked>,
+    mut click_events: MessageReader<super::gltf_loading::InteractableClicked>,
 ) {
     for event in click_events.read() {
         let _entity = event.entity;
-
     }
 }

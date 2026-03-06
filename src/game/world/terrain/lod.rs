@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::game::camera::PlayerCamera;
+use crate::game::gfx::camera::PlayerCamera;
 
 use super::{TerrainChunk, constants::LOD_DISTANCES_SQ, mesh::LOD_LEVELS};
 

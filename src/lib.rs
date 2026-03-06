@@ -1,4 +1,4 @@
-use avian3d::prelude::PhysicsPlugins;
+use avian3d::{debug_render::{PhysicsDebugPlugin, PhysicsGizmos}, prelude::PhysicsPlugins};
 use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
 
 mod game;
@@ -28,6 +28,14 @@ pub fn run() {
         )
         // .add_plugins(OutlinePlugin)
         .add_plugins(PhysicsPlugins::default())
+        .add_plugins(PhysicsDebugPlugin::default())
+        .insert_gizmo_config(
+            PhysicsGizmos {
+                collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
+                ..PhysicsGizmos::none()
+            },
+            GizmoConfig { enabled: false, ..default() },
+        )
         .add_plugins(settings::SettingsPlugin)
         .add_plugins(menu::MenuPlugin)
         .add_plugins(game::SimulationPlugin)
