@@ -10,15 +10,15 @@ mod sky;
 pub mod terrain;
 
 use crate::{
-    AppState,
     game::{
-        GameEntity, SimulationState, edit_mode_active,
+        GameEntity,
         gfx::toon_material::ToonMaterial,
         world::{
-            sky::{SkyDomeMaterial, setup_sky, sync_sky_dome},
+            sky::{SkyDomeMaterial, sync_sky_dome},
             terrain::bootstrap::TerrainSetupMarker,
         },
     },
+    settings::UserSettings,
 };
 use edit_mode::{
     PlacementPreviewEntity, adjust_placement_scale, cleanup_placement_preview,
@@ -29,61 +29,50 @@ use objects::{
     load_placed_objects, save_placed_objects,
 };
 
+pub use sky::setup_sky;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WorldSet {
+    /// Runs whenever the game is active (including while paused).
+    InGame,
+    /// Runs only while the simulation is running (not paused).
+    Running,
+}
+
+fn edit_mode_active(settings: Res<UserSettings>) -> bool {
+    settings.edit_mode
+}
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default());
-        app.add_systems(OnEnter(AppState::InGame), setup_sky);
-        app.add_systems(Update, sync_sky_dome.run_if(in_state(AppState::InGame)));
+        app.add_systems(Update, sync_sky_dome.in_set(WorldSet::InGame));
 
         app.add_plugins(terrain::TerrainPlugin);
 
-        app.add_systems(Update, toggle_edit_mode.run_if(in_state(AppState::InGame)));
+        app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::InGame));
         app.add_systems(
             Update,
-            handle_edit_mode_click.run_if(
-                edit_mode_active
-                    .and(in_state(AppState::InGame))
-                    .and(in_state(SimulationState::Running)),
-            ),
+            handle_edit_mode_click
+                .in_set(WorldSet::Running)
+                .run_if(edit_mode_active),
         );
 
+        app.add_systems(Update, load_placed_objects.in_set(WorldSet::InGame));
+        app.add_systems(Update, save_placed_objects.in_set(WorldSet::InGame));
         app.add_systems(
             Update,
-            load_placed_objects.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            save_placed_objects.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            delete_hovered_object.run_if(
-                edit_mode_active
-                    .and(in_state(AppState::InGame))
-                    .and(in_state(SimulationState::Running)),
-            ),
+            delete_hovered_object
+                .in_set(WorldSet::Running)
+                .run_if(edit_mode_active),
         );
 
-        app.add_systems(
-            Update,
-            setup_placement_preview.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            cleanup_placement_preview.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            update_placement_preview
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(
-            Update,
-            adjust_placement_scale
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
+        app.add_systems(Update, setup_placement_preview.in_set(WorldSet::InGame));
+        app.add_systems(Update, cleanup_placement_preview.in_set(WorldSet::InGame));
+        app.add_systems(Update, update_placement_preview.in_set(WorldSet::Running));
+        app.add_systems(Update, adjust_placement_scale.in_set(WorldSet::Running));
 
         app.init_resource::<PlacementPreviewEntity>();
         app.init_resource::<PlacedObjectRegistry>();

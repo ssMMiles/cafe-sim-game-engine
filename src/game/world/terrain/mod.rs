@@ -19,6 +19,14 @@ use material::TerrainMaterial;
 
 use bootstrap::create_terrain;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TerrainSet {
+    /// Core terrain update systems: creation, LOD, save.
+    Update,
+    /// Terrain editing systems: mode toggle, brush, raycasting.
+    Edit,
+}
+
 pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
@@ -30,8 +38,8 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();
 
-        app.add_systems(Update, (create_terrain, update_terrain_lod));
-        app.add_systems(Update, save::save_terrain);
+        app.add_systems(Update, (create_terrain, update_terrain_lod).in_set(TerrainSet::Update));
+        app.add_systems(Update, save::save_terrain.in_set(TerrainSet::Update));
 
         app.init_resource::<edit::TerrainBrushHit>();
         app.add_systems(
@@ -42,7 +50,8 @@ impl Plugin for TerrainPlugin {
                 edit::raycast_terrain_hit,
                 edit::apply_terrain_brush,
             )
-                .chain(),
+                .chain()
+                .in_set(TerrainSet::Edit),
         );
     }
 }

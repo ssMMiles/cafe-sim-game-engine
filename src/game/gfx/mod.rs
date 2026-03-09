@@ -13,29 +13,25 @@ use physics_debug::{sync_physics_debug, toggle_physics_debug};
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 
-use crate::{
-    AppState,
-    game::{SimulationState, gfx::toon_material::ToonMaterial},
-};
+use crate::game::gfx::toon_material::ToonMaterial;
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GfxSet {
+    /// Runs whenever the game is active (including while paused).
+    InGame,
+    /// Runs only while the simulation is running (not paused).
+    Running,
+}
 
 pub struct GfxPlugin;
 
 impl Plugin for GfxPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, toggle_crosshair.run_if(in_state(AppState::InGame)));
-        app.add_systems(
-            Update,
-            update_crosshair_display.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            resize_render_texture_sprite.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            adjust_camera_distance.run_if(in_state(AppState::InGame)),
-        );
-        
+        app.add_systems(Update, toggle_crosshair.in_set(GfxSet::InGame));
+        app.add_systems(Update, update_crosshair_display.in_set(GfxSet::InGame));
+        app.add_systems(Update, resize_render_texture_sprite.in_set(GfxSet::InGame));
+        app.add_systems(Update, adjust_camera_distance.in_set(GfxSet::InGame));
+
         app.add_systems(
             Update,
             (
@@ -44,28 +40,19 @@ impl Plugin for GfxPlugin {
                 camera_follow,
             )
                 .chain()
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+                .in_set(GfxSet::Running),
         );
 
         app.add_plugins(MaterialPlugin::<
             ExtendedMaterial<StandardMaterial, ToonMaterial>,
         >::default());
         app.add_plugins(EdgeDetectionPlugin);
-        app.add_systems(
-            Update,
-            update_outline
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(Update, toggle_outline.run_if(in_state(AppState::InGame)));
-        app.add_systems(
-            Update,
-            toggle_edge_detection.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            sync_edge_detection_settings.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(Update, toggle_physics_debug.run_if(in_state(AppState::InGame)));
-        app.add_systems(Update, sync_physics_debug.run_if(in_state(AppState::InGame)));
+
+        app.add_systems(Update, update_outline.in_set(GfxSet::Running));
+        app.add_systems(Update, toggle_outline.in_set(GfxSet::InGame));
+        app.add_systems(Update, toggle_edge_detection.in_set(GfxSet::InGame));
+        app.add_systems(Update, sync_edge_detection_settings.in_set(GfxSet::InGame));
+        app.add_systems(Update, toggle_physics_debug.in_set(GfxSet::InGame));
+        app.add_systems(Update, sync_physics_debug.in_set(GfxSet::InGame));
     }
 }

@@ -1,7 +1,7 @@
 use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
 
 use crate::{
-    AppState, game::{gfx::GfxPlugin, gltf_loading::{handle_interactable_clicks, show_interaction_text}, world::WorldPlugin}, settings::{EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting, MovementSpeedSetting, UserSettings}
+    AppState, game::{gfx::{GfxPlugin, GfxSet}, gltf_loading::{handle_interactable_clicks, show_interaction_text}, world::{WorldPlugin, WorldSet, setup_sky, terrain::TerrainSet}},
 };
 
 mod animation;
@@ -31,6 +31,7 @@ use ui_displays::{
     setup_position_display, update_dynamic_backgrounds, update_fps_display,
     update_interaction_info_display, update_keybinds_display, update_position_display,
 };
+use crate::settings::{EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting, MovementSpeedSetting};
 
 pub struct SimulationPlugin;
 
@@ -55,8 +56,18 @@ impl Default for SimulationConfig {
 #[derive(Component)]
 pub struct GameEntity;
 
-fn edit_mode_active(settings: Res<UserSettings>) -> bool {
-    settings.edit_mode
+/// System sets for the simulation, configured by [`SimulationPlugin`].
+///
+/// Sub-plugins use their own sets (e.g. [`GfxSet`], [`WorldSet`]); this set is
+/// for systems that live directly in [`SimulationPlugin`].
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SimSet {
+    /// Runs when in [`AppState::InGame`] (including while paused).
+    InGame,
+    /// Runs when in [`AppState::InGame`] and [`SimulationState::Running`].
+    Running,
+    /// Runs when in [`AppState::InGame`] and [`SimulationState::Paused`].
+    Paused,
 }
 
 impl Plugin for SimulationPlugin {
@@ -66,10 +77,32 @@ impl Plugin for SimulationPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_message::<InteractableClicked>();
+
+        // ── Set configuration ─────────────────────────────────────────────
+        // SimulationPlugin's own sets
+        app.configure_sets(Update, SimSet::InGame.run_if(in_state(AppState::InGame)));
+        app.configure_sets(Update, SimSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+        app.configure_sets(Update, SimSet::Paused.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Paused))));
+        app.configure_sets(FixedUpdate, SimSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+
+        // Sub-plugin sets — GfxPlugin
+        app.configure_sets(Update, GfxSet::InGame.run_if(in_state(AppState::InGame)));
+        app.configure_sets(Update, GfxSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+
+        // Sub-plugin sets — WorldPlugin
+        app.configure_sets(Update, WorldSet::InGame.run_if(in_state(AppState::InGame)));
+        app.configure_sets(Update, WorldSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+
+        // Sub-plugin sets — TerrainPlugin
+        app.configure_sets(Update, TerrainSet::Update.run_if(in_state(AppState::InGame)));
+        app.configure_sets(Update, TerrainSet::Edit.run_if(in_state(AppState::InGame)));
+
+        // ── OnEnter / OnExit ──────────────────────────────────────────────
         app.add_systems(
             OnEnter(AppState::InGame),
             (
                 setup,
+                setup_sky,
                 setup_keybinds_display,
                 setup_fps_display,
                 setup_interaction_info_display,
@@ -79,85 +112,47 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(OnExit(AppState::InGame), exit);
 
-        app.add_systems(
-            Update,
-            (
-                character_physics,
-                update_character_animation,
-            )
-                .chain()
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(
-            Update,
-            init_animation_player.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            (check_interactions, detect_interactable_clicks)
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(
-            Update,
-            show_interaction_text
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(
-            Update,
-            update_keybinds_display.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            update_fps_display.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            update_interaction_info_display.run_if(in_state(AppState::InGame)),
-        );
-        app.add_systems(
-            Update,
-            update_position_display.run_if(in_state(AppState::InGame)),
-        );
-        // Interactable and menu systems
-        app.add_systems(
-            Update,
-            (
-                handle_interactable_clicks,
-            )
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        // Dynamic background system - runs less frequently to avoid issues
-        app.add_systems(
-            FixedUpdate,
-            update_dynamic_backgrounds
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
-        app.add_systems(
-            Update,
-            handle_pause_input.run_if(in_state(AppState::InGame)),
-        );
-
         app.add_systems(OnEnter(SimulationState::Paused), (setup_pause_menu, pause_animations));
         app.add_systems(OnExit(SimulationState::Paused), (cleanup_pause_menu, resume_animations));
-        app.add_systems(
-            Update,
-            handle_pause_menu
-                .run_if(in_state(SimulationState::Paused).and(in_state(PauseMenuState::Main))),
-        );
-
-        app.add_systems(
-            OnEnter(PauseMenuState::Settings),
-            (cleanup_pause_menu, setup_pause_settings),
-        );
+        app.add_systems(OnEnter(PauseMenuState::Settings), (cleanup_pause_menu, setup_pause_settings));
         app.add_systems(OnExit(PauseMenuState::Settings), cleanup_pause_settings);
         app.add_systems(
             OnEnter(PauseMenuState::Main),
             (cleanup_pause_settings, setup_pause_menu).run_if(in_state(SimulationState::Paused)),
         );
+
+        // ── Update ────────────────────────────────────────────────────────
+        app.add_systems(
+            Update,
+            (character_physics, update_character_animation)
+                .chain()
+                .in_set(SimSet::Running),
+        );
+        app.add_systems(Update, init_animation_player.in_set(SimSet::InGame));
+        app.add_systems(
+            Update,
+            (check_interactions, detect_interactable_clicks, show_interaction_text)
+                .in_set(SimSet::Running),
+        );
+        app.add_systems(Update, handle_interactable_clicks.in_set(SimSet::Running));
+        app.add_systems(Update, update_keybinds_display.in_set(SimSet::InGame));
+        app.add_systems(Update, update_fps_display.in_set(SimSet::InGame));
+        app.add_systems(Update, update_interaction_info_display.in_set(SimSet::InGame));
+        app.add_systems(Update, update_position_display.in_set(SimSet::InGame));
+        app.add_systems(Update, handle_pause_input.in_set(SimSet::InGame));
+
+        // Pause menu systems — also implicitly gated to AppState::InGame via SimSet::Paused
+        app.add_systems(
+            Update,
+            handle_pause_menu
+                .in_set(SimSet::Paused)
+                .run_if(in_state(PauseMenuState::Main)),
+        );
         app.add_systems(
             Update,
             handle_settings_menu
-                .run_if(in_state(SimulationState::Paused).and(in_state(PauseMenuState::Settings))),
+                .in_set(SimSet::Paused)
+                .run_if(in_state(PauseMenuState::Settings)),
         );
         app.add_systems(
             Update,
@@ -171,9 +166,14 @@ impl Plugin for SimulationPlugin {
                 update_slider_label::<EdgeDepthSensitivitySetting>,
                 update_slider_label::<EdgeNormalSensitivitySetting>,
             )
-                .run_if(in_state(SimulationState::Paused).and(in_state(PauseMenuState::Settings))),
+                .in_set(SimSet::Paused)
+                .run_if(in_state(PauseMenuState::Settings)),
         );
 
+        // ── FixedUpdate ───────────────────────────────────────────────────
+        app.add_systems(FixedUpdate, update_dynamic_backgrounds.in_set(SimSet::Running));
+
+        // ── Resources / States ────────────────────────────────────────────
         app.init_state::<SimulationState>();
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
