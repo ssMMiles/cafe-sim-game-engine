@@ -16,7 +16,10 @@ use bevy::{
             NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
         },
         render_resource::{
-            binding_types::{sampler, texture_2d, texture_2d_multisampled, texture_depth_2d_multisampled, uniform_buffer},
+            binding_types::{
+                sampler, texture_2d, texture_2d_multisampled, texture_depth_2d_multisampled,
+                uniform_buffer,
+            },
             *,
         },
         renderer::{RenderContext, RenderDevice},
@@ -154,8 +157,8 @@ fn init_edge_detection_pipeline(
     let layout_entries = BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,
         (
-            texture_2d(TextureSampleType::Float { filterable: true }),  // Screen texture
-            texture_depth_2d_multisampled(),                            // Depth prepass (multisampled)
+            texture_2d(TextureSampleType::Float { filterable: true }), // Screen texture
+            texture_depth_2d_multisampled(), // Depth prepass (multisampled)
             texture_2d_multisampled(TextureSampleType::Float { filterable: false }), // Normal prepass (multisampled)
             sampler(SamplerBindingType::Filtering),
             uniform_buffer::<EdgeDetectionSettings>(true),
@@ -163,7 +166,8 @@ fn init_edge_detection_pipeline(
     );
 
     // Create the bind group layout descriptor
-    let layout = BindGroupLayoutDescriptor::new("edge_detection_bind_group_layout", &layout_entries);
+    let layout =
+        BindGroupLayoutDescriptor::new("edge_detection_bind_group_layout", &layout_entries);
 
     let sampler = render_device.create_sampler(&SamplerDescriptor::default());
 
@@ -207,15 +211,18 @@ impl EdgeDetectionSettings {
     pub fn new() -> Self {
         Self {
             edge_thickness: 1.0,
-            depth_sensitivity: 2.0,   // Detects depth discontinuities (geometric edges)
-            normal_sensitivity: 1.5,  // Detects surface angle changes
+            depth_sensitivity: 2.0, // Detects depth discontinuities (geometric edges)
+            normal_sensitivity: 1.5, // Detects surface angle changes
             edge_color: LinearRgba::BLACK,
             enabled: 1,
         }
     }
 }
 
-pub fn toggle_edge_detection(mut settings: ResMut<crate::settings::UserSettings>, input: Res<ButtonInput<KeyCode>>) {
+pub fn toggle_edge_detection(
+    mut settings: ResMut<crate::settings::UserSettings>,
+    input: Res<ButtonInput<KeyCode>>,
+) {
     if input.just_pressed(KeyCode::F2) {
         settings.toggle_edge_detection();
     }
@@ -228,7 +235,11 @@ pub fn sync_edge_detection_settings(
     if !user_settings.is_changed() {
         return;
     }
-    let enabled = if user_settings.edge_detection_enabled { 1 } else { 0 };
+    let enabled = if user_settings.edge_detection_enabled {
+        1
+    } else {
+        0
+    };
     for mut settings in &mut query {
         settings.enabled = enabled;
         settings.depth_sensitivity = user_settings.edge_depth_sensitivity;

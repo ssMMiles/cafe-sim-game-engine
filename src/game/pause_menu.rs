@@ -1,13 +1,15 @@
-use bevy::{prelude::*, window::{CursorGrabMode, CursorOptions}};
+use bevy::{
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions},
+};
 
 use super::SimulationState;
 use crate::{
     AppState,
     menu::ui_builder::{ButtonStyle, MenuCommandsExt, MenuContainerExt, UIColors},
     settings::{
-        EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting,
-        MouseSensitivitySetting, MovementSpeedSetting, SliderSetting, UserSettings,
-        slider_constants,
+        EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
+        MovementSpeedSetting, SliderSetting, UserSettings, slider_constants,
     },
 };
 

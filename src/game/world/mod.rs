@@ -8,8 +8,8 @@ pub mod chunk_assets;
 pub mod edit_mode;
 pub mod mesh_selector;
 pub mod objects;
-pub mod streaming;
 mod sky;
+pub mod streaming;
 pub mod terrain;
 
 use crate::{
@@ -33,10 +33,15 @@ use mesh_selector::{
     mesh_selector_open, scroll_mesh_selector, setup_mesh_selector_panel, toggle_mesh_selector,
 };
 
+use chunk_assets::{
+    ChunkDataAsset, ChunkDataLoader, ChunkObjectsAsset, ChunkObjectsLoader, WorldMetaAsset,
+    WorldMetaLoader,
+};
 pub use mesh_selector::MeshSelectorOpen;
 use objects::{PlacedObjectRegistry, PlacementConfig, delete_hovered_object, save_placed_objects};
-use chunk_assets::{ChunkDataAsset, ChunkDataLoader, ChunkObjectsAsset, ChunkObjectsLoader, WorldMetaAsset, WorldMetaLoader};
-use streaming::{ChunkStreamingConfig, StreamingState, process_pending_chunks, update_streaming_ring};
+use streaming::{
+    ChunkStreamingConfig, StreamingState, process_pending_chunks, update_streaming_ring,
+};
 
 pub use sky::setup_sky;
 
@@ -141,7 +146,7 @@ pub fn setup(
     // Add ambient light for diffusion
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.9, 0.9, 1.0), // Very dim, slightly blue for nighttime
-        brightness: 100.0,                 // Very low ambient for dark nighttime
+        brightness: 650.0,                 // Very low ambient for dark nighttime
         ..default()
     });
 

@@ -2,9 +2,14 @@ use std::collections::HashSet;
 
 use bevy::{camera::primitives::Aabb, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*};
 
-use crate::game::{gfx::camera::PlayerCamera, world::terrain::{
-    CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE, TerrainChunk, mesh::{LOD_LEVELS, generate_lod_mesh}, storage::TerrainChunkRegistry
-}};
+use crate::game::{
+    gfx::camera::PlayerCamera,
+    world::terrain::{
+        CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE, TerrainChunk,
+        mesh::{LOD_LEVELS, generate_lod_mesh},
+        storage::TerrainChunkRegistry,
+    },
+};
 use crate::settings::UserSettings;
 
 /// Height change per second at falloff=1, in pre-scaled world units.
@@ -13,7 +18,14 @@ const BRUSH_STRENGTH: f32 = 50.0;
 /// Stores the world-space terrain hit point found this frame by the raycast system.
 /// `None` means no terrain was hit (or terrain edit mode is inactive).
 #[derive(Resource, Default)]
-pub struct TerrainBrushHit(pub Option<Vec3>);
+pub struct TerrainBrushHit {
+    pub hit: Option<Vec3>,
+    /// Chunks that need full LOD regen (LOD1–3) after the brush is released.
+    /// LOD1–3 are only visible at 500m–4km distance, so deferring them until
+    /// painting stops keeps frame time low while giving immediate LOD0 feedback.
+    pub pending_full_lod: HashSet<(i32, i32)>,
+    pub was_painting: bool,
+}
 
 pub fn toggle_terrain_edit_mode(
     mut settings: ResMut<UserSettings>,
@@ -57,12 +69,12 @@ pub fn raycast_terrain_hit(
     let lower = mouse_input.pressed(MouseButton::Right);
 
     if !settings.terrain_edit_mode || (!raise && !lower) {
-        brush_hit.0 = None;
+        brush_hit.hit = None;
         return;
     }
 
     let Ok(camera_transform) = camera_query.single() else {
-        brush_hit.0 = None;
+        brush_hit.hit = None;
         return;
     };
 
@@ -72,7 +84,7 @@ pub fn raycast_terrain_hit(
     );
 
     let hits = raycast.cast_ray(ray, &Default::default());
-    brush_hit.0 = hits.iter().find_map(|(entity, hit_data)| {
+    brush_hit.hit = hits.iter().find_map(|(entity, hit_data)| {
         if terrain_chunk_filter.contains(*entity) {
             Some(hit_data.point)
         } else {
@@ -81,12 +93,13 @@ pub fn raycast_terrain_hit(
     });
 }
 
-/// Modifies heightmap heights and regenerates chunk meshes based on the hit
-/// point written by `raycast_terrain_hit`. Must run after that system.
+/// Modifies heightmap heights and regenerates LOD0 chunk meshes based on the hit
+/// point written by `raycast_terrain_hit`. LOD1–3 are deferred to `finalize_terrain_lod`
+/// which runs them in one batch when the brush is released.
 pub fn apply_terrain_brush(
     mouse_input: Res<ButtonInput<MouseButton>>,
     settings: Res<UserSettings>,
-    brush_hit: Res<TerrainBrushHit>,
+    mut brush_hit: ResMut<TerrainBrushHit>,
     mut heightmap: Option<ResMut<HeightmapData>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut chunk_query: Query<(&TerrainChunk, &mut Aabb)>,
@@ -95,7 +108,7 @@ pub fn apply_terrain_brush(
 ) {
     let raise = mouse_input.pressed(MouseButton::Left);
     let lower = mouse_input.pressed(MouseButton::Right);
-    let Some(hit_point) = brush_hit.0 else { return };
+    let Some(hit_point) = brush_hit.hit else { return };
     if !settings.terrain_edit_mode || (!raise && !lower) {
         return;
     }
@@ -112,18 +125,15 @@ pub fn apply_terrain_brush(
     let center_ty = (hit_point.z / TILE_SIZE.1) as i32;
     let extent = (radius / TILE_SIZE.0.min(TILE_SIZE.1)) as i32 + 1;
 
-    let grid_w = heightmap.grid_w as i32;
-    let grid_h = heightmap.grid_h as i32;
+    // Collect which chunks need mesh regeneration (use signed i32 throughout).
+    let mut affected: HashSet<(i32, i32)> = HashSet::new();
 
-    let mut affected: HashSet<(usize, usize)> = HashSet::new();
-
+    // Phase 1: apply height deltas.
     for dx in -extent..=extent {
         for dy in -extent..=extent {
             let tx = center_tx + dx;
             let ty = center_ty + dy;
-            if tx < 0 || ty < 0 || tx >= grid_w || ty >= grid_h {
-                continue;
-            }
+
             let world_x = tx as f32 * TILE_SIZE.0;
             let world_z = ty as f32 * TILE_SIZE.1;
             let dist = Vec2::new(world_x - hit_point.x, world_z - hit_point.z).length();
@@ -133,68 +143,119 @@ pub fn apply_terrain_brush(
 
             let falloff = 1.0 - dist / radius;
             let delta = BRUSH_STRENGTH * falloff * dt * sign;
-            let current = heightmap.get_tile(tx as usize, ty as usize).unwrap_or(0.0);
+            let current = heightmap.get_tile(tx, ty);
             let new_h = (current + delta).clamp(0.0, HEIGHT_SCALE);
-            heightmap.set_tile(tx as usize, ty as usize, new_h);
+            heightmap.set_tile(tx, ty, new_h);
 
-            // A tile on a chunk boundary also belongs to the adjacent chunk — regenerate both.
-            let cs = CHUNK_SIZE - 1;
-            let cx = tx as usize / cs;
-            let cy = ty as usize / cs;
+            // A tile on a chunk boundary also belongs to the adjacent chunk.
+            let cs = (CHUNK_SIZE - 1) as i32;
+            let cx = tx.div_euclid(cs);
+            let cy = ty.div_euclid(cs);
             affected.insert((cx, cy));
-            if tx as usize > 0 && tx as usize % cs == 0 {
+
+            // Shared left boundary
+            if tx.rem_euclid(cs) == 0 {
                 affected.insert((cx - 1, cy));
             }
-            if ty as usize > 0 && ty as usize % cs == 0 {
+            // Shared top boundary
+            if ty.rem_euclid(cs) == 0 {
                 affected.insert((cx, cy - 1));
             }
-            if tx as usize > 0 && tx as usize % cs == 0 && ty as usize > 0 && ty as usize % cs == 0
-            {
+            // Shared corner (both boundaries)
+            if tx.rem_euclid(cs) == 0 && ty.rem_euclid(cs) == 0 {
                 affected.insert((cx - 1, cy - 1));
             }
         }
     }
 
-    // Borrow heights immutably for mesh regeneration; all set_tile calls are done.
-    let heights: &[f32] = &heightmap.heights;
-    let grid_w = heightmap.grid_w;
-    let grid_h = heightmap.grid_h;
+    // Phase 2: regenerate LOD0 only for immediate visual feedback.
+    // LOD1–3 are deferred to `finalize_terrain_lod` (runs on brush release) since
+    // those levels are only visible at 500m–4km and not worth the per-frame cost.
+    let heightmap = heightmap.into_inner();
 
-    for (cx, cy) in &affected {
-        let (cx, cy) = (*cx, *cy);
-        let start_x = cx * (CHUNK_SIZE - 1);
-        let start_y = cy * (CHUNK_SIZE - 1);
-        let end_x = (start_x + CHUNK_SIZE).min(grid_w);
-        let end_y = (start_y + CHUNK_SIZE).min(grid_h);
-        let chunk_w = end_x - start_x;
-        let chunk_h = end_y - start_y;
+    let cs = (CHUNK_SIZE - 1) as i32;
+    for &(cx, cy) in &affected {
+        let start_x = cx * cs;
+        let start_y = cy * cs;
 
         for (chunk, mut aabb) in chunk_query.iter_mut() {
             if chunk.chunk_x != cx || chunk.chunk_y != cy {
                 continue;
             }
 
-            let mut new_aabb = None;
-            for lod in 0..LOD_LEVELS {
-                let (new_mesh, lod_aabb) = generate_lod_mesh(
-                    heights, grid_w, grid_h, start_x, start_y, chunk_w, chunk_h, TILE_SIZE, 1.0,
+            let (new_mesh, new_aabb) = generate_lod_mesh(
+                |tx, ty| heightmap.get_tile(tx, ty),
+                start_x,
+                start_y,
+                CHUNK_SIZE,
+                CHUNK_SIZE,
+                TILE_SIZE,
+                0, // LOD0 only
+            );
+            if let Some(m) = meshes.get_mut(&chunk.lod_meshes[0]) {
+                *m = new_mesh;
+            }
+            *aabb = new_aabb;
+            break;
+        }
+
+        brush_hit.pending_full_lod.insert((cx, cy));
+        if let Some(ref mut reg) = registry {
+            reg.dirty_chunks.insert((cx, cy));
+        }
+    }
+    brush_hit.was_painting = true;
+}
+
+/// Regenerates LOD1–3 meshes for all chunks touched since the last brush stroke,
+/// once the mouse buttons are released. Runs after `apply_terrain_brush`.
+pub fn finalize_terrain_lod(
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    mut brush_hit: ResMut<TerrainBrushHit>,
+    heightmap: Option<Res<HeightmapData>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut chunk_query: Query<&TerrainChunk>,
+) {
+    let painting = mouse_input.pressed(MouseButton::Left) || mouse_input.pressed(MouseButton::Right);
+
+    // Only run the first frame after brush release.
+    if painting || !brush_hit.was_painting || brush_hit.pending_full_lod.is_empty() {
+        if !painting {
+            brush_hit.was_painting = false;
+        }
+        return;
+    }
+    brush_hit.was_painting = false;
+
+    let Some(heightmap) = heightmap else { return };
+
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let pending: Vec<(i32, i32)> = brush_hit.pending_full_lod.drain().collect();
+
+    for (cx, cy) in pending {
+        let start_x = cx * cs;
+        let start_y = cy * cs;
+
+        for chunk in chunk_query.iter_mut() {
+            if chunk.chunk_x != cx || chunk.chunk_y != cy {
+                continue;
+            }
+
+            for lod in 1..LOD_LEVELS {
+                let (new_mesh, _) = generate_lod_mesh(
+                    |tx, ty| heightmap.get_tile(tx, ty),
+                    start_x,
+                    start_y,
+                    CHUNK_SIZE,
+                    CHUNK_SIZE,
+                    TILE_SIZE,
                     lod,
                 );
-                if lod == 0 {
-                    new_aabb = Some(lod_aabb);
-                }
                 if let Some(m) = meshes.get_mut(&chunk.lod_meshes[lod]) {
                     *m = new_mesh;
                 }
             }
-            if let Some(a) = new_aabb {
-                *aabb = a;
-            }
             break;
-        }
-
-        if let Some(ref mut reg) = registry {
-            reg.dirty_chunks.insert((cx as u32, cy as u32));
         }
     }
 }

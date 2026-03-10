@@ -5,8 +5,8 @@ use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
 use super::icons::{SvgTextureCache, load_svg_icons};
-use super::{GameEntity, SimulationConfig};
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS, CharacterState};
+use super::{GameEntity, SimulationConfig};
 use crate::game::gfx::camera::setup_camera;
 use crate::game::gfx::toon_material::ToonMaterial;
 use crate::game::world::objects::PlacedObjectRegistry;
@@ -68,16 +68,18 @@ pub fn setup(
 
     // Capsule length = cylindrical portion only (total height - 2 * radius)
     let capsule_cylinder_height = CHAR_HEIGHT - 2.0 * CHAR_RADIUS;
-    let player = commands.spawn((
-        GameEntity,
-        Player,
-        CharacterState::default(),
-        Transform::default(),
-        GlobalTransform::default(),
-        Visibility::Inherited,
-        SceneRoot(mr_windmill),
-        RigidBody::Kinematic,
-    )).id();
+    let player = commands
+        .spawn((
+            GameEntity,
+            Player,
+            CharacterState::default(),
+            Transform::default(),
+            GlobalTransform::default(),
+            Visibility::Inherited,
+            SceneRoot(mr_windmill),
+            RigidBody::Kinematic,
+        ))
+        .id();
 
     // Offset the collider upward so its bottom aligns with the player's feet (entity origin).
     // avian centers the capsule at the child entity origin, so offset by half the total height.
@@ -94,10 +96,14 @@ pub fn setup(
     load_svg_icons(images, svg_cache);
 
     // Setup the game world
-    crate::game::world::setup(&mut commands, &mut meshes, &mut materials, &asset_server, &mut toon_materials);
+    crate::game::world::setup(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &asset_server,
+        &mut toon_materials,
+    );
 }
-
-
 
 pub fn exit(
     mut commands: Commands,

@@ -1,7 +1,7 @@
 //! Terrain chunk storage system using rkyv for zero-copy deserialization.
 //!
 //! File structure:
-//! ```
+//! ```text
 //! worlds/
 //!   my_world/
 //!     world.meta           # World metadata + chunk index
@@ -22,7 +22,8 @@ use std::{
 // File format constants
 const WORLD_MAGIC: &[u8; 4] = b"TWNM";
 const CHUNK_MAGIC: &[u8; 4] = b"TCNK";
-const FORMAT_VERSION: u32 = 1;
+// Version 2: chunk_x/chunk_y changed from u32 to i32 for infinite terrain support.
+const FORMAT_VERSION: u32 = 2;
 
 // ============================================================================
 // Serializable Data Structures
@@ -59,8 +60,8 @@ pub struct TerrainConfigData {
 /// Entry in the chunk index
 #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
 pub struct ChunkIndexEntry {
-    pub chunk_x: u32,
-    pub chunk_y: u32,
+    pub chunk_x: i32,
+    pub chunk_y: i32,
     pub state: ChunkState,
 }
 
@@ -80,8 +81,8 @@ pub enum ChunkState {
 #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
 pub struct ChunkData {
     /// Chunk coordinates
-    pub chunk_x: u32,
-    pub chunk_y: u32,
+    pub chunk_x: i32,
+    pub chunk_y: i32,
     /// Chunk dimensions
     pub width: u32,
     pub height: u32,
@@ -169,9 +170,9 @@ pub struct TerrainWorld {
 #[derive(Resource, Default)]
 pub struct TerrainChunkRegistry {
     /// Map from (chunk_x, chunk_y) to entity
-    pub loaded_chunks: HashMap<(u32, u32), Entity>,
+    pub loaded_chunks: HashMap<(i32, i32), Entity>,
     /// Chunks with unsaved modifications
-    pub dirty_chunks: HashSet<(u32, u32)>,
+    pub dirty_chunks: HashSet<(i32, i32)>,
 }
 
 /// Component for chunks with runtime modifications (used by terrain editing tools)
@@ -338,8 +339,8 @@ pub fn save_chunk(chunk: &ChunkData, world_path: &Path) -> Result<(), StorageErr
 
 /// Load chunk data from disk
 pub fn load_chunk(
-    chunk_x: u32,
-    chunk_y: u32,
+    chunk_x: i32,
+    chunk_y: i32,
     world_path: &Path,
 ) -> Result<ChunkData, StorageError> {
     let chunk_path = world_path
@@ -367,9 +368,9 @@ pub fn load_chunk(
     // Read chunk coordinates (for verification)
     let mut coord_bytes = [0u8; 4];
     file.read_exact(&mut coord_bytes)?;
-    let _stored_x = u32::from_le_bytes(coord_bytes);
+    let _stored_x = i32::from_le_bytes(coord_bytes);
     file.read_exact(&mut coord_bytes)?;
-    let _stored_y = u32::from_le_bytes(coord_bytes);
+    let _stored_y = i32::from_le_bytes(coord_bytes);
 
     let mut len_bytes = [0u8; 4];
     file.read_exact(&mut len_bytes)?;
@@ -491,7 +492,7 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
 }
 
 /// Check if a chunk file exists
-pub fn chunk_exists(chunk_x: u32, chunk_y: u32, world_path: &Path) -> bool {
+pub fn chunk_exists(chunk_x: i32, chunk_y: i32, world_path: &Path) -> bool {
     let chunk_path = world_path
         .join("chunks")
         .join(format!("chunk_{}_{}.terrain", chunk_x, chunk_y));
@@ -523,8 +524,8 @@ pub fn create_world_metadata(
     for cy in 0..chunks_y {
         for cx in 0..chunks_x {
             chunk_index.push(ChunkIndexEntry {
-                chunk_x: cx,
-                chunk_y: cy,
+                chunk_x: cx as i32,
+                chunk_y: cy as i32,
                 state: ChunkState::Unmodified,
             });
         }
@@ -548,7 +549,7 @@ pub fn create_world_metadata(
 }
 
 /// Create default chunk data for an unmodified chunk
-pub fn create_default_chunk_data(chunk_x: u32, chunk_y: u32, width: u32, height: u32) -> ChunkData {
+pub fn create_default_chunk_data(chunk_x: i32, chunk_y: i32, width: u32, height: u32) -> ChunkData {
     ChunkData {
         chunk_x,
         chunk_y,
@@ -612,14 +613,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let world_path = dir.path().join("test_world");
 
-        let metadata = create_world_metadata(
-            "test".to_string(),
-            256,
-            256,
-            64,
-            (1.0, 1.0),
-            10.0,
-        );
+        let metadata = create_world_metadata("test".to_string(), 256, 256, 64, (1.0, 1.0), 10.0);
 
         save_world(&metadata, &world_path).unwrap();
         let loaded = load_world(&world_path).unwrap();
@@ -641,7 +635,7 @@ mod tests {
         ]);
 
         save_chunk(&chunk, &world_path).unwrap();
-        let loaded = load_chunk(2, 3, &world_path).unwrap();
+        let loaded = load_chunk(2i32, 3i32, &world_path).unwrap();
 
         assert_eq!(loaded.chunk_x, 2);
         assert_eq!(loaded.chunk_y, 3);

@@ -1,17 +1,20 @@
 use bevy::{pbr::ExtendedMaterial, prelude::*};
 
+pub mod camera;
+mod crosshair;
 pub mod outline;
 pub mod physics_debug;
 pub mod post_process;
 pub mod toon_material;
-pub mod camera;
-mod crosshair;
 
+use camera::{
+    adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input,
+    resize_render_texture_sprite,
+};
 use crosshair::{toggle_crosshair, update_crosshair_display};
 use outline::{toggle_outline, update_outline};
 use physics_debug::{sync_physics_debug, toggle_physics_debug};
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
-use camera::{adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input, resize_render_texture_sprite};
 
 use crate::game::gfx::toon_material::ToonMaterial;
 
@@ -34,11 +37,7 @@ impl Plugin for GfxPlugin {
 
         app.add_systems(
             Update,
-            (
-                handle_camera_input,
-                apply_freecam_movement,
-                camera_follow,
-            )
+            (handle_camera_input, apply_freecam_movement, camera_follow)
                 .chain()
                 .in_set(GfxSet::Running),
         );

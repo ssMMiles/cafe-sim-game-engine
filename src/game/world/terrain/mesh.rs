@@ -13,23 +13,18 @@ const SKIRT_DEPTH_PER_STRIDE: f32 = 1.0;
 
 /// Generate a chunk mesh at a specific LOD level with baked heights and normals.
 ///
-/// `heights` is the full-terrain height grid in column-major layout:
-/// `heights[x * grid_height + y]` gives the raw [0..1] height at grid position (x, y).
-///
-/// The chunk covers grid positions `[start_x .. start_x+chunk_width]` x
-/// `[start_y .. start_y+chunk_height]`.
+/// `get_height(tile_x, tile_y)` returns the pre-scaled world height at the given
+/// **global** tile coordinates. The chunk covers tiles
+/// `[start_x .. start_x + chunk_width)` x `[start_y .. start_y + chunk_height)`.
 ///
 /// Returns `(Mesh, Aabb)` with real vertex positions and normals baked in.
 pub fn generate_lod_mesh(
-    heights: &[f32],
-    grid_width: usize,
-    grid_height: usize,
-    start_x: usize,
-    start_y: usize,
+    get_height: impl Fn(i32, i32) -> f32,
+    start_x: i32,
+    start_y: i32,
     chunk_width: usize,
     chunk_height: usize,
     tile_size: (f32, f32),
-    height_scale: f32,
     lod_level: usize,
 ) -> (Mesh, Aabb) {
     let stride = 1usize << lod_level;
@@ -46,11 +41,11 @@ pub fn generate_lod_mesh(
     let mut positions = Vec::with_capacity(surface_count + perimeter);
     let mut normals = Vec::with_capacity(surface_count + perimeter);
 
-    // Helper to sample height from the full-terrain grid, clamping to bounds
-    let sample = |gx: usize, gy: usize| -> f32 {
-        let cx = gx.min(grid_width - 1);
-        let cy = gy.min(grid_height - 1);
-        heights[cx * grid_height + cy] * height_scale
+    // Helper: sample height using global tile coords (signed), clamped to chunk bounds.
+    let sample = |lx: usize, ly: usize| -> f32 {
+        let gx = start_x + lx.min(chunk_width - 1) as i32;
+        let gy = start_y + ly.min(chunk_height - 1) as i32;
+        get_height(gx, gy)
     };
 
     let mut min_y = f32::MAX;
@@ -71,10 +66,10 @@ pub fn generate_lod_mesh(
                 lod_y * stride
             };
 
-            let global_x = start_x + local_x;
-            let global_y = start_y + local_y;
+            let global_x = start_x + local_x as i32;
+            let global_y = start_y + local_y as i32;
 
-            let h = sample(global_x, global_y);
+            let h = get_height(global_x, global_y);
             min_y = min_y.min(h);
             max_y = max_y.max(h);
 
@@ -85,10 +80,10 @@ pub fn generate_lod_mesh(
             ]);
 
             // Compute normal from 4-neighbor heights
-            let h_left = sample(global_x.saturating_sub(1), global_y);
-            let h_right = sample((global_x + 1).min(grid_width - 1), global_y);
-            let h_down = sample(global_x, global_y.saturating_sub(1));
-            let h_up = sample(global_x, (global_y + 1).min(grid_height - 1));
+            let h_left = sample(local_x.saturating_sub(1), local_y);
+            let h_right = sample((local_x + 1).min(chunk_width - 1), local_y);
+            let h_down = sample(local_x, local_y.saturating_sub(1));
+            let h_up = sample(local_x, (local_y + 1).min(chunk_height - 1));
 
             let tangent_x = 2.0 * tile_size.0;
             let tangent_y = h_right - h_left;

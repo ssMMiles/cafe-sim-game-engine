@@ -1,76 +1,80 @@
 use bevy::prelude::*;
+use std::collections::HashMap;
 
-use super::mesh::LOD_LEVELS;
+use super::{CHUNK_SIZE, mesh::LOD_LEVELS};
 
 /// Marker component for terrain chunk entities
 #[derive(Component)]
 pub struct TerrainChunk {
-    pub chunk_x: usize,
-    pub chunk_y: usize,
+    pub chunk_x: i32,
+    pub chunk_y: i32,
     pub lod_meshes: [Handle<Mesh>; LOD_LEVELS],
     pub current_lod: usize,
 }
 
-/// Runtime-queryable heightmap resource with bilinear interpolation.
-/// Heights are stored pre-scaled in column-major order: `heights[x * grid_h + y]`.
-#[derive(Debug, Resource)]
+/// Runtime-queryable heightmap resource — sparse, infinite, bilinear-interpolated.
+///
+/// Heights are stored pre-scaled (world units). Any tile not explicitly set
+/// is implicitly 0.0 (flat ground). Tiles are keyed by signed integer grid
+/// coordinates so negative-X/Z terrain is supported.
+#[derive(Debug, Resource, Default)]
 pub struct HeightmapData {
-    pub heights: Vec<f32>,
-    pub grid_w: usize,
-    pub grid_h: usize,
+    heights: HashMap<(i32, i32), f32>,
     pub tile_size: (f32, f32),
 }
 
 impl HeightmapData {
-    /// Get the pre-scaled height at grid coordinates (x, y).
-    pub fn get_tile(&self, x: usize, y: usize) -> Option<f32> {
-        if x < self.grid_w && y < self.grid_h {
-            Some(self.heights[x * self.grid_h + y])
-        } else {
-            None
+    pub fn new(tile_size: (f32, f32)) -> Self {
+        Self {
+            heights: HashMap::new(),
+            tile_size,
         }
     }
 
-    /// Set the pre-scaled height at grid coordinates (x, y).
-    pub fn set_tile(&mut self, x: usize, y: usize, value: f32) {
-        if x < self.grid_w && y < self.grid_h {
-            self.heights[x * self.grid_h + y] = value;
+    /// Get the pre-scaled height at tile coordinates (x, y). Returns 0.0 if not set.
+    pub fn get_tile(&self, x: i32, y: i32) -> f32 {
+        self.heights.get(&(x, y)).copied().unwrap_or(0.0)
+    }
+
+    /// Set the pre-scaled height at tile coordinates (x, y).
+    pub fn set_tile(&mut self, x: i32, y: i32, value: f32) {
+        if value == 0.0 {
+            self.heights.remove(&(x, y));
+        } else {
+            self.heights.insert((x, y), value);
+        }
+    }
+
+    /// Remove all heightmap tiles belonging to chunk (cx, cy).
+    /// Call this when a chunk is unloaded to prevent unbounded memory growth.
+    pub fn remove_chunk_tiles(&mut self, cx: i32, cy: i32) {
+        let cs = (CHUNK_SIZE - 1) as i32;
+        let start_x = cx * cs;
+        let start_y = cy * cs;
+        for tx in start_x..=start_x + cs {
+            for ty in start_y..=start_y + cs {
+                self.heights.remove(&(tx, ty));
+            }
         }
     }
 
     /// Bilinear interpolation of terrain height at a world-space (x, z) position.
-    /// Returns `None` if the position is outside the heightmap bounds.
+    /// Returns `Some(h)` — including `Some(0.0)` for tiles that haven't been loaded
+    /// yet (flat ground).
     pub fn sample_height(&self, world_x: f32, world_z: f32) -> Option<f32> {
         let fx = world_x / self.tile_size.0;
         let fz = world_z / self.tile_size.1;
 
-        // Need at least one cell of margin for interpolation
-        if fx < 0.0 || fz < 0.0 {
-            return None;
-        }
-
-        let ix = fx as usize;
-        let iz = fz as usize;
-
-        if ix + 1 >= self.grid_w || iz + 1 >= self.grid_h {
-            // Allow sampling exactly on the last grid line
-            if ix < self.grid_w
-                && iz < self.grid_h
-                && fx.fract() < f32::EPSILON
-                && fz.fract() < f32::EPSILON
-            {
-                return self.get_tile(ix, iz);
-            }
-            return None;
-        }
+        let ix = fx.floor() as i32;
+        let iz = fz.floor() as i32;
 
         let tx = fx - ix as f32;
         let tz = fz - iz as f32;
 
-        let h00 = self.heights[ix * self.grid_h + iz];
-        let h10 = self.heights[(ix + 1) * self.grid_h + iz];
-        let h01 = self.heights[ix * self.grid_h + (iz + 1)];
-        let h11 = self.heights[(ix + 1) * self.grid_h + (iz + 1)];
+        let h00 = self.get_tile(ix, iz);
+        let h10 = self.get_tile(ix + 1, iz);
+        let h01 = self.get_tile(ix, iz + 1);
+        let h11 = self.get_tile(ix + 1, iz + 1);
 
         let h = h00 * (1.0 - tx) * (1.0 - tz)
             + h10 * tx * (1.0 - tz)

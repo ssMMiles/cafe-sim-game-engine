@@ -71,11 +71,7 @@ pub fn discover_meshes(mut catalog: ResMut<MeshCatalog>) {
             continue;
         }
 
-        let dir_name = dir_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let dir_name = dir_path.file_name().unwrap().to_string_lossy().to_string();
 
         // Skip the player-only model directory
         if dir_name == "character" {
@@ -88,19 +84,12 @@ pub fn discover_meshes(mut catalog: ResMut<MeshCatalog>) {
 
         for file_entry in files.flatten() {
             let file_path = file_entry.path();
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext != "gltf" && ext != "glb" {
                 continue;
             }
 
-            let file_name = file_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let file_name = file_path.file_name().unwrap().to_string_lossy().to_string();
             let asset_path = format!("meshes/{dir_name}/{file_name}#Scene0");
 
             entries.push(MeshEntry {

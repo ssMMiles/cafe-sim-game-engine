@@ -154,7 +154,12 @@ impl UserSettings {
             SettingInfo {
                 name: "Edge Detection",
                 keybind: "F2",
-                current_value: if self.edge_detection_enabled { "ON" } else { "OFF" }.to_string(),
+                current_value: if self.edge_detection_enabled {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+                .to_string(),
             },
             SettingInfo {
                 name: "Terrain Edit",

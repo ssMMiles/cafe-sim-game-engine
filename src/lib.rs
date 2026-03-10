@@ -1,4 +1,7 @@
-use avian3d::{debug_render::{PhysicsDebugPlugin, PhysicsGizmos}, prelude::PhysicsPlugins};
+use avian3d::{
+    debug_render::{PhysicsDebugPlugin, PhysicsGizmos},
+    prelude::PhysicsPlugins,
+};
 use bevy::{
     asset::{AssetMetaCheck, io::AssetSourceBuilder},
     prelude::*,
@@ -18,42 +21,41 @@ pub fn run() {
     // Chunk files are loaded as "world://worlds/{id}/chunks/chunk_X_Y.terrain".
     // Must be registered before DefaultPlugins (which includes AssetPlugin).
     let mut app = App::new();
-    app.register_asset_source(
-        "world",
-        AssetSourceBuilder::platform_default(".", None),
-    );
-    app
-        .add_plugins(
-            DefaultPlugins
-                .set(AssetPlugin {
-                    meta_check: AssetMetaCheck::Never,
-                    ..default()
-                })
-                .set(ImagePlugin::default_nearest())
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        present_mode: PresentMode::Immediate,
-                        ..default()
-                    }),
+    app.register_asset_source("world", AssetSourceBuilder::platform_default(".", None));
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                meta_check: AssetMetaCheck::Never,
+                ..default()
+            })
+            .set(ImagePlugin::default_nearest())
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    present_mode: PresentMode::Immediate,
                     ..default()
                 }),
-        )
-        // .add_plugins(OutlinePlugin)
-        .add_plugins(PhysicsPlugins::default())
-        .add_plugins(PhysicsDebugPlugin::default())
-        .insert_gizmo_config(
-            PhysicsGizmos {
-                collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
-                ..PhysicsGizmos::none()
-            },
-            GizmoConfig { enabled: false, ..default() },
-        )
-        .add_plugins(settings::SettingsPlugin)
-        .add_plugins(menu::MenuPlugin)
-        .add_plugins(game::SimulationPlugin)
-        .add_systems(Startup, initialize)
-        .init_state::<AppState>()
-        .run();
+                ..default()
+            }),
+    )
+    // .add_plugins(OutlinePlugin)
+    .add_plugins(PhysicsPlugins::default())
+    .add_plugins(PhysicsDebugPlugin::default())
+    .insert_gizmo_config(
+        PhysicsGizmos {
+            collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
+            ..PhysicsGizmos::none()
+        },
+        GizmoConfig {
+            enabled: false,
+            ..default()
+        },
+    )
+    .add_plugins(settings::SettingsPlugin)
+    .add_plugins(menu::MenuPlugin)
+    .add_plugins(game::SimulationPlugin)
+    .add_systems(Startup, initialize)
+    .init_state::<AppState>()
+    .run();
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]

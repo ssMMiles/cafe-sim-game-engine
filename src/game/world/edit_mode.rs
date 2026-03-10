@@ -4,9 +4,10 @@ use super::objects::{
 use crate::game::GameEntity;
 use crate::game::gfx::camera::PlayerCamera;
 use crate::game::gltf_loading::{PendingMaterial, spawn_interactable_scene};
+use crate::game::world::terrain::TerrainChunk;
 use crate::settings::UserSettings;
 use bevy::input::mouse::MouseScrollUnit;
-use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
+use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
 use bevy::{input::mouse::MouseWheel, log, prelude::*};
 
 pub fn toggle_edit_mode(mut settings: ResMut<UserSettings>, input: Res<ButtonInput<KeyCode>>) {
@@ -24,17 +25,17 @@ pub fn handle_edit_mode_click(
     preview_entity: Res<PlacementPreviewEntity>,
     preview_query: Query<&Transform, With<PlacementPreview>>,
     camera_query: Query<&Transform, With<PlayerCamera>>,
+    terrain_filter: Query<(), With<TerrainChunk>>,
     mut raycast: MeshRayCast,
     asset_server: Res<AssetServer>,
     config: Res<PlacementConfig>,
     mut registry: ResMut<PlacedObjectRegistry>,
 ) {
-    // Only proceed if edit mode is active and left mouse button was just clicked
     if !settings.edit_mode || !mouse_input.just_pressed(MouseButton::Left) {
         return;
     }
 
-    // Try to get position from preview entity first
+    // Use the preview position if available (already correctly snapped to terrain)
     let mut position = None;
     if let Some(entity) = preview_entity.0 {
         if let Ok(preview_transform) = preview_query.get(entity) {
@@ -42,34 +43,17 @@ pub fn handle_edit_mode_click(
         }
     }
 
-    // Fall back to raycast if no preview position
+    // Fall back to a fresh terrain raycast if no preview position
     if position.is_none() {
         if let Ok(camera_transform) = camera_query.single() {
             let camera_pos = camera_transform.translation;
             let camera_forward = camera_transform.forward().as_vec3();
 
-            // Create ray from camera
             let ray = Ray3d::new(camera_pos, Dir3::new(camera_forward).unwrap());
-
-            // Cast ray to find ground intersection
-            let hits = raycast.cast_ray(ray, &Default::default());
-
-            // Find the ground plane hit (y = 0)
-            for (_, hit_data) in hits.iter() {
-                if hit_data.point.y < 1.0 {
-                    position = Some(hit_data.point);
-                    break;
-                }
-            }
-
-            // If no mesh hit, calculate ground intersection manually
-            if position.is_none() && camera_forward.y < 0.0 {
-                let t = -camera_pos.y / camera_forward.y;
-                if t > 0.0 {
-                    let intersection = camera_pos + camera_forward * t;
-                    position = Some(intersection);
-                }
-            }
+            let terrain_only = |e: Entity| terrain_filter.contains(e);
+            let settings = MeshRayCastSettings::default().with_filter(&terrain_only);
+            let hits = raycast.cast_ray(ray, &settings);
+            position = hits.first().map(|(_, hit)| hit.point);
         }
     }
 
@@ -80,8 +64,7 @@ pub fn handle_edit_mode_click(
 
     let chunk = world_pos_to_chunk(pos.x, pos.z);
     let id = registry.alloc_id();
-    let transform =
-        Transform::from_translation(pos).with_scale(config.scale);
+    let transform = Transform::from_translation(pos).with_scale(config.scale);
     spawn_placed_object(
         &mut commands,
         &asset_server,
@@ -139,11 +122,11 @@ pub fn setup_placement_preview(
 pub fn update_placement_preview(
     mut preview_query: Query<(&mut Transform, &mut Visibility), With<PlacementPreview>>,
     camera_query: Query<&Transform, (With<PlayerCamera>, Without<PlacementPreview>)>,
+    terrain_filter: Query<(), With<TerrainChunk>>,
     mut raycast: MeshRayCast,
     preview_entity: Res<PlacementPreviewEntity>,
     settings: Res<UserSettings>,
 ) {
-    // Only update if we're in edit mode and have a preview entity
     if !settings.edit_mode || preview_entity.0.is_none() {
         return;
     }
@@ -155,36 +138,15 @@ pub fn update_placement_preview(
             let camera_pos = camera_transform.translation;
             let camera_forward = camera_transform.forward().as_vec3();
 
-            // Create ray from camera
             let ray = Ray3d::new(camera_pos, Dir3::new(camera_forward).unwrap());
+            let terrain_only = |e: Entity| terrain_filter.contains(e);
+            let settings = MeshRayCastSettings::default().with_filter(&terrain_only);
+            let hits = raycast.cast_ray(ray, &settings);
 
-            // Cast ray to find ground intersection
-            let hits = raycast.cast_ray(ray, &Default::default());
-
-            // Find the ground plane hit (y = 0)
-            let mut ground_hit: Option<Vec3> = None;
-
-            for (_, hit_data) in hits.iter() {
-                // Check if this is roughly at ground level
-                if hit_data.point.y < 1.0 {
-                    ground_hit = Some(hit_data.point);
-                    break;
-                }
-            }
-
-            // If no mesh hit, calculate ground intersection manually
-            if ground_hit.is_none() && camera_forward.y < 0.0 {
-                // Calculate where ray intersects y=0 plane
-                let t = -camera_pos.y / camera_forward.y;
-                if t > 0.0 {
-                    let intersection = camera_pos + camera_forward * t;
-                    ground_hit = Some(intersection);
-                }
-            }
-
-            // Update preview position
-            if let Some(position) = ground_hit {
-                preview_transform.translation = Vec3::new(position.x, 0.05, position.z); // Slightly elevated
+            if let Some((_, hit)) = hits.first() {
+                let position = hit.point;
+                preview_transform.translation =
+                    Vec3::new(position.x, position.y + 0.05, position.z);
                 *visibility = Visibility::Visible;
             } else {
                 *visibility = Visibility::Hidden;

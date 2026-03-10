@@ -3,8 +3,8 @@
 use bevy::prelude::*;
 
 use super::storage::{
-    ChunkData, ChunkState, HeightData, MaterialData, TerrainChunkRegistry, TerrainWorld,
-    quantize_heights, save_chunk, save_world,
+    ChunkData, ChunkIndexEntry, ChunkState, HeightData, MaterialData, TerrainChunkRegistry,
+    TerrainWorld, quantize_heights, save_chunk, save_world,
 };
 use super::{CHUNK_SIZE, HeightmapData};
 
@@ -33,7 +33,7 @@ pub fn save_terrain(
         return;
     }
 
-    let dirty: Vec<(u32, u32)> = registry.dirty_chunks.drain().collect();
+    let dirty: Vec<(i32, i32)> = registry.dirty_chunks.drain().collect();
     info!(
         "Saving {} dirty chunk(s) to {:?}",
         dirty.len(),
@@ -44,6 +44,8 @@ pub fn save_terrain(
         let chunk_data = extract_chunk_data(&heightmap, cx, cy);
         match save_chunk(&chunk_data, &terrain_world.world_path) {
             Ok(()) => {
+                // Update existing index entry or push a new one (for infinite chunks
+                // that were not in the original bounded seed index).
                 if let Some(entry) = terrain_world
                     .metadata
                     .chunk_index
@@ -51,6 +53,12 @@ pub fn save_terrain(
                     .find(|e| e.chunk_x == cx && e.chunk_y == cy)
                 {
                     entry.state = ChunkState::FullyOverwritten;
+                } else {
+                    terrain_world.metadata.chunk_index.push(ChunkIndexEntry {
+                        chunk_x: cx,
+                        chunk_y: cy,
+                        state: ChunkState::FullyOverwritten,
+                    });
                 }
             }
             Err(e) => error!("Failed to save chunk ({cx}, {cy}): {e}"),
@@ -68,21 +76,20 @@ pub fn save_terrain(
 /// Extract the heights for a single chunk from `HeightmapData` and package them
 /// as a `ChunkData` using full quantized storage.
 ///
-/// Heights are stored pre-scaled (matching `HeightmapData.heights`).
-fn extract_chunk_data(heightmap: &HeightmapData, chunk_x: u32, chunk_y: u32) -> ChunkData {
-    let start_x = chunk_x as usize * (CHUNK_SIZE - 1);
-    let start_y = chunk_y as usize * (CHUNK_SIZE - 1);
-    let end_x = (start_x + CHUNK_SIZE).min(heightmap.grid_w);
-    let end_y = (start_y + CHUNK_SIZE).min(heightmap.grid_h);
-    let width = (end_x - start_x) as u32;
-    let height = (end_y - start_y) as u32;
+/// Heights are stored pre-scaled (matching `HeightmapData` values).
+fn extract_chunk_data(heightmap: &HeightmapData, chunk_x: i32, chunk_y: i32) -> ChunkData {
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let start_x = chunk_x * cs;
+    let start_y = chunk_y * cs;
 
-    // Collect pre-scaled heights in column-major order (matches HeightmapData layout)
+    let width = CHUNK_SIZE as u32;
+    let height = CHUNK_SIZE as u32;
+
+    // Collect pre-scaled heights in column-major order (matches generate_lod_mesh layout)
     let mut chunk_heights = Vec::with_capacity((width * height) as usize);
-    for lx in 0..width as usize {
-        for ly in 0..height as usize {
-            let h = heightmap.heights[(start_x + lx) * heightmap.grid_h + (start_y + ly)];
-            chunk_heights.push(h);
+    for lx in 0..width as i32 {
+        for ly in 0..height as i32 {
+            chunk_heights.push(heightmap.get_tile(start_x + lx, start_y + ly));
         }
     }
 

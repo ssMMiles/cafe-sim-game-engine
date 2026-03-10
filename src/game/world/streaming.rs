@@ -14,7 +14,8 @@
 //!    When both handles are done (Loaded or Failed) it calls `spawn_terrain_chunk`
 //!    and `spawn_chunk_objects`, then moves the chunk into `StreamingState::loaded`.
 //!
-//! 3. `update_streaming_ring` despawns chunks that have moved beyond `unload_radius`.
+//! 3. `update_streaming_ring` despawns chunks that have moved beyond `unload_radius`
+//!    and evicts their heightmap tiles to keep memory bounded.
 
 use bevy::{asset::LoadState, prelude::*};
 use std::collections::{HashMap, HashSet};
@@ -46,6 +47,9 @@ pub struct ChunkStreamingConfig {
     /// Chebyshev radius beyond which loaded chunks are despawned.
     /// Should be > `load_radius` to create hysteresis and prevent thrashing.
     pub unload_radius: u32,
+    /// Maximum chunks to spawn per frame. Spreading spawns avoids the frame-time
+    /// spike caused by generating 4 LOD meshes + a heightfield collider per chunk.
+    pub max_spawns_per_frame: usize,
 }
 
 impl Default for ChunkStreamingConfig {
@@ -53,6 +57,7 @@ impl Default for ChunkStreamingConfig {
         Self {
             load_radius: 4,
             unload_radius: 6,
+            max_spawns_per_frame: 1,
         }
     }
 }
@@ -69,9 +74,9 @@ pub struct PendingChunk {
 #[derive(Resource, Default)]
 pub struct StreamingState {
     /// Chunks whose entities are currently live in the world.
-    pub loaded: HashSet<(u32, u32)>,
+    pub loaded: HashSet<(i32, i32)>,
     /// Chunks that are being loaded asynchronously.
-    pub pending: HashMap<(u32, u32), PendingChunk>,
+    pub pending: HashMap<(i32, i32), PendingChunk>,
 }
 
 // ============================================================================
@@ -80,7 +85,7 @@ pub struct StreamingState {
 
 /// Determines which chunks should be in the streaming ring and:
 /// - Issues asset loads for newly in-range chunks.
-/// - Despawns chunks that have moved beyond the unload radius.
+/// - Despawns chunks that have moved beyond the unload radius (and evicts their tiles).
 pub fn update_streaming_ring(
     player_query: Query<&Transform, With<Player>>,
     terrain_world: Option<Res<TerrainWorld>>,
@@ -91,6 +96,7 @@ pub fn update_streaming_ring(
     chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(Entity, &PlacedObject)>,
+    mut heightmap: Option<ResMut<HeightmapData>>,
 ) {
     // All three are inserted together by create_terrain; wait until they're available.
     let Some(terrain_world) = terrain_world else {
@@ -108,17 +114,13 @@ pub fn update_streaming_ring(
     let (player_cx, player_cy) = world_pos_to_chunk(player_pos.x, player_pos.z);
 
     let metadata = &terrain_world.metadata;
-    let max_cx = metadata.chunks_x.saturating_sub(1);
-    let max_cy = metadata.chunks_y.saturating_sub(1);
 
     // ── Unload distant chunks ─────────────────────────────────────────────────
-    let to_unload: Vec<(u32, u32)> = state
+    let to_unload: Vec<(i32, i32)> = state
         .loaded
         .iter()
         .copied()
-        .filter(|&(cx, cy)| {
-            chebyshev(cx, cy, player_cx, player_cy) > config.unload_radius
-        })
+        .filter(|&(cx, cy)| chebyshev(cx, cy, player_cx, player_cy) > config.unload_radius)
         .collect();
 
     for chunk in to_unload {
@@ -126,18 +128,20 @@ pub fn update_streaming_ring(
             commands.entity(entity).despawn();
         }
         despawn_chunk_objects(&mut commands, &mut obj_registry, &placed_query, chunk);
+        // Evict heightmap tiles to keep memory bounded for infinite terrain.
+        if let Some(ref mut hm) = heightmap {
+            hm.remove_chunk_tiles(chunk.0, chunk.1);
+        }
         state.loaded.remove(&chunk);
     }
 
     // ── Request newly in-range chunks ─────────────────────────────────────────
     let r = config.load_radius as i32;
-    let pcx = player_cx as i32;
-    let pcy = player_cy as i32;
 
     for dy in -r..=r {
         for dx in -r..=r {
-            let cx = (pcx + dx).clamp(0, max_cx as i32) as u32;
-            let cy = (pcy + dy).clamp(0, max_cy as i32) as u32;
+            let cx = player_cx + dx;
+            let cy = player_cy + dy;
 
             if state.loaded.contains(&(cx, cy)) || state.pending.contains_key(&(cx, cy)) {
                 continue;
@@ -176,6 +180,8 @@ pub fn update_streaming_ring(
 }
 
 /// Checks pending chunk asset loads and spawns chunks whose assets are fully ready.
+/// At most `ChunkStreamingConfig::max_spawns_per_frame` chunks are spawned per call
+/// to avoid the per-frame spike of generating multiple LOD meshes + heightfield colliders.
 pub fn process_pending_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -183,6 +189,7 @@ pub fn process_pending_chunks(
     chunk_data_assets: Res<Assets<ChunkDataAsset>>,
     chunk_objects_assets: Res<Assets<ChunkObjectsAsset>>,
     mut state: ResMut<StreamingState>,
+    config: Res<ChunkStreamingConfig>,
     chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
     heightmap: Option<ResMut<HeightmapData>>,
     render_assets: Option<Res<TerrainRenderAssets>>,
@@ -195,16 +202,21 @@ pub fn process_pending_chunks(
     };
 
     // ready = spawn with data; flat = spawn without terrain data (terrain failed).
-    let mut ready: Vec<(u32, u32)> = Vec::new();
-    let mut flat: Vec<(u32, u32)> = Vec::new();
+    // Capped to max_spawns_per_frame total to spread mesh-generation cost across frames.
+    let budget = config.max_spawns_per_frame;
+    let mut ready: Vec<(i32, i32)> = Vec::new();
+    let mut flat: Vec<(i32, i32)> = Vec::new();
 
     for (&chunk, pending) in state.pending.iter() {
         let terrain_state = match &pending.terrain_handle {
-            None => Some(true),   // flat — no file needed
+            None => Some(true), // flat — no file needed
             Some(h) => match asset_server.load_state(h.id()) {
                 LoadState::Loaded => Some(true),
                 LoadState::Failed(_) => {
-                    warn!("Failed to load terrain for chunk {:?}, spawning flat", chunk);
+                    warn!(
+                        "Failed to load terrain for chunk {:?}, spawning flat",
+                        chunk
+                    );
                     Some(false) // failed → spawn flat
                 }
                 _ => None, // still loading
@@ -230,6 +242,10 @@ pub fn process_pending_chunks(
             }
         }
     }
+
+    // Cap both lists so total spawns this frame ≤ budget.
+    flat.truncate(budget);
+    ready.truncate(budget.saturating_sub(flat.len()));
 
     // Spawn failed terrain chunks as flat (no data).
     for chunk in flat {
@@ -288,6 +304,6 @@ pub fn process_pending_chunks(
 
 /// Chebyshev (Chessboard) distance between two chunk coordinates.
 #[inline]
-fn chebyshev(ax: u32, ay: u32, bx: u32, by: u32) -> u32 {
-    ax.abs_diff(bx).max(ay.abs_diff(by))
+fn chebyshev(ax: i32, ay: i32, bx: i32, by: i32) -> u32 {
+    (ax - bx).unsigned_abs().max((ay - by).unsigned_abs())
 }

@@ -41,12 +41,12 @@ pub fn setup_character_animations(
     };
 
     // Animation indices in robotv2.gltf: 0=Idle, 1=Jump, 2=Run
-    let idle_clip = asset_server
-        .load(GltfAssetLabel::Animation(0).from_asset("meshes/character/robotv2.gltf"));
-    let jump_clip = asset_server
-        .load(GltfAssetLabel::Animation(1).from_asset("meshes/character/robotv2.gltf"));
-    let run_clip = asset_server
-        .load(GltfAssetLabel::Animation(2).from_asset("meshes/character/robotv2.gltf"));
+    let idle_clip =
+        asset_server.load(GltfAssetLabel::Animation(0).from_asset("meshes/character/robotv2.gltf"));
+    let jump_clip =
+        asset_server.load(GltfAssetLabel::Animation(1).from_asset("meshes/character/robotv2.gltf"));
+    let run_clip =
+        asset_server.load(GltfAssetLabel::Animation(2).from_asset("meshes/character/robotv2.gltf"));
 
     let mut graph = AnimationGraph::new();
     let idle_node = graph.add_clip(idle_clip, 1.0, graph.root);
@@ -153,7 +153,9 @@ pub fn update_character_animation(
 
     let active = transitions.play(&mut player, new_node, TRANSITION_DURATION);
     match desired {
-        AnimState::Idle | AnimState::Running => { active.repeat(); }
+        AnimState::Idle | AnimState::Running => {
+            active.repeat();
+        }
         AnimState::Jumping => {} // one-shot by default
     }
 

@@ -14,7 +14,9 @@ use bevy::{
 
 use super::{
     objects::{ChunkObjectsFile, parse_chunk_objects_from_bytes},
-    terrain::storage::{ChunkData, WorldMetadata, parse_chunk_from_bytes, parse_world_meta_from_bytes},
+    terrain::storage::{
+        ChunkData, WorldMetadata, parse_chunk_from_bytes, parse_world_meta_from_bytes,
+    },
 };
 
 // ============================================================================

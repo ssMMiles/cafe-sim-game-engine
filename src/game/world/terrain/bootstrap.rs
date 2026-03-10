@@ -13,10 +13,7 @@ use super::{
     storage::{self, ChunkData, HeightData, TerrainChunkRegistry, dequantize_heights},
 };
 
-use crate::game::{
-    GameEntity,
-    world::chunk_assets::WorldMetaAsset,
-};
+use crate::game::{GameEntity, world::chunk_assets::WorldMetaAsset};
 
 /// Marker indicating terrain has been processed (prevents re-running setup)
 #[derive(Component)]
@@ -49,7 +46,11 @@ pub fn create_terrain(
     // Stage 1: marker present, no handle yet, not processed
     marker_fresh: Query<
         Entity,
-        (With<TerrainSetupMarker>, Without<WorldMetaHandle>, Without<TerrainProcessed>),
+        (
+            With<TerrainSetupMarker>,
+            Without<WorldMetaHandle>,
+            Without<TerrainProcessed>,
+        ),
     >,
     // Stage 2: handle present, not yet processed
     marker_loading: Query<
@@ -87,7 +88,9 @@ pub fn create_terrain(
                 asset.0.clone()
             } else {
                 // Loaded state but asset unavailable — shouldn't happen, but fall back.
-                warn!("WorldMetaAsset unexpectedly missing after Loaded state, using fresh metadata");
+                warn!(
+                    "WorldMetaAsset unexpectedly missing after Loaded state, using fresh metadata"
+                );
                 make_fresh_metadata(&world_config, width, height)
             }
         } else {
@@ -99,8 +102,7 @@ pub fn create_terrain(
             make_fresh_metadata(&world_config, width, height)
         };
 
-        let world_path =
-            std::path::PathBuf::from("worlds").join(&world_config.world_id);
+        let world_path = std::path::PathBuf::from("worlds").join(&world_config.world_id);
 
         commands.insert_resource(storage::TerrainWorld {
             metadata,
@@ -108,13 +110,8 @@ pub fn create_terrain(
         });
         commands.insert_resource(TerrainChunkRegistry::default());
 
-        // Pre-scaled heights stored in HeightmapData (all zero until chunks load).
-        commands.insert_resource(HeightmapData {
-            heights: vec![0.0f32; width * height],
-            grid_w: width,
-            grid_h: height,
-            tile_size: TILE_SIZE,
-        });
+        // Sparse heightmap — starts empty (all tiles implicitly 0.0).
+        commands.insert_resource(HeightmapData::new(TILE_SIZE));
 
         // Shared terrain material — created once, reused by every chunk.
         let stone_texture: Handle<Image> = asset_server.load_with_settings(
@@ -145,7 +142,7 @@ pub fn create_terrain(
         commands.entity(entity).insert(TerrainProcessed);
 
         info!(
-            "Terrain setup: {}x{} tiles, CHUNK_SIZE={}, waiting for streaming to spawn chunks",
+            "Terrain setup: {}x{} tile seed, CHUNK_SIZE={}, waiting for streaming to spawn chunks",
             width, height, CHUNK_SIZE
         );
     }
@@ -169,22 +166,21 @@ fn make_fresh_metadata(
 /// Patch `HeightmapData` with the heights stored in `chunk_data` (pre-scaled form).
 /// Called before generating the chunk mesh so seams are correct.
 fn apply_chunk_to_heightmap(heightmap: &mut HeightmapData, chunk_data: &ChunkData) {
-    let start_x = chunk_data.chunk_x as usize * (CHUNK_SIZE - 1);
-    let start_y = chunk_data.chunk_y as usize * (CHUNK_SIZE - 1);
-    let grid_h = heightmap.grid_h;
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let start_x = chunk_data.chunk_x * cs;
+    let start_y = chunk_data.chunk_y * cs;
 
     match &chunk_data.height_data {
         HeightData::UseBase => {
             // No stored data — the zero-filled base is used as-is.
         }
         HeightData::Delta(mods) => {
-            // Deltas are stored pre-scaled; add them directly to HeightmapData.heights.
+            // Deltas are stored pre-scaled; add them directly.
             for m in mods {
-                let gx = start_x + m.local_x() as usize;
-                let gy = start_y + m.local_y() as usize;
-                if gx < heightmap.grid_w && gy < heightmap.grid_h {
-                    heightmap.heights[gx * grid_h + gy] += m.delta;
-                }
+                let gx = start_x + m.local_x() as i32;
+                let gy = start_y + m.local_y() as i32;
+                let current = heightmap.get_tile(gx, gy);
+                heightmap.set_tile(gx, gy, current + m.delta);
             }
         }
         HeightData::Full {
@@ -197,11 +193,9 @@ fn apply_chunk_to_heightmap(heightmap: &mut HeightmapData, chunk_data: &ChunkDat
             let ch = chunk_data.height as usize;
             for lx in 0..chunk_data.width as usize {
                 for ly in 0..ch {
-                    let gx = start_x + lx;
-                    let gy = start_y + ly;
-                    if gx < heightmap.grid_w && gy < heightmap.grid_h {
-                        heightmap.heights[gx * grid_h + gy] = dequantized[lx * ch + ly];
-                    }
+                    let gx = start_x + lx as i32;
+                    let gy = start_y + ly as i32;
+                    heightmap.set_tile(gx, gy, dequantized[lx * ch + ly]);
                 }
             }
         }
@@ -221,24 +215,22 @@ pub fn spawn_terrain_chunk(
     chunk_registry: &mut TerrainChunkRegistry,
     heightmap: &mut HeightmapData,
     render_assets: &TerrainRenderAssets,
-    chunk_x: u32,
-    chunk_y: u32,
+    chunk_x: i32,
+    chunk_y: i32,
     chunk_data: Option<&ChunkData>,
 ) -> Entity {
-    let grid_w = heightmap.grid_w;
-    let grid_h = heightmap.grid_h;
-
     // Patch heightmap with stored modifications (if any).
     if let Some(data) = chunk_data {
         apply_chunk_to_heightmap(heightmap, data);
     }
 
-    let start_x = chunk_x as usize * (CHUNK_SIZE - 1);
-    let start_y = chunk_y as usize * (CHUNK_SIZE - 1);
-    let end_x = (start_x + CHUNK_SIZE).min(grid_w);
-    let end_y = (start_y + CHUNK_SIZE).min(grid_h);
-    let chunk_width = end_x - start_x;
-    let chunk_height = end_y - start_y;
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let start_x = chunk_x * cs;
+    let start_y = chunk_y * cs;
+
+    // All chunks are the full CHUNK_SIZE — no boundary clamping needed.
+    let chunk_width = CHUNK_SIZE;
+    let chunk_height = CHUNK_SIZE;
 
     let offset = Vec3::new(
         start_x as f32 * TILE_SIZE.0,
@@ -246,19 +238,17 @@ pub fn spawn_terrain_chunk(
         start_y as f32 * TILE_SIZE.1,
     );
 
-    // Generate LOD meshes. HeightmapData.heights are pre-scaled, so pass height_scale=1.0.
+    // Generate LOD meshes. HeightmapData heights are pre-scaled, so the closure
+    // returns world units directly.
     let mut chunk_aabb = None;
     let lod_meshes: [Handle<Mesh>; LOD_LEVELS] = std::array::from_fn(|lod| {
         let (mesh, aabb) = generate_lod_mesh(
-            &heightmap.heights,
-            grid_w,
-            grid_h,
+            |tx, ty| heightmap.get_tile(tx, ty),
             start_x,
             start_y,
             chunk_width,
             chunk_height,
             TILE_SIZE,
-            1.0, // heights are already pre-scaled
             lod,
         );
         if lod == 0 {
@@ -269,21 +259,18 @@ pub fn spawn_terrain_chunk(
     let aabb = chunk_aabb.unwrap();
 
     // Build avian heightfield collider.
-    // Heights are already pre-scaled (world units), so no additional scaling.
     let hf_heights: Vec<Vec<f32>> = (0..chunk_width)
         .map(|lx| {
             (0..chunk_height)
-                .map(|ly| heightmap.heights[(start_x + lx) * grid_h + (start_y + ly)])
+                .map(|ly| heightmap.get_tile(start_x + lx as i32, start_y + ly as i32))
                 .collect()
         })
         .collect();
 
     let physical_width = (chunk_width - 1) as f32 * TILE_SIZE.0;
     let physical_depth = (chunk_height - 1) as f32 * TILE_SIZE.1;
-    let hf_collider = Collider::heightfield(
-        hf_heights,
-        Vec3::new(physical_width, 1.0, physical_depth),
-    );
+    let hf_collider =
+        Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
     let hf_local_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
 
     let entity = commands
@@ -296,8 +283,8 @@ pub fn spawn_terrain_chunk(
             Visibility::Inherited,
             aabb,
             super::TerrainChunk {
-                chunk_x: chunk_x as usize,
-                chunk_y: chunk_y as usize,
+                chunk_x,
+                chunk_y,
                 lod_meshes,
                 current_lod: 0,
             },
@@ -311,7 +298,9 @@ pub fn spawn_terrain_chunk(
         avian3d::debug_render::DebugRender::none(),
     ));
 
-    chunk_registry.loaded_chunks.insert((chunk_x, chunk_y), entity);
+    chunk_registry
+        .loaded_chunks
+        .insert((chunk_x, chunk_y), entity);
 
     entity
 }

@@ -1,9 +1,15 @@
 use bevy::{
-    camera::primitives::Aabb, diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin}, log, prelude::*
+    camera::primitives::Aabb,
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    log,
+    prelude::*,
 };
 
-use super::{gfx::camera::PlayerCamera, gltf_loading::{HoveredOver, Interactable}};
-use super::{GameEntity};
+use super::GameEntity;
+use super::{
+    gfx::camera::PlayerCamera,
+    gltf_loading::{HoveredOver, Interactable},
+};
 use crate::settings::UserSettings;
 
 // Display components

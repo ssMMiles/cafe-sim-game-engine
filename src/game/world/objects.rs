@@ -15,7 +15,7 @@ use std::{
 
 use crate::game::{
     GameEntity,
-    gltf_loading::{HoveredOver, Interactable, spawn_interactable_scene},
+    gltf_loading::{Interactable, spawn_interactable_scene},
     world::terrain::storage::StorageError,
 };
 
@@ -24,7 +24,8 @@ use crate::game::world::terrain::{CHUNK_SIZE, TILE_SIZE};
 
 // File format constants
 const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
-const CHUNK_OBJECTS_VERSION: u32 = 1;
+// Version 2: chunk_x/chunk_y changed from u32 to i32 for infinite terrain support.
+const CHUNK_OBJECTS_VERSION: u32 = 2;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
 pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
@@ -45,8 +46,8 @@ pub struct PlacedObjectRecord {
 #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
 pub struct ChunkObjectsFile {
     pub version: u32,
-    pub chunk_x: u32,
-    pub chunk_y: u32,
+    pub chunk_x: i32,
+    pub chunk_y: i32,
     pub objects: Vec<PlacedObjectRecord>,
 }
 
@@ -59,7 +60,7 @@ pub struct ChunkObjectsFile {
 pub struct PlacedObject {
     pub id: u64,
     pub asset_path: String,
-    pub chunk: (u32, u32),
+    pub chunk: (i32, i32),
 }
 
 /// Global registry of all placed objects.
@@ -67,7 +68,7 @@ pub struct PlacedObject {
 pub struct PlacedObjectRegistry {
     pub by_id: HashMap<u64, Entity>,
     pub next_id: u64,
-    pub dirty_chunks: HashSet<(u32, u32)>,
+    pub dirty_chunks: HashSet<(i32, i32)>,
 }
 
 impl PlacedObjectRegistry {
@@ -98,9 +99,9 @@ impl Default for PlacementConfig {
 // Chunk Math
 // ============================================================================
 
-pub fn world_pos_to_chunk(world_x: f32, world_z: f32) -> (u32, u32) {
-    let cx = (world_x / CHUNK_WORLD_SIZE).floor().max(0.0) as u32;
-    let cy = (world_z / CHUNK_WORLD_SIZE).floor().max(0.0) as u32;
+pub fn world_pos_to_chunk(world_x: f32, world_z: f32) -> (i32, i32) {
+    let cx = (world_x / CHUNK_WORLD_SIZE).floor() as i32;
+    let cy = (world_z / CHUNK_WORLD_SIZE).floor() as i32;
     (cx, cy)
 }
 
@@ -114,7 +115,7 @@ pub(super) fn spawn_placed_object(
     registry: &mut PlacedObjectRegistry,
     asset_path: String,
     id: u64,
-    chunk: (u32, u32),
+    chunk: (i32, i32),
     transform: Transform,
 ) -> Entity {
     let handle: Handle<Scene> = asset_server.load(&asset_path);
@@ -201,7 +202,7 @@ pub fn despawn_chunk_objects(
     commands: &mut Commands,
     registry: &mut PlacedObjectRegistry,
     placed_query: &Query<(Entity, &PlacedObject)>,
-    chunk: (u32, u32),
+    chunk: (i32, i32),
 ) {
     let to_despawn: Vec<(u64, Entity)> = placed_query
         .iter()
@@ -241,7 +242,7 @@ pub fn save_placed_objects(
         return;
     }
 
-    let dirty: Vec<(u32, u32)> = registry.dirty_chunks.drain().collect();
+    let dirty: Vec<(i32, i32)> = registry.dirty_chunks.drain().collect();
     info!("Saving {} dirty object chunk(s)", dirty.len());
 
     for (cx, cy) in dirty {
@@ -262,7 +263,7 @@ pub fn save_placed_objects(
             .collect();
 
         let file = ChunkObjectsFile {
-            version: 1,
+            version: CHUNK_OBJECTS_VERSION,
             chunk_x: cx,
             chunk_y: cy,
             objects,
@@ -275,26 +276,47 @@ pub fn save_placed_objects(
     }
 }
 
-/// Delete key while hovering a PlacedObject in edit mode.
+/// Delete key while looking at a PlacedObject in edit mode.
 pub fn delete_hovered_object(
     mut commands: Commands,
     settings: Res<crate::settings::UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
     mut registry: ResMut<PlacedObjectRegistry>,
-    hovered: Query<(Entity, &PlacedObject), With<HoveredOver>>,
+    mut raycast: bevy::picking::mesh_picking::ray_cast::MeshRayCast,
+    camera_query: Query<&Transform, With<crate::game::gfx::camera::PlayerCamera>>,
+    interactable_parent_query: Query<&crate::game::gltf_loading::InteractableParent>,
+    placed_query: Query<&PlacedObject>,
 ) {
     if !settings.edit_mode || !input.just_pressed(KeyCode::Delete) {
         return;
     }
 
-    for (entity, obj) in hovered.iter() {
-        registry.by_id.remove(&obj.id);
-        registry.dirty_chunks.insert(obj.chunk);
-        commands.entity(entity).despawn();
-        info!(
-            "Deleted placed object id={} from chunk {:?}",
-            obj.id, obj.chunk
-        );
+    let Ok(cam) = camera_query.single() else {
+        return;
+    };
+    let Ok(forward) = Dir3::new(cam.forward().as_vec3()) else {
+        return;
+    };
+    let ray = Ray3d::new(cam.translation, forward);
+    let hits = raycast.cast_ray(ray, &Default::default());
+
+    for (entity, _) in hits.iter() {
+        // Resolve child mesh → root entity
+        let root = interactable_parent_query
+            .get(*entity)
+            .map(|p| p.0)
+            .unwrap_or(*entity);
+
+        if let Ok(obj) = placed_query.get(root) {
+            registry.by_id.remove(&obj.id);
+            registry.dirty_chunks.insert(obj.chunk);
+            commands.entity(root).despawn();
+            info!(
+                "Deleted placed object id={} from chunk {:?}",
+                obj.id, obj.chunk
+            );
+            return; // delete only the nearest hit
+        }
     }
 }
 
@@ -302,14 +324,14 @@ pub fn delete_hovered_object(
 // Private I/O
 // ============================================================================
 
-fn chunk_objects_path(world_path: &Path, cx: u32, cy: u32) -> PathBuf {
+fn chunk_objects_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
     world_path
         .join("chunks")
         .join(format!("chunk_{}_{}.objects", cx, cy))
 }
 
 /// Returns the path to the `.objects` file for the given chunk, for existence checks.
-pub fn chunk_objects_file_path(world_path: &Path, cx: u32, cy: u32) -> PathBuf {
+pub fn chunk_objects_file_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
     chunk_objects_path(world_path, cx, cy)
 }
 
@@ -361,8 +383,8 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
     }
 
     let mut coord = [0u8; 4];
-    cursor.read_exact(&mut coord)?; // chunk_x
-    cursor.read_exact(&mut coord)?; // chunk_y
+    cursor.read_exact(&mut coord)?; // chunk_x (i32)
+    cursor.read_exact(&mut coord)?; // chunk_y (i32)
 
     let mut len_bytes = [0u8; 4];
     cursor.read_exact(&mut len_bytes)?;
@@ -408,9 +430,9 @@ fn load_chunk_objects_file(path: &Path) -> Result<ChunkObjectsFile, StorageError
     // Read chunk coords (informational only)
     let mut coord = [0u8; 4];
     f.read_exact(&mut coord)?;
-    let _cx = u32::from_le_bytes(coord);
+    let _cx = i32::from_le_bytes(coord);
     f.read_exact(&mut coord)?;
-    let _cy = u32::from_le_bytes(coord);
+    let _cy = i32::from_le_bytes(coord);
 
     let mut len_bytes = [0u8; 4];
     f.read_exact(&mut len_bytes)?;

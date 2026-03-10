@@ -39,7 +39,10 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();
 
-        app.add_systems(Update, (create_terrain, update_terrain_lod).in_set(TerrainSet::Update));
+        app.add_systems(
+            Update,
+            (create_terrain, update_terrain_lod).in_set(TerrainSet::Update),
+        );
         app.add_systems(Update, save::save_terrain.in_set(TerrainSet::Update));
 
         app.init_resource::<edit::TerrainBrushHit>();
@@ -50,6 +53,7 @@ impl Plugin for TerrainPlugin {
                 edit::adjust_brush_size,
                 edit::raycast_terrain_hit,
                 edit::apply_terrain_brush,
+                edit::finalize_terrain_lod,
             )
                 .chain()
                 .in_set(TerrainSet::Edit),

@@ -1,9 +1,15 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::{game::world::terrain::HeightmapData, settings::{MovementMode, UserSettings}};
+use crate::{
+    game::world::terrain::HeightmapData,
+    settings::{MovementMode, UserSettings},
+};
 
-use super::{gfx::camera::PlayerCamera, simulation::{Player, PlayerCollider}};
+use super::{
+    gfx::camera::PlayerCamera,
+    simulation::{Player, PlayerCollider},
+};
 
 // Physics constants
 const GRAVITY: f32 = 19.6;
@@ -103,7 +109,11 @@ pub fn character_physics(
 
     // 2. Horizontal acceleration
     let horizontal_vel = Vec3::new(state.velocity.x, 0.0, state.velocity.z);
-    let accel = if state.grounded { GROUND_ACCEL } else { AIR_ACCEL };
+    let accel = if state.grounded {
+        GROUND_ACCEL
+    } else {
+        AIR_ACCEL
+    };
 
     if wish_dir.length_squared() > 0.0 {
         let target = wish_dir * max_speed;
@@ -150,7 +160,9 @@ pub fn character_physics(
             break;
         }
         let dist = displacement.length();
-        let Ok(dir) = Dir3::new(displacement / dist) else { break };
+        let Ok(dir) = Dir3::new(displacement / dist) else {
+            break;
+        };
         let capsule_center = player_tf.translation + Vec3::Y * (CHAR_HEIGHT * 0.5);
 
         if let Some(hit) = spatial_query.cast_shape(
@@ -205,20 +217,10 @@ pub fn character_physics(
     let mut terrain_ground: Option<f32> = None;
     let mut terrain_normal: Option<(Vec3, f32)> = None;
     if let Some(ref hm) = heightmap {
+        // sample_height returns Some for all positions (unloaded tiles → 0.0).
         if let Some(h) = hm.sample_height(player_tf.translation.x, player_tf.translation.z) {
             terrain_ground = Some(h);
             terrain_normal = hm.sample_normal(player_tf.translation.x, player_tf.translation.z);
-        } else {
-            // Outside terrain bounds — clamp to edge
-            let max_x = (hm.grid_w as f32 - 1.0) * hm.tile_size.0;
-            let max_z = (hm.grid_h as f32 - 1.0) * hm.tile_size.1;
-            player_tf.translation.x = player_tf.translation.x.clamp(0.0, max_x);
-            player_tf.translation.z = player_tf.translation.z.clamp(0.0, max_z);
-            // Re-sample after clamping
-            if let Some(h) = hm.sample_height(player_tf.translation.x, player_tf.translation.z) {
-                terrain_ground = Some(h);
-                terrain_normal = hm.sample_normal(player_tf.translation.x, player_tf.translation.z);
-            }
         }
     }
 
@@ -264,9 +266,8 @@ pub fn character_physics(
 
         // 7. Slope check — only when terrain is the active ground surface
         if state.grounded {
-            let terrain_is_ground = shape_ground.map_or(true, |sh| {
-                terrain_ground.map_or(false, |th| th >= sh)
-            });
+            let terrain_is_ground =
+                shape_ground.map_or(true, |sh| terrain_ground.map_or(false, |th| th >= sh));
             if terrain_is_ground {
                 if let Some((normal, slope)) = terrain_normal {
                     state.ground_normal = normal;
@@ -283,6 +284,8 @@ pub fn character_physics(
     // 8. Rotate player to face movement direction
     if wish_dir.length_squared() > 0.0 {
         let target_rot = Quat::from_rotation_arc(Vec3::Z, wish_dir);
-        player_tf.rotation = player_tf.rotation.slerp(target_rot, (TURN_SPEED * dt).min(1.0));
+        player_tf.rotation = player_tf
+            .rotation
+            .slerp(target_rot, (TURN_SPEED * dt).min(1.0));
     }
 }

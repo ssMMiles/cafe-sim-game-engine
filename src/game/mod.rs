@@ -1,37 +1,50 @@
-use bevy::{diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin}, pbr::ExtendedMaterial, prelude::*};
+use bevy::{
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    pbr::ExtendedMaterial,
+    prelude::*,
+};
 
 use crate::{
-    AppState, game::{gfx::{GfxPlugin, GfxSet}, gltf_loading::{handle_interactable_clicks, show_interaction_text}, world::{WorldPlugin, WorldSet, setup_sky, terrain::TerrainSet}},
+    AppState,
+    game::{
+        gfx::{GfxPlugin, GfxSet},
+        gltf_loading::{handle_interactable_clicks, show_interaction_text},
+        world::{WorldPlugin, WorldSet, setup_sky, terrain::TerrainSet},
+    },
 };
 
 mod animation;
-mod icons;
+mod gfx;
 mod gltf_loading;
+mod icons;
 pub mod pause_menu;
 pub mod physics;
 mod simulation;
 mod ui_displays;
 pub mod world;
-mod gfx;
 
-use animation::{init_animation_player, pause_animations, resume_animations, setup_character_animations, update_character_animation};
-use physics::character_physics;
-use icons::SvgTextureCache;
+use crate::settings::{
+    EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
+    MovementSpeedSetting,
+};
+use animation::{
+    init_animation_player, pause_animations, resume_animations, setup_character_animations,
+    update_character_animation,
+};
 use gltf_loading::{InteractableClicked, check_interactions, detect_interactable_clicks};
+use icons::SvgTextureCache;
 use pause_menu::{
     PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
     update_slider_label,
 };
-use simulation::{
-    exit, setup
-};
+use physics::character_physics;
+use simulation::{exit, setup};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
     setup_position_display, update_dynamic_backgrounds, update_fps_display,
     update_interaction_info_display, update_keybinds_display, update_position_display,
 };
-use crate::settings::{EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting, MovementSpeedSetting};
 
 pub struct SimulationPlugin;
 
@@ -81,20 +94,43 @@ impl Plugin for SimulationPlugin {
         // ── Set configuration ─────────────────────────────────────────────
         // SimulationPlugin's own sets
         app.configure_sets(Update, SimSet::InGame.run_if(in_state(AppState::InGame)));
-        app.configure_sets(Update, SimSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
-        app.configure_sets(Update, SimSet::Paused.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Paused))));
-        app.configure_sets(FixedUpdate, SimSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+        app.configure_sets(
+            Update,
+            SimSet::Running
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
+        app.configure_sets(
+            Update,
+            SimSet::Paused
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Paused))),
+        );
+        app.configure_sets(
+            FixedUpdate,
+            SimSet::Running
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
 
         // Sub-plugin sets — GfxPlugin
         app.configure_sets(Update, GfxSet::InGame.run_if(in_state(AppState::InGame)));
-        app.configure_sets(Update, GfxSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+        app.configure_sets(
+            Update,
+            GfxSet::Running
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
 
         // Sub-plugin sets — WorldPlugin
         app.configure_sets(Update, WorldSet::InGame.run_if(in_state(AppState::InGame)));
-        app.configure_sets(Update, WorldSet::Running.run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))));
+        app.configure_sets(
+            Update,
+            WorldSet::Running
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
 
         // Sub-plugin sets — TerrainPlugin
-        app.configure_sets(Update, TerrainSet::Update.run_if(in_state(AppState::InGame)));
+        app.configure_sets(
+            Update,
+            TerrainSet::Update.run_if(in_state(AppState::InGame)),
+        );
         app.configure_sets(Update, TerrainSet::Edit.run_if(in_state(AppState::InGame)));
 
         // ── OnEnter / OnExit ──────────────────────────────────────────────
@@ -112,9 +148,18 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(OnExit(AppState::InGame), exit);
 
-        app.add_systems(OnEnter(SimulationState::Paused), (setup_pause_menu, pause_animations));
-        app.add_systems(OnExit(SimulationState::Paused), (cleanup_pause_menu, resume_animations));
-        app.add_systems(OnEnter(PauseMenuState::Settings), (cleanup_pause_menu, setup_pause_settings));
+        app.add_systems(
+            OnEnter(SimulationState::Paused),
+            (setup_pause_menu, pause_animations),
+        );
+        app.add_systems(
+            OnExit(SimulationState::Paused),
+            (cleanup_pause_menu, resume_animations),
+        );
+        app.add_systems(
+            OnEnter(PauseMenuState::Settings),
+            (cleanup_pause_menu, setup_pause_settings),
+        );
         app.add_systems(OnExit(PauseMenuState::Settings), cleanup_pause_settings);
         app.add_systems(
             OnEnter(PauseMenuState::Main),
@@ -131,13 +176,20 @@ impl Plugin for SimulationPlugin {
         app.add_systems(Update, init_animation_player.in_set(SimSet::InGame));
         app.add_systems(
             Update,
-            (check_interactions, detect_interactable_clicks, show_interaction_text)
+            (
+                check_interactions,
+                detect_interactable_clicks,
+                show_interaction_text,
+            )
                 .in_set(SimSet::Running),
         );
         app.add_systems(Update, handle_interactable_clicks.in_set(SimSet::Running));
         app.add_systems(Update, update_keybinds_display.in_set(SimSet::InGame));
         app.add_systems(Update, update_fps_display.in_set(SimSet::InGame));
-        app.add_systems(Update, update_interaction_info_display.in_set(SimSet::InGame));
+        app.add_systems(
+            Update,
+            update_interaction_info_display.in_set(SimSet::InGame),
+        );
         app.add_systems(Update, update_position_display.in_set(SimSet::InGame));
         app.add_systems(Update, handle_pause_input.in_set(SimSet::InGame));
 
@@ -171,7 +223,10 @@ impl Plugin for SimulationPlugin {
         );
 
         // ── FixedUpdate ───────────────────────────────────────────────────
-        app.add_systems(FixedUpdate, update_dynamic_backgrounds.in_set(SimSet::Running));
+        app.add_systems(
+            FixedUpdate,
+            update_dynamic_backgrounds.in_set(SimSet::Running),
+        );
 
         // ── Resources / States ────────────────────────────────────────────
         app.init_state::<SimulationState>();

@@ -18,14 +18,19 @@ use bevy::{
     light::VolumetricFog,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
-    render::{render_resource::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages}, view::Hdr},
+    render::{
+        render_resource::{
+            Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        },
+        view::Hdr,
+    },
     window::PrimaryWindow,
 };
 
 const RENDER_TEXTURE_WIDTH: u32 = 3840;
 const RENDER_TEXTURE_HEIGHT: u32 = 2160;
 const CAMERA_CLEARANCE: f32 = 0.5; // Min camera height above terrain in FloorBased mode
-const EYE_HEIGHT: f32 = 1.7;        // Camera offset above player origin in first-person
+const EYE_HEIGHT: f32 = 1.7; // Camera offset above player origin in first-person
 const FOV_FIRST_PERSON: f32 = PI / 2.5; // ~72 degrees
 const FOV_THIRD_PERSON: f32 = PI / 5.0; // ~36 degrees (original)
 
@@ -78,44 +83,46 @@ pub fn setup_camera(
 
     // The camera to render all entities on render layer #0, which is the default layer for
     // entities, unless otherwise specified.
-    let _camera_entity = commands.spawn((
-        GameEntity,
-        Camera3d::default(),
-        Camera::default(),
-        RenderTarget::Image(render_texture_handle.clone().into()),
-        PlayerCamera {
-            velocity: Vec3::ZERO,
-            yaw,
-            pitch,
-        },
-        Projection::Perspective(PerspectiveProjection {
-            fov: (PI / 5.),
-            ..default()
-        }),
-        initial_transform,
-        render_texture_layer,
-        // Enable depth and normal prepasses for edge detection
-        DepthPrepass,
-        NormalPrepass,
-        // Edge detection post-processing settings
-        EdgeDetectionSettings::new(),
-        Fxaa::default(),
-        // HDR intermediate render target — required by VolumetricFog
-        Hdr,
-        // Distance fog fading distant terrain into the warm horizon haze
-        DistanceFog {
-            color: Color::srgba(0.85, 0.80, 0.72, 1.0),
-            directional_light_color: Color::srgba(1.0, 0.85, 0.65, 0.5),
-            directional_light_exponent: 6.0,
-            falloff: FogFalloff::Exponential { density: 0.003 },
-        },
-        // Volumetric fog enables light-shaft rendering through cloud FogVolumes
-        VolumetricFog {
-            step_count: 64,
-            ambient_intensity: 0.1,
-            ..default()
-        },
-    )).id();
+    let _camera_entity = commands
+        .spawn((
+            GameEntity,
+            Camera3d::default(),
+            Camera::default(),
+            RenderTarget::Image(render_texture_handle.clone().into()),
+            PlayerCamera {
+                velocity: Vec3::ZERO,
+                yaw,
+                pitch,
+            },
+            Projection::Perspective(PerspectiveProjection {
+                fov: (PI / 5.),
+                ..default()
+            }),
+            initial_transform,
+            render_texture_layer,
+            // Enable depth and normal prepasses for edge detection
+            DepthPrepass,
+            NormalPrepass,
+            // Edge detection post-processing settings
+            EdgeDetectionSettings::new(),
+            Fxaa::default(),
+            // HDR intermediate render target — required by VolumetricFog
+            Hdr,
+            // Distance fog fading distant terrain into the warm horizon haze
+            DistanceFog {
+                color: Color::srgba(0.85, 0.80, 0.72, 1.0),
+                directional_light_color: Color::srgba(1.0, 0.85, 0.65, 0.5),
+                directional_light_exponent: 6.0,
+                falloff: FogFalloff::Exponential { density: 0.003 },
+            },
+            // Volumetric fog enables light-shaft rendering through cloud FogVolumes
+            VolumetricFog {
+                step_count: 64,
+                ambient_intensity: 0.1,
+                ..default()
+            },
+        ))
+        .id();
 
     //
     // A sprite and orthographic camera is used to present the render texture.
@@ -159,17 +166,20 @@ pub fn handle_camera_input(
     };
 
     // Mode toggles
-    let toggle_mode = keyboard_input.just_pressed(KeyCode::KeyM)
-        && keyboard_input.pressed(KeyCode::ShiftLeft);
-    let toggle_third_person = keyboard_input.just_pressed(KeyCode::KeyV)
-        && keyboard_input.pressed(KeyCode::ShiftLeft);
+    let toggle_mode =
+        keyboard_input.just_pressed(KeyCode::KeyM) && keyboard_input.pressed(KeyCode::ShiftLeft);
+    let toggle_third_person =
+        keyboard_input.just_pressed(KeyCode::KeyV) && keyboard_input.pressed(KeyCode::ShiftLeft);
 
     if toggle_mode {
         match settings.movement_mode {
             MovementMode::FreeCam => {
                 // Snap to terrain when switching to floor-based
                 if let Some(ref hm) = heightmap {
-                    if let Some(h) = hm.sample_height(player_transform.translation.x, player_transform.translation.z) {
+                    if let Some(h) = hm.sample_height(
+                        player_transform.translation.x,
+                        player_transform.translation.z,
+                    ) {
                         player_transform.translation.y = h;
                     }
                 }
@@ -264,8 +274,7 @@ pub fn camera_follow(
             *player_visibility = Visibility::Hidden;
 
             // Place camera at eye level
-            camera_transform.translation =
-                player_transform.translation + Vec3::Y * EYE_HEIGHT;
+            camera_transform.translation = player_transform.translation + Vec3::Y * EYE_HEIGHT;
 
             // Use a wider FOV appropriate for first-person
             if let Projection::Perspective(ref mut persp) = *projection {
@@ -277,8 +286,8 @@ pub fn camera_follow(
             *player_visibility = Visibility::Inherited;
 
             let offset_direction = camera_transform.forward().as_vec3();
-            let mut desired_pos = player_transform.translation
-                - offset_direction * settings.third_person_distance;
+            let mut desired_pos =
+                player_transform.translation - offset_direction * settings.third_person_distance;
 
             // In FloorBased mode, prevent the camera from clipping into terrain.
             if settings.movement_mode == MovementMode::FloorBased {
