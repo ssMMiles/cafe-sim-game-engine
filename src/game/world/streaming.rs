@@ -10,14 +10,20 @@
 //!      empty objects (no fast-path to avoid `std::fs` calls for WASM compat).
 //!    - All chunks go into `StreamingState::pending`.
 //!
-//! 2. `process_pending_chunks` checks load state every frame.
-//!    When both handles are done (Loaded or Failed) it calls `spawn_terrain_chunk`
-//!    and `spawn_chunk_objects`, then moves the chunk into `StreamingState::loaded`.
+//! 2. `launch_chunk_tasks` checks load state every frame.
+//!    When both handles are done (Loaded or Failed) it patches `HeightmapData`,
+//!    extracts the height array, and spawns a background `AsyncComputeTaskPool` task
+//!    to generate LOD meshes off the main thread. The chunk moves to `computing`.
 //!
-//! 3. `update_streaming_ring` despawns chunks that have moved beyond `unload_radius`
-//!    and evicts their heightmap tiles to keep memory bounded.
+//! 3. `finalize_computed_chunks` polls the background tasks each frame.
+//!    When a task completes it calls `spawn_chunk_from_result` (main thread only,
+//!    for physics collider construction) and spawns any loaded objects.
 
-use bevy::{asset::LoadState, prelude::*};
+use bevy::{
+    asset::LoadState,
+    prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
+};
 use std::collections::{HashMap, HashSet};
 
 use crate::game::simulation::Player;
@@ -29,8 +35,11 @@ use super::{
         world_pos_to_chunk,
     },
     terrain::{
-        HeightmapData,
-        bootstrap::{TerrainRenderAssets, spawn_terrain_chunk},
+        HeightmapData, TILE_SIZE,
+        bootstrap::{
+            ChunkComputeResult, TerrainRenderAssets, apply_chunk_to_heightmap,
+            compute_chunk_meshes, extract_chunk_heights, spawn_chunk_from_result,
+        },
         storage::{ChunkState, TerrainChunkRegistry, TerrainWorld},
     },
 };
@@ -47,8 +56,9 @@ pub struct ChunkStreamingConfig {
     /// Chebyshev radius beyond which loaded chunks are despawned.
     /// Should be > `load_radius` to create hysteresis and prevent thrashing.
     pub unload_radius: u32,
-    /// Maximum chunks to spawn per frame. Spreading spawns avoids the frame-time
-    /// spike caused by generating 4 LOD meshes + a heightfield collider per chunk.
+    /// Maximum number of completed background tasks to finalize per frame.
+    /// Spreading finalizations avoids the frame-time spike from building multiple
+    /// avian heightfield colliders + registering mesh assets in a single frame.
     pub max_spawns_per_frame: usize,
 }
 
@@ -57,16 +67,23 @@ impl Default for ChunkStreamingConfig {
         Self {
             load_radius: 4,
             unload_radius: 6,
-            max_spawns_per_frame: 1,
+            max_spawns_per_frame: 2,
         }
     }
 }
 
-/// A chunk that has been requested but is still loading.
+/// A chunk that has been requested but is still loading its asset files.
 pub struct PendingChunk {
     /// `None` → chunk has no terrain file (flat); terrain is already ready.
     pub terrain_handle: Option<Handle<ChunkDataAsset>>,
     /// Always present. `Failed` (e.g. 404) is treated as empty objects.
+    pub objects_handle: Handle<ChunkObjectsAsset>,
+}
+
+/// A chunk whose mesh-generation task is running in the background.
+pub struct ComputingChunk {
+    pub task: Task<ChunkComputeResult>,
+    /// Retained so we can spawn objects once the task finishes.
     pub objects_handle: Handle<ChunkObjectsAsset>,
 }
 
@@ -75,8 +92,10 @@ pub struct PendingChunk {
 pub struct StreamingState {
     /// Chunks whose entities are currently live in the world.
     pub loaded: HashSet<(i32, i32)>,
-    /// Chunks that are being loaded asynchronously.
+    /// Chunks that are waiting for their asset files to finish loading.
     pub pending: HashMap<(i32, i32), PendingChunk>,
+    /// Chunks whose mesh-generation task is running in the background.
+    pub computing: HashMap<(i32, i32), ComputingChunk>,
 }
 
 // ============================================================================
@@ -86,6 +105,7 @@ pub struct StreamingState {
 /// Determines which chunks should be in the streaming ring and:
 /// - Issues asset loads for newly in-range chunks.
 /// - Despawns chunks that have moved beyond the unload radius (and evicts their tiles).
+/// - Cancels background compute tasks for chunks that go out of range.
 pub fn update_streaming_ring(
     player_query: Query<&Transform, With<Player>>,
     terrain_world: Option<Res<TerrainWorld>>,
@@ -115,7 +135,7 @@ pub fn update_streaming_ring(
 
     let metadata = &terrain_world.metadata;
 
-    // ── Unload distant chunks ─────────────────────────────────────────────────
+    // ── Unload distant loaded chunks ──────────────────────────────────────────
     let to_unload: Vec<(i32, i32)> = state
         .loaded
         .iter()
@@ -135,6 +155,18 @@ pub fn update_streaming_ring(
         state.loaded.remove(&chunk);
     }
 
+    // ── Cancel out-of-range computing tasks ───────────────────────────────────
+    // Dropping the Task cancels it automatically.
+    let to_cancel: Vec<(i32, i32)> = state
+        .computing
+        .keys()
+        .copied()
+        .filter(|&(cx, cy)| chebyshev(cx, cy, player_cx, player_cy) > config.unload_radius)
+        .collect();
+    for chunk in to_cancel {
+        state.computing.remove(&chunk);
+    }
+
     // ── Request newly in-range chunks ─────────────────────────────────────────
     let r = config.load_radius as i32;
 
@@ -143,7 +175,10 @@ pub fn update_streaming_ring(
             let cx = player_cx + dx;
             let cy = player_cy + dy;
 
-            if state.loaded.contains(&(cx, cy)) || state.pending.contains_key(&(cx, cy)) {
+            if state.loaded.contains(&(cx, cy))
+                || state.pending.contains_key(&(cx, cy))
+                || state.computing.contains_key(&(cx, cy))
+            {
                 continue;
             }
 
@@ -179,33 +214,25 @@ pub fn update_streaming_ring(
     }
 }
 
-/// Checks pending chunk asset loads and spawns chunks whose assets are fully ready.
-/// At most `ChunkStreamingConfig::max_spawns_per_frame` chunks are spawned per call
-/// to avoid the per-frame spike of generating multiple LOD meshes + heightfield colliders.
-pub fn process_pending_chunks(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+/// Checks pending chunk asset loads and, for each fully-loaded chunk, patches
+/// `HeightmapData` and spawns a background `AsyncComputeTaskPool` task to generate
+/// LOD meshes off the main thread.
+///
+/// Spawning background tasks is cheap (just a queue push), so no per-frame budget
+/// is applied here — the budget in `finalize_computed_chunks` limits main-thread cost.
+pub fn launch_chunk_tasks(
     asset_server: Res<AssetServer>,
     chunk_data_assets: Res<Assets<ChunkDataAsset>>,
-    chunk_objects_assets: Res<Assets<ChunkObjectsAsset>>,
     mut state: ResMut<StreamingState>,
-    config: Res<ChunkStreamingConfig>,
-    chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
     heightmap: Option<ResMut<HeightmapData>>,
-    render_assets: Option<Res<TerrainRenderAssets>>,
-    mut obj_registry: ResMut<PlacedObjectRegistry>,
 ) {
-    let (Some(mut chunk_registry), Some(mut heightmap), Some(render_assets)) =
-        (chunk_registry, heightmap, render_assets)
-    else {
+    let Some(mut heightmap) = heightmap else {
         return;
     };
 
-    // ready = spawn with data; flat = spawn without terrain data (terrain failed).
-    // Capped to max_spawns_per_frame total to spread mesh-generation cost across frames.
-    let budget = config.max_spawns_per_frame;
-    let mut ready: Vec<(i32, i32)> = Vec::new();
-    let mut flat: Vec<(i32, i32)> = Vec::new();
+    // Determine which pending chunks have all their assets resolved.
+    let mut ready_with_data: Vec<(i32, i32)> = Vec::new();
+    let mut ready_flat: Vec<(i32, i32)> = Vec::new();
 
     for (&chunk, pending) in state.pending.iter() {
         let terrain_state = match &pending.terrain_handle {
@@ -223,78 +250,139 @@ pub fn process_pending_chunks(
             },
         };
 
-        let objects_done = match asset_server.load_state(pending.objects_handle.id()) {
-            LoadState::Loaded => true,
-            LoadState::Failed(_) => {
-                // 404 or other error → treat as empty objects
-                true
-            }
-            _ => false,
-        };
+        let objects_done = matches!(
+            asset_server.load_state(pending.objects_handle.id()),
+            LoadState::Loaded | LoadState::Failed(_)
+        );
 
         if let Some(terrain_loaded) = terrain_state {
             if objects_done {
                 if terrain_loaded {
-                    ready.push(chunk);
+                    ready_with_data.push(chunk);
                 } else {
-                    flat.push(chunk);
+                    ready_flat.push(chunk);
                 }
             }
         }
     }
 
-    // Cap both lists so total spawns this frame ≤ budget.
-    flat.truncate(budget);
-    ready.truncate(budget.saturating_sub(flat.len()));
+    let thread_pool = AsyncComputeTaskPool::get();
 
-    // Spawn failed terrain chunks as flat (no data).
-    for chunk in flat {
-        state.pending.remove(&chunk);
-        let (cx, cy) = chunk;
-        spawn_terrain_chunk(
-            &mut commands,
-            &mut meshes,
-            &mut chunk_registry,
-            &mut heightmap,
-            &render_assets,
-            cx,
-            cy,
-            None,
-        );
-        state.loaded.insert(chunk);
-    }
-
-    // Spawn ready chunks.
-    for chunk in ready {
-        let Some(pending) = state.pending.remove(&chunk) else {
+    // Launch tasks for chunks with terrain data.
+    for chunk_coord in ready_with_data {
+        let Some(pending) = state.pending.remove(&chunk_coord) else {
             continue;
         };
-        let (cx, cy) = chunk;
+        let (cx, cy) = chunk_coord;
 
-        // Retrieve terrain data (if any).
-        let chunk_data_ref = pending
+        // Patch heightmap with stored modifications (must happen on main thread).
+        if let Some(terrain_asset) = pending
             .terrain_handle
             .as_ref()
             .and_then(|h| chunk_data_assets.get(h))
-            .map(|a| &a.0);
+        {
+            apply_chunk_to_heightmap(&mut heightmap, &terrain_asset.0);
+        }
 
-        spawn_terrain_chunk(
+        // Extract heights into an owned Vec so the task can move it off-thread.
+        let heights = extract_chunk_heights(&heightmap, cx, cy);
+
+        let task = thread_pool.spawn(async move {
+            compute_chunk_meshes(heights, cx, cy, TILE_SIZE)
+        });
+
+        state.computing.insert(
+            chunk_coord,
+            ComputingChunk {
+                task,
+                objects_handle: pending.objects_handle,
+            },
+        );
+    }
+
+    // Launch tasks for flat (data-less) chunks.
+    for chunk_coord in ready_flat {
+        let Some(pending) = state.pending.remove(&chunk_coord) else {
+            continue;
+        };
+        let (cx, cy) = chunk_coord;
+
+        // No heightmap patch needed — use whatever is already in HeightmapData
+        // (implicitly 0.0 for tiles never written).
+        let heights = extract_chunk_heights(&heightmap, cx, cy);
+
+        let task = thread_pool.spawn(async move {
+            compute_chunk_meshes(heights, cx, cy, TILE_SIZE)
+        });
+
+        state.computing.insert(
+            chunk_coord,
+            ComputingChunk {
+                task,
+                objects_handle: pending.objects_handle,
+            },
+        );
+    }
+}
+
+/// Polls background mesh-generation tasks and finalizes any that are complete.
+///
+/// For each ready task: inserts the computed `Mesh` assets, builds the avian
+/// heightfield collider (main-thread only), spawns the chunk entity, and spawns
+/// any loaded objects. At most `max_spawns_per_frame` chunks are finalized per call.
+pub fn finalize_computed_chunks(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    chunk_objects_assets: Res<Assets<ChunkObjectsAsset>>,
+    mut state: ResMut<StreamingState>,
+    config: Res<ChunkStreamingConfig>,
+    chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
+    render_assets: Option<Res<TerrainRenderAssets>>,
+    mut obj_registry: ResMut<PlacedObjectRegistry>,
+    asset_server: Res<AssetServer>,
+) {
+    let (Some(mut chunk_registry), Some(render_assets)) = (chunk_registry, render_assets) else {
+        return;
+    };
+
+    let budget = config.max_spawns_per_frame;
+    let mut ready_chunks: Vec<(i32, i32)> = Vec::new();
+
+    // Poll each computing task without blocking; collect those that are done.
+    for (&chunk_coord, computing) in state.computing.iter_mut() {
+        if ready_chunks.len() >= budget {
+            break;
+        }
+        if computing.task.is_finished() {
+            ready_chunks.push(chunk_coord);
+        }
+    }
+
+    for chunk_coord in ready_chunks {
+        let Some(mut computing) = state.computing.remove(&chunk_coord) else {
+            continue;
+        };
+
+        // Task is finished; check_ready polls it once and returns the result.
+        let Some(result) = check_ready(&mut computing.task) else {
+            // Shouldn't happen — we confirmed is_finished() — but be defensive.
+            state.computing.insert(chunk_coord, computing);
+            continue;
+        };
+
+        spawn_chunk_from_result(
             &mut commands,
             &mut meshes,
             &mut chunk_registry,
-            &mut heightmap,
             &render_assets,
-            cx,
-            cy,
-            chunk_data_ref,
+            result,
         );
 
-        // Spawn objects (if any loaded successfully).
-        if let Some(asset) = chunk_objects_assets.get(&pending.objects_handle) {
+        if let Some(asset) = chunk_objects_assets.get(&computing.objects_handle) {
             spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, &asset.0);
         }
 
-        state.loaded.insert(chunk);
+        state.loaded.insert(chunk_coord);
     }
 }
 

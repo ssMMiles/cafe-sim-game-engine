@@ -1,6 +1,7 @@
 use avian3d::prelude::*;
 use bevy::{
     asset::LoadState,
+    camera::primitives::Aabb,
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     pbr::ExtendedMaterial,
     prelude::*,
@@ -31,6 +32,156 @@ pub(crate) struct WorldMetaHandle(Handle<WorldMetaAsset>);
 #[derive(Resource)]
 pub struct TerrainRenderAssets {
     pub material: Handle<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+}
+
+/// Data produced by the background mesh-generation task.
+///
+/// All fields are `Send + Sync` so the result can be moved back to the main thread.
+/// Heights for the avian heightfield collider are included here but the collider
+/// itself is constructed on the main thread (physics world is not Send).
+pub struct ChunkComputeResult {
+    pub chunk_x: i32,
+    pub chunk_y: i32,
+    pub lod_meshes: [Mesh; LOD_LEVELS],
+    pub aabb: Aabb,
+    /// Row-major heights for avian `Collider::heightfield`: `hf_heights[lx][ly]`
+    pub hf_heights: Vec<Vec<f32>>,
+}
+
+/// Pure function: compute all LOD meshes and prepare heightfield data for a chunk.
+///
+/// `heights` is a flat `Vec<f32>` of length `chunk_size * chunk_size`, indexed as
+/// `heights[lx * chunk_size + ly]` for local tile `(lx, ly)`. The chunk covers
+/// global tiles `[start_x .. start_x + chunk_size)` × `[start_y .. start_y + chunk_size)`.
+///
+/// This function is designed to run off the main thread (no Bevy world access).
+pub fn compute_chunk_meshes(
+    heights: Vec<f32>,
+    chunk_x: i32,
+    chunk_y: i32,
+    tile_size: (f32, f32),
+) -> ChunkComputeResult {
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let start_x = chunk_x * cs;
+    let start_y = chunk_y * cs;
+
+    // Closure that maps global tile coords back to the local heights array.
+    // Clamps to chunk boundaries so generate_lod_mesh edge-sample behaviour is preserved.
+    let get_height = |gx: i32, gy: i32| -> f32 {
+        let lx = (gx - start_x).clamp(0, cs) as usize;
+        let ly = (gy - start_y).clamp(0, cs) as usize;
+        heights[lx * CHUNK_SIZE + ly]
+    };
+
+    let mut aabb_out = None;
+    let lod_meshes: [Mesh; LOD_LEVELS] = std::array::from_fn(|lod| {
+        let (mesh, aabb) = generate_lod_mesh(
+            &get_height,
+            start_x,
+            start_y,
+            CHUNK_SIZE,
+            CHUNK_SIZE,
+            tile_size,
+            lod,
+        );
+        if lod == 0 {
+            aabb_out = Some(aabb);
+        }
+        mesh
+    });
+
+    // Build the 2-D height array required by avian's `Collider::heightfield`.
+    let hf_heights: Vec<Vec<f32>> = (0..CHUNK_SIZE)
+        .map(|lx| (0..CHUNK_SIZE).map(|ly| heights[lx * CHUNK_SIZE + ly]).collect())
+        .collect();
+
+    ChunkComputeResult {
+        chunk_x,
+        chunk_y,
+        lod_meshes,
+        aabb: aabb_out.unwrap(),
+        hf_heights,
+    }
+}
+
+/// Spawn a terrain chunk entity from pre-computed mesh data.
+///
+/// Called on the main thread after background mesh generation completes.
+/// Inserts the meshes into `Assets<Mesh>`, builds the avian heightfield collider,
+/// and registers the entity in `TerrainChunkRegistry`.
+pub fn spawn_chunk_from_result(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    chunk_registry: &mut TerrainChunkRegistry,
+    render_assets: &TerrainRenderAssets,
+    result: ChunkComputeResult,
+) -> Entity {
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let start_x = result.chunk_x * cs;
+    let start_y = result.chunk_y * cs;
+
+    let offset = Vec3::new(
+        start_x as f32 * TILE_SIZE.0,
+        0.0,
+        start_y as f32 * TILE_SIZE.1,
+    );
+
+    let lod_mesh_handles: [Handle<Mesh>; LOD_LEVELS] =
+        result.lod_meshes.map(|m| meshes.add(m));
+
+    let physical_width = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
+    let physical_depth = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.1;
+    let hf_collider = Collider::heightfield(
+        result.hf_heights,
+        Vec3::new(physical_width, 1.0, physical_depth),
+    );
+    let hf_local_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
+
+    let entity = commands
+        .spawn((
+            GameEntity,
+            Mesh3d(lod_mesh_handles[0].clone()),
+            MeshMaterial3d(render_assets.material.clone()),
+            Transform::from_translation(offset),
+            GlobalTransform::default(),
+            Visibility::Inherited,
+            result.aabb,
+            super::TerrainChunk {
+                chunk_x: result.chunk_x,
+                chunk_y: result.chunk_y,
+                lod_meshes: lod_mesh_handles,
+                current_lod: 0,
+            },
+            RigidBody::Static,
+        ))
+        .id();
+
+    commands.entity(entity).with_child((
+        hf_collider,
+        Transform::from_translation(hf_local_offset),
+        avian3d::debug_render::DebugRender::none(),
+    ));
+
+    chunk_registry
+        .loaded_chunks
+        .insert((result.chunk_x, result.chunk_y), entity);
+
+    entity
+}
+
+/// Extract a flat height array for a chunk from the global `HeightmapData`.
+///
+/// Returns a `Vec<f32>` of length `CHUNK_SIZE * CHUNK_SIZE` indexed as
+/// `heights[lx * CHUNK_SIZE + ly]`, ready to pass to `compute_chunk_meshes`.
+pub fn extract_chunk_heights(heightmap: &HeightmapData, chunk_x: i32, chunk_y: i32) -> Vec<f32> {
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let start_x = chunk_x * cs;
+    let start_y = chunk_y * cs;
+    (0..CHUNK_SIZE)
+        .flat_map(|lx| {
+            (0..CHUNK_SIZE).map(move |ly| heightmap.get_tile(start_x + lx as i32, start_y + ly as i32))
+        })
+        .collect()
 }
 
 /// Two-stage setup system.
@@ -165,7 +316,7 @@ fn make_fresh_metadata(
 
 /// Patch `HeightmapData` with the heights stored in `chunk_data` (pre-scaled form).
 /// Called before generating the chunk mesh so seams are correct.
-fn apply_chunk_to_heightmap(heightmap: &mut HeightmapData, chunk_data: &ChunkData) {
+pub(crate) fn apply_chunk_to_heightmap(heightmap: &mut HeightmapData, chunk_data: &ChunkData) {
     let cs = (CHUNK_SIZE - 1) as i32;
     let start_x = chunk_data.chunk_x * cs;
     let start_y = chunk_data.chunk_y * cs;
@@ -200,107 +351,4 @@ fn apply_chunk_to_heightmap(heightmap: &mut HeightmapData, chunk_data: &ChunkDat
             }
         }
     }
-}
-
-/// Spawn a single terrain chunk entity.
-///
-/// If `chunk_data` is `Some`, first patches `HeightmapData` with its stored heights.
-/// Then generates LOD meshes and an avian heightfield collider from the (now-patched)
-/// `HeightmapData`, and spawns the chunk as a root entity with `GameEntity` marker.
-///
-/// The spawned entity is registered in `TerrainChunkRegistry`.
-pub fn spawn_terrain_chunk(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    chunk_registry: &mut TerrainChunkRegistry,
-    heightmap: &mut HeightmapData,
-    render_assets: &TerrainRenderAssets,
-    chunk_x: i32,
-    chunk_y: i32,
-    chunk_data: Option<&ChunkData>,
-) -> Entity {
-    // Patch heightmap with stored modifications (if any).
-    if let Some(data) = chunk_data {
-        apply_chunk_to_heightmap(heightmap, data);
-    }
-
-    let cs = (CHUNK_SIZE - 1) as i32;
-    let start_x = chunk_x * cs;
-    let start_y = chunk_y * cs;
-
-    // All chunks are the full CHUNK_SIZE — no boundary clamping needed.
-    let chunk_width = CHUNK_SIZE;
-    let chunk_height = CHUNK_SIZE;
-
-    let offset = Vec3::new(
-        start_x as f32 * TILE_SIZE.0,
-        0.0,
-        start_y as f32 * TILE_SIZE.1,
-    );
-
-    // Generate LOD meshes. HeightmapData heights are pre-scaled, so the closure
-    // returns world units directly.
-    let mut chunk_aabb = None;
-    let lod_meshes: [Handle<Mesh>; LOD_LEVELS] = std::array::from_fn(|lod| {
-        let (mesh, aabb) = generate_lod_mesh(
-            |tx, ty| heightmap.get_tile(tx, ty),
-            start_x,
-            start_y,
-            chunk_width,
-            chunk_height,
-            TILE_SIZE,
-            lod,
-        );
-        if lod == 0 {
-            chunk_aabb = Some(aabb);
-        }
-        meshes.add(mesh)
-    });
-    let aabb = chunk_aabb.unwrap();
-
-    // Build avian heightfield collider.
-    let hf_heights: Vec<Vec<f32>> = (0..chunk_width)
-        .map(|lx| {
-            (0..chunk_height)
-                .map(|ly| heightmap.get_tile(start_x + lx as i32, start_y + ly as i32))
-                .collect()
-        })
-        .collect();
-
-    let physical_width = (chunk_width - 1) as f32 * TILE_SIZE.0;
-    let physical_depth = (chunk_height - 1) as f32 * TILE_SIZE.1;
-    let hf_collider =
-        Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
-    let hf_local_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
-
-    let entity = commands
-        .spawn((
-            GameEntity,
-            Mesh3d(lod_meshes[0].clone()),
-            MeshMaterial3d(render_assets.material.clone()),
-            Transform::from_translation(offset),
-            GlobalTransform::default(),
-            Visibility::Inherited,
-            aabb,
-            super::TerrainChunk {
-                chunk_x,
-                chunk_y,
-                lod_meshes,
-                current_lod: 0,
-            },
-            RigidBody::Static,
-        ))
-        .id();
-
-    commands.entity(entity).with_child((
-        hf_collider,
-        Transform::from_translation(hf_local_offset),
-        avian3d::debug_render::DebugRender::none(),
-    ));
-
-    chunk_registry
-        .loaded_chunks
-        .insert((chunk_x, chunk_y), entity);
-
-    entity
 }

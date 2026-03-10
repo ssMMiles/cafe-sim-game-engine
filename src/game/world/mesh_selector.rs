@@ -1,6 +1,5 @@
-use std::fs;
-
 use bevy::{
+    asset::{AssetLoader, LoadContext, io::Reader},
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
 };
@@ -31,6 +30,55 @@ pub struct MeshSelectorOpen(pub bool);
 #[derive(Resource, Default)]
 pub struct MeshSelectorIndex(pub usize);
 
+// ── Manifest asset ────────────────────────────────────────────────────────────
+
+/// Parsed contents of `meshes/manifest.manifest`.
+#[derive(Asset, TypePath)]
+pub struct MeshManifestAsset(pub Vec<MeshEntry>);
+
+/// Handle kept alive until the manifest has been consumed.
+#[derive(Resource)]
+pub struct MeshManifestHandle(pub Handle<MeshManifestAsset>);
+
+/// Asset loader for `.manifest` files — expects pipe-delimited `name|asset_path` lines.
+#[derive(Default, TypePath)]
+pub struct MeshManifestLoader;
+
+impl AssetLoader for MeshManifestLoader {
+    type Asset = MeshManifestAsset;
+    type Settings = ();
+    type Error = std::io::Error;
+
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &Self::Settings,
+        _load_context: &mut LoadContext<'_>,
+    ) -> Result<Self::Asset, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        let text = String::from_utf8_lossy(&bytes);
+
+        let entries = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|line| {
+                let (name, path) = line.split_once('|')?;
+                Some(MeshEntry {
+                    name: name.to_string(),
+                    asset_path: path.to_string(),
+                })
+            })
+            .collect();
+
+        Ok(MeshManifestAsset(entries))
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["manifest"]
+    }
+}
+
 // ── Components ────────────────────────────────────────────────────────────────
 
 /// Marker on the root UI node of the panel.
@@ -55,56 +103,40 @@ pub fn mesh_selector_open(selector: Res<MeshSelectorOpen>) -> bool {
 
 // ── Systems ───────────────────────────────────────────────────────────────────
 
-/// Walks `assets/meshes/` on startup and builds the `MeshCatalog`.
-pub fn discover_meshes(mut catalog: ResMut<MeshCatalog>) {
-    let meshes_dir = std::path::Path::new("assets/meshes");
-    let Ok(top_entries) = fs::read_dir(meshes_dir) else {
-        warn!("Could not read assets/meshes/ — mesh catalog will be empty");
-        return;
-    };
+/// Kicks off loading of `meshes/manifest.manifest` via the asset server.
+pub fn request_mesh_manifest(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let handle = asset_server.load::<MeshManifestAsset>("meshes/manifest.manifest");
+    commands.insert_resource(MeshManifestHandle(handle));
+}
 
-    let mut entries: Vec<MeshEntry> = Vec::new();
+/// Polls each frame until the manifest asset is loaded, then populates `MeshCatalog`.
+pub fn populate_mesh_catalog(
+    mut commands: Commands,
+    handle: Option<Res<MeshManifestHandle>>,
+    manifests: Res<Assets<MeshManifestAsset>>,
+    asset_server: Res<AssetServer>,
+    mut catalog: ResMut<MeshCatalog>,
+) {
+    let Some(handle) = handle else { return };
 
-    for dir_entry in top_entries.flatten() {
-        let dir_path = dir_entry.path();
-        if !dir_path.is_dir() {
-            continue;
-        }
-
-        let dir_name = dir_path.file_name().unwrap().to_string_lossy().to_string();
-
-        // Skip the player-only model directory
-        if dir_name == "character" {
-            continue;
-        }
-
-        let Ok(files) = fs::read_dir(&dir_path) else {
-            continue;
-        };
-
-        for file_entry in files.flatten() {
-            let file_path = file_entry.path();
-            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext != "gltf" && ext != "glb" {
-                continue;
-            }
-
-            let file_name = file_path.file_name().unwrap().to_string_lossy().to_string();
-            let asset_path = format!("meshes/{dir_name}/{file_name}#Scene0");
-
-            entries.push(MeshEntry {
-                name: dir_name.clone(),
-                asset_path,
-            });
-
-            // Only use the first GLTF/GLB found per directory
-            break;
-        }
+    if !catalog.entries.is_empty() {
+        return; // already populated
     }
 
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    info!("Discovered {} meshes for placement", entries.len());
-    catalog.entries = entries;
+    match asset_server.load_state(&handle.0) {
+        bevy::asset::LoadState::Loaded => {
+            if let Some(manifest) = manifests.get(&handle.0) {
+                catalog.entries = manifest.0.clone();
+                info!("Loaded {} meshes from manifest", catalog.entries.len());
+                commands.remove_resource::<MeshManifestHandle>();
+            }
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            warn!("Failed to load mesh manifest: {err:?} — catalog will be empty");
+            commands.remove_resource::<MeshManifestHandle>();
+        }
+        _ => {}
+    }
 }
 
 /// Tab toggles the panel while in edit mode. Leaving edit mode force-closes it.

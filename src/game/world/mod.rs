@@ -29,8 +29,9 @@ use edit_mode::{
     toggle_edit_mode, update_placement_preview,
 };
 use mesh_selector::{
-    MeshCatalog, MeshSelectorIndex, cleanup_mesh_selector_panel, discover_meshes,
-    mesh_selector_open, scroll_mesh_selector, setup_mesh_selector_panel, toggle_mesh_selector,
+    MeshCatalog, MeshManifestAsset, MeshManifestLoader, MeshSelectorIndex,
+    cleanup_mesh_selector_panel, mesh_selector_open, populate_mesh_catalog, request_mesh_manifest,
+    scroll_mesh_selector, setup_mesh_selector_panel, toggle_mesh_selector,
 };
 
 use chunk_assets::{
@@ -40,7 +41,8 @@ use chunk_assets::{
 pub use mesh_selector::MeshSelectorOpen;
 use objects::{PlacedObjectRegistry, PlacementConfig, delete_hovered_object, save_placed_objects};
 use streaming::{
-    ChunkStreamingConfig, StreamingState, process_pending_chunks, update_streaming_ring,
+    ChunkStreamingConfig, StreamingState, finalize_computed_chunks, launch_chunk_tasks,
+    update_streaming_ring,
 };
 
 pub use sky::setup_sky;
@@ -79,7 +81,7 @@ impl Plugin for WorldPlugin {
         app.init_resource::<StreamingState>();
         app.add_systems(
             Update,
-            (update_streaming_ring, process_pending_chunks)
+            (update_streaming_ring, launch_chunk_tasks, finalize_computed_chunks)
                 .chain()
                 .in_set(terrain::TerrainSet::Update),
         );
@@ -109,10 +111,14 @@ impl Plugin for WorldPlugin {
         app.init_resource::<PlacedObjectRegistry>();
         app.init_resource::<PlacementConfig>();
 
+        app.init_asset::<MeshManifestAsset>();
+        app.init_asset_loader::<MeshManifestLoader>();
+
         app.init_resource::<MeshCatalog>();
         app.init_resource::<MeshSelectorOpen>();
         app.init_resource::<MeshSelectorIndex>();
-        app.add_systems(Startup, discover_meshes);
+        app.add_systems(Startup, request_mesh_manifest);
+        app.add_systems(Update, populate_mesh_catalog.in_set(WorldSet::InGame));
         app.add_systems(Update, toggle_mesh_selector.in_set(WorldSet::InGame));
         app.add_systems(Update, setup_mesh_selector_panel.in_set(WorldSet::InGame));
         app.add_systems(Update, cleanup_mesh_selector_panel.in_set(WorldSet::InGame));
