@@ -26,7 +26,7 @@ use bevy::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::game::simulation::Player;
+use crate::game::{profiling::SystemTimings, simulation::Player};
 
 use super::{
     chunk_assets::{ChunkDataAsset, ChunkObjectsAsset},
@@ -60,6 +60,11 @@ pub struct ChunkStreamingConfig {
     /// Spreading finalizations avoids the frame-time spike from building multiple
     /// avian heightfield colliders + registering mesh assets in a single frame.
     pub max_spawns_per_frame: usize,
+    /// Maximum number of new asset loads to issue per frame.
+    /// Prevents a burst of asset_server.load() calls when the player first enters
+    /// the world (or teleports) from causing a multi-ms lock-contention spike.
+    /// At 9/frame with a 4-radius ring (81 chunks), the full ring fills in ~9 frames.
+    pub max_new_loads_per_frame: usize,
 }
 
 impl Default for ChunkStreamingConfig {
@@ -68,6 +73,7 @@ impl Default for ChunkStreamingConfig {
             load_radius: 4,
             unload_radius: 6,
             max_spawns_per_frame: 2,
+            max_new_loads_per_frame: 9,
         }
     }
 }
@@ -117,6 +123,7 @@ pub fn update_streaming_ring(
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(Entity, &PlacedObject)>,
     mut heightmap: Option<ResMut<HeightmapData>>,
+    mut timings: ResMut<SystemTimings>,
 ) {
     // All three are inserted together by create_terrain; wait until they're available.
     let Some(terrain_world) = terrain_world else {
@@ -129,6 +136,8 @@ pub fn update_streaming_ring(
     let Ok(player_transform) = player_query.single() else {
         return;
     };
+
+    let t0 = std::time::Instant::now();
 
     let player_pos = player_transform.translation;
     let (player_cx, player_cy) = world_pos_to_chunk(player_pos.x, player_pos.z);
@@ -170,48 +179,62 @@ pub fn update_streaming_ring(
     // ── Request newly in-range chunks ─────────────────────────────────────────
     let r = config.load_radius as i32;
 
+    // Collect candidates and sort closest-first so the player sees nearby ground
+    // before distant chunks, and so the per-frame budget always prioritises them.
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
     for dy in -r..=r {
         for dx in -r..=r {
             let cx = player_cx + dx;
             let cy = player_cy + dy;
-
-            if state.loaded.contains(&(cx, cy))
-                || state.pending.contains_key(&(cx, cy))
-                || state.computing.contains_key(&(cx, cy))
+            if !state.loaded.contains(&(cx, cy))
+                && !state.pending.contains_key(&(cx, cy))
+                && !state.computing.contains_key(&(cx, cy))
             {
-                continue;
+                candidates.push((cx, cy));
             }
-
-            // Does this chunk have saved terrain data?
-            let has_terrain_file = metadata
-                .chunk_index
-                .iter()
-                .find(|e| e.chunk_x == cx && e.chunk_y == cy)
-                .map(|e| e.state != ChunkState::Unmodified)
-                .unwrap_or(false);
-
-            let terrain_handle = has_terrain_file.then(|| {
-                asset_server.load::<ChunkDataAsset>(format!(
-                    "world://worlds/{}/chunks/chunk_{}_{}.terrain",
-                    metadata.world_id, cx, cy
-                ))
-            });
-
-            // Always issue the objects load. Failed (404) → treated as empty.
-            let objects_handle = asset_server.load::<ChunkObjectsAsset>(format!(
-                "world://worlds/{}/chunks/chunk_{}_{}.objects",
-                metadata.world_id, cx, cy
-            ));
-
-            state.pending.insert(
-                (cx, cy),
-                PendingChunk {
-                    terrain_handle,
-                    objects_handle,
-                },
-            );
         }
     }
+    candidates.sort_by_key(|&(cx, cy)| chebyshev(cx, cy, player_cx, player_cy));
+
+    for (cx, cy) in candidates.into_iter().take(config.max_new_loads_per_frame) {
+        // Does this chunk have saved terrain data? O(1) map lookup.
+        let has_terrain_file = terrain_world
+            .chunk_state_map
+            .get(&(cx, cy))
+            .map(|s| *s != ChunkState::Unmodified)
+            .unwrap_or(false);
+
+        let terrain_handle = has_terrain_file.then(|| {
+            asset_server.load::<ChunkDataAsset>(format!(
+                "world://worlds/{}/chunks/chunk_{}_{}.terrain",
+                metadata.world_id, cx, cy
+            ))
+        });
+
+        // Always issue the objects load. Failed (404) → treated as empty.
+        let objects_handle = asset_server.load::<ChunkObjectsAsset>(format!(
+            "world://worlds/{}/chunks/chunk_{}_{}.objects",
+            metadata.world_id, cx, cy
+        ));
+
+        state.pending.insert(
+            (cx, cy),
+            PendingChunk {
+                terrain_handle,
+                objects_handle,
+            },
+        );
+    }
+
+    let elapsed = t0.elapsed().as_secs_f32();
+    timings.ring_sum_secs += elapsed;
+    timings.ring_calls += 1;
+    if elapsed > timings.ring_max_secs {
+        timings.ring_max_secs = elapsed;
+    }
+    timings.chunks_loaded = state.loaded.len();
+    timings.chunks_computing = state.computing.len();
+    timings.chunks_pending = state.pending.len();
 }
 
 /// Checks pending chunk asset loads and, for each fully-loaded chunk, patches
@@ -340,10 +363,13 @@ pub fn finalize_computed_chunks(
     render_assets: Option<Res<TerrainRenderAssets>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     asset_server: Res<AssetServer>,
+    mut timings: ResMut<SystemTimings>,
 ) {
     let (Some(mut chunk_registry), Some(render_assets)) = (chunk_registry, render_assets) else {
         return;
     };
+
+    let t0 = std::time::Instant::now();
 
     let budget = config.max_spawns_per_frame;
     let mut ready_chunks: Vec<(i32, i32)> = Vec::new();
@@ -383,6 +409,13 @@ pub fn finalize_computed_chunks(
         }
 
         state.loaded.insert(chunk_coord);
+    }
+
+    let elapsed = t0.elapsed().as_secs_f32();
+    timings.finalize_sum_secs += elapsed;
+    timings.finalize_calls += 1;
+    if elapsed > timings.finalize_max_secs {
+        timings.finalize_max_secs = elapsed;
     }
 }
 

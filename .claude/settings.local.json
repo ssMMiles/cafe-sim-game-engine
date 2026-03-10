@@ -29,7 +29,9 @@
       "WebFetch(domain:avian.rs)",
       "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo fetch 2>&1)",
       "Bash(find:*)",
-      "Bash(grep doctest:*)"
+      "Bash(grep doctest:*)",
+      "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo check 2>&1 | grep \"error\\\\[\" | head -5 && git stash pop)",
+      "Bash(tail:*)"
     ],
     "deny": [],
     "ask": [],

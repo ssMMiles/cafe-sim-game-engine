@@ -4,7 +4,6 @@ use bevy::prelude::*;
 pub mod slider_constants {
     pub const TRACK_WIDTH: f32 = 300.0;
     pub const HANDLE_WIDTH: f32 = 20.0;
-    pub const TRACK_HEIGHT: f32 = 20.0;
 }
 
 // Setting value ranges
@@ -22,7 +21,9 @@ pub trait SliderSetting {
     fn set_value(settings: &mut UserSettings, value: f32);
     fn get_range() -> (f32, f32);
     fn get_label() -> &'static str;
-    fn get_format() -> &'static str;
+    fn format_value(value: f32) -> String {
+        format!("{value:.1}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,14 +92,14 @@ impl Default for UserSettings {
             crosshair_visible: false,
             movement_mode: MovementMode::default(),
             mouse_sensitivity: 0.002,
-            movement_speed: 0.1,
+            movement_speed: 0.5,
             edit_mode: false,
             outline_visible: false,
-            camera_view: CameraView::ThirdPerson,
+            camera_view: CameraView::FirstPerson,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
             edge_depth_sensitivity: 2.0,
-            edge_normal_sensitivity: 1.5,
+            edge_normal_sensitivity: 0.1,
             terrain_edit_mode: false,
             brush_radius: 5.0,
             physics_debug: false,
@@ -249,8 +250,8 @@ impl SliderSetting for MouseSensitivitySetting {
         "Mouse Sensitivity"
     }
 
-    fn get_format() -> &'static str {
-        "{:.3}"
+    fn format_value(value: f32) -> String {
+        format!("{value:.3}")
     }
 }
 
@@ -271,8 +272,8 @@ impl SliderSetting for MovementSpeedSetting {
         "Movement Speed"
     }
 
-    fn get_format() -> &'static str {
-        "{:.2}"
+    fn format_value(value: f32) -> String {
+        format!("{value:.2}")
     }
 }
 
@@ -295,10 +296,6 @@ impl SliderSetting for EdgeDepthSensitivitySetting {
     fn get_label() -> &'static str {
         "Edge Depth Sensitivity"
     }
-
-    fn get_format() -> &'static str {
-        "{:.1}"
-    }
 }
 
 #[derive(Component)]
@@ -319,9 +316,5 @@ impl SliderSetting for EdgeNormalSensitivitySetting {
 
     fn get_label() -> &'static str {
         "Edge Normal Sensitivity"
-    }
-
-    fn get_format() -> &'static str {
-        "{:.1}"
     }
 }

@@ -11,6 +11,7 @@ use bevy::{
 mod game;
 mod menu;
 mod settings;
+mod ui;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -51,6 +52,7 @@ pub fn run() {
         },
     )
     .add_plugins(settings::SettingsPlugin)
+    .add_plugins(ui::UiPlugin)
     .add_plugins(menu::MenuPlugin)
     .add_plugins(game::SimulationPlugin)
     .add_systems(Startup, initialize)

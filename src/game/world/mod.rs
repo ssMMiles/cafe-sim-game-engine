@@ -1,6 +1,5 @@
 use bevy::{
     light::{CascadeShadowConfigBuilder, NotShadowCaster, VolumetricLight},
-    pbr::ExtendedMaterial,
     prelude::*,
 };
 
@@ -15,7 +14,6 @@ pub mod terrain;
 use crate::{
     game::{
         GameEntity,
-        gfx::toon_material::ToonMaterial,
         world::{
             sky::{SkyDomeMaterial, sync_sky_dome},
             terrain::bootstrap::TerrainSetupMarker,
@@ -86,7 +84,7 @@ impl Plugin for WorldPlugin {
                 .in_set(terrain::TerrainSet::Update),
         );
 
-        app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::InGame));
+        app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::Running));
         app.add_systems(
             Update,
             handle_edit_mode_click
@@ -142,8 +140,6 @@ pub fn setup(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
-    asset_server: &Res<AssetServer>,
-    toon_materials: &mut ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
 ) {
     log::info!("Setting up the game world");
 
@@ -151,8 +147,8 @@ pub fn setup(
 
     // Add ambient light for diffusion
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.9, 0.9, 1.0), // Very dim, slightly blue for nighttime
-        brightness: 650.0,                 // Very low ambient for dark nighttime
+        color: Color::srgb(0.9, 0.9, 1.0),
+        brightness: 80.0, // Low fill light; main illumination comes from the directional sun
         ..default()
     });
 

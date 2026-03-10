@@ -1,6 +1,11 @@
 use std::collections::HashSet;
 
-use bevy::{camera::primitives::Aabb, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*};
+use bevy::{
+    camera::primitives::Aabb,
+    light::NotShadowCaster,
+    picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
+    prelude::*,
+};
 
 use crate::game::{
     gfx::camera::PlayerCamera,
@@ -56,19 +61,16 @@ pub fn adjust_brush_size(
 }
 
 /// Casts a ray and writes the first terrain hit into `TerrainBrushHit`.
-/// Must run before `apply_terrain_brush` each frame.
+/// Always runs when terrain edit mode is active so the preview circle is visible
+/// even before a mouse button is pressed. Must run before `apply_terrain_brush`.
 pub fn raycast_terrain_hit(
-    mouse_input: Res<ButtonInput<MouseButton>>,
     settings: Res<UserSettings>,
     camera_query: Query<&Transform, With<PlayerCamera>>,
     terrain_chunk_filter: Query<(), With<TerrainChunk>>,
     mut raycast: MeshRayCast,
     mut brush_hit: ResMut<TerrainBrushHit>,
 ) {
-    let raise = mouse_input.pressed(MouseButton::Left);
-    let lower = mouse_input.pressed(MouseButton::Right);
-
-    if !settings.terrain_edit_mode || (!raise && !lower) {
+    if !settings.terrain_edit_mode {
         brush_hit.hit = None;
         return;
     }
@@ -83,14 +85,58 @@ pub fn raycast_terrain_hit(
         Dir3::new(camera_transform.forward().as_vec3()).unwrap(),
     );
 
-    let hits = raycast.cast_ray(ray, &Default::default());
-    brush_hit.hit = hits.iter().find_map(|(entity, hit_data)| {
-        if terrain_chunk_filter.contains(*entity) {
-            Some(hit_data.point)
-        } else {
-            None
+    let filter = |entity: Entity| terrain_chunk_filter.contains(entity);
+    let hits = raycast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&filter));
+    brush_hit.hit = hits.first().map(|(_, hit_data)| hit_data.point);
+}
+
+/// Marker for the brush preview disc entity.
+#[derive(Component)]
+pub struct BrushPreviewMarker;
+
+/// Lazily spawns a semi-transparent disc entity and keeps it positioned at the
+/// terrain hit point each frame. Hides it when terrain edit mode is off.
+pub fn update_brush_preview(
+    settings: Res<UserSettings>,
+    brush_hit: Res<TerrainBrushHit>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut preview_query: Query<(&mut Transform, &mut Visibility), With<BrushPreviewMarker>>,
+) {
+    // Lazy spawn on first call.
+    if preview_query.is_empty() {
+        commands.spawn((
+            Mesh3d(meshes.add(Circle::new(1.0))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(0.4, 0.85, 1.0, 0.35),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })),
+            // Circle lies in XY; rotate to lie flat on XZ (horizontal).
+            Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            Visibility::Hidden,
+            NotShadowCaster,
+            BrushPreviewMarker,
+        ));
+        return;
+    }
+
+    let Ok((mut transform, mut visibility)) = preview_query.single_mut() else { return };
+
+    match brush_hit.hit.filter(|_| settings.terrain_edit_mode) {
+        Some(hit) => {
+            *visibility = Visibility::Visible;
+            transform.translation = hit + Vec3::Y * 0.05;
+            transform.scale = Vec3::splat(settings.brush_radius);
         }
-    });
+        None => {
+            *visibility = Visibility::Hidden;
+        }
+    }
 }
 
 /// Modifies heightmap heights and regenerates LOD0 chunk meshes based on the hit
@@ -100,7 +146,7 @@ pub fn apply_terrain_brush(
     mouse_input: Res<ButtonInput<MouseButton>>,
     settings: Res<UserSettings>,
     mut brush_hit: ResMut<TerrainBrushHit>,
-    mut heightmap: Option<ResMut<HeightmapData>>,
+    heightmap: Option<ResMut<HeightmapData>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut chunk_query: Query<(&TerrainChunk, &mut Aabb)>,
     mut registry: Option<ResMut<TerrainChunkRegistry>>,
@@ -172,37 +218,51 @@ pub fn apply_terrain_brush(
     // LOD1–3 are deferred to `finalize_terrain_lod` (runs on brush release) since
     // those levels are only visible at 500m–4km and not worth the per-frame cost.
     let heightmap = heightmap.into_inner();
+    let mut registry = registry.as_deref_mut();
 
     let cs = (CHUNK_SIZE - 1) as i32;
     for &(cx, cy) in &affected {
         let start_x = cx * cs;
         let start_y = cy * cs;
 
-        for (chunk, mut aabb) in chunk_query.iter_mut() {
-            if chunk.chunk_x != cx || chunk.chunk_y != cy {
-                continue;
+        // Pre-extract this chunk's heights into a flat array for cache-friendly access.
+        // generate_lod_mesh's normal sampling always clamps to [0, CHUNK_SIZE-1] local
+        // coords (via saturating_sub / .min(chunk_width-1)), so no out-of-bounds reads.
+        let mut heights = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE);
+        for ly in 0..CHUNK_SIZE {
+            let gy = start_y + ly as i32;
+            for lx in 0..CHUNK_SIZE {
+                heights.push(heightmap.get_tile(start_x + lx as i32, gy));
             }
+        }
 
-            let (new_mesh, new_aabb) = generate_lod_mesh(
-                |tx, ty| heightmap.get_tile(tx, ty),
-                start_x,
-                start_y,
-                CHUNK_SIZE,
-                CHUNK_SIZE,
-                TILE_SIZE,
-                0, // LOD0 only
-            );
-            if let Some(m) = meshes.get_mut(&chunk.lod_meshes[0]) {
-                *m = new_mesh;
+        // O(1) registry lookup instead of O(n) linear chunk scan.
+        if let Some(ref mut reg) = registry {
+            if let Some(&entity) = reg.loaded_chunks.get(&(cx, cy)) {
+                if let Ok((chunk, mut aabb)) = chunk_query.get_mut(entity) {
+                    let (new_mesh, new_aabb) = generate_lod_mesh(
+                        |gx, gy| {
+                            let lx = (gx - start_x) as usize;
+                            let ly = (gy - start_y) as usize;
+                            heights[ly * CHUNK_SIZE + lx]
+                        },
+                        start_x,
+                        start_y,
+                        CHUNK_SIZE,
+                        CHUNK_SIZE,
+                        TILE_SIZE,
+                        0, // LOD0 only
+                    );
+                    if let Some(m) = meshes.get_mut(&chunk.lod_meshes[0]) {
+                        *m = new_mesh;
+                    }
+                    *aabb = new_aabb;
+                }
             }
-            *aabb = new_aabb;
-            break;
+            reg.dirty_chunks.insert((cx, cy));
         }
 
         brush_hit.pending_full_lod.insert((cx, cy));
-        if let Some(ref mut reg) = registry {
-            reg.dirty_chunks.insert((cx, cy));
-        }
     }
     brush_hit.was_painting = true;
 }
@@ -214,7 +274,8 @@ pub fn finalize_terrain_lod(
     mut brush_hit: ResMut<TerrainBrushHit>,
     heightmap: Option<Res<HeightmapData>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut chunk_query: Query<&TerrainChunk>,
+    chunk_query: Query<&TerrainChunk>,
+    registry: Option<Res<TerrainChunkRegistry>>,
 ) {
     let painting = mouse_input.pressed(MouseButton::Left) || mouse_input.pressed(MouseButton::Right);
 
@@ -228,6 +289,7 @@ pub fn finalize_terrain_lod(
     brush_hit.was_painting = false;
 
     let Some(heightmap) = heightmap else { return };
+    let Some(registry) = registry else { return };
 
     let cs = (CHUNK_SIZE - 1) as i32;
     let pending: Vec<(i32, i32)> = brush_hit.pending_full_lod.drain().collect();
@@ -236,26 +298,35 @@ pub fn finalize_terrain_lod(
         let start_x = cx * cs;
         let start_y = cy * cs;
 
-        for chunk in chunk_query.iter_mut() {
-            if chunk.chunk_x != cx || chunk.chunk_y != cy {
-                continue;
-            }
+        let Some(&entity) = registry.loaded_chunks.get(&(cx, cy)) else { continue };
+        let Ok(chunk) = chunk_query.get(entity) else { continue };
 
-            for lod in 1..LOD_LEVELS {
-                let (new_mesh, _) = generate_lod_mesh(
-                    |tx, ty| heightmap.get_tile(tx, ty),
-                    start_x,
-                    start_y,
-                    CHUNK_SIZE,
-                    CHUNK_SIZE,
-                    TILE_SIZE,
-                    lod,
-                );
-                if let Some(m) = meshes.get_mut(&chunk.lod_meshes[lod]) {
-                    *m = new_mesh;
-                }
+        // Pre-extract heights to flat array for cache-friendly sequential access.
+        let mut heights = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE);
+        for ly in 0..CHUNK_SIZE {
+            let gy = start_y + ly as i32;
+            for lx in 0..CHUNK_SIZE {
+                heights.push(heightmap.get_tile(start_x + lx as i32, gy));
             }
-            break;
+        }
+
+        for lod in 1..LOD_LEVELS {
+            let (new_mesh, _) = generate_lod_mesh(
+                |gx, gy| {
+                    let lx = (gx - start_x) as usize;
+                    let ly = (gy - start_y) as usize;
+                    heights[ly * CHUNK_SIZE + lx]
+                },
+                start_x,
+                start_y,
+                CHUNK_SIZE,
+                CHUNK_SIZE,
+                TILE_SIZE,
+                lod,
+            );
+            if let Some(m) = meshes.get_mut(&chunk.lod_meshes[lod]) {
+                *m = new_mesh;
+            }
         }
     }
 }

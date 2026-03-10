@@ -1,6 +1,5 @@
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    pbr::ExtendedMaterial,
     prelude::*,
 };
 
@@ -16,9 +15,9 @@ use crate::{
 mod animation;
 mod gfx;
 mod gltf_loading;
-mod icons;
 pub mod pause_menu;
 pub mod physics;
+mod profiling;
 mod simulation;
 mod ui_displays;
 pub mod world;
@@ -27,12 +26,12 @@ use crate::settings::{
     EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
     MovementSpeedSetting,
 };
+use profiling::PerfMonitorPlugin;
 use animation::{
     init_animation_player, pause_animations, resume_animations, setup_character_animations,
     update_character_animation,
 };
 use gltf_loading::{InteractableClicked, check_interactions, detect_interactable_clicks};
-use icons::SvgTextureCache;
 use pause_menu::{
     PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
     handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
@@ -42,8 +41,8 @@ use physics::character_physics;
 use simulation::{exit, setup};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
-    setup_position_display, update_dynamic_backgrounds, update_fps_display,
-    update_interaction_info_display, update_keybinds_display, update_position_display,
+    setup_position_display, update_fps_display, update_interaction_info_display,
+    update_keybinds_display, update_position_display,
 };
 
 pub struct SimulationPlugin;
@@ -57,6 +56,7 @@ pub enum SimulationState {
 
 #[derive(Resource, Debug)]
 pub struct SimulationConfig {
+    #[allow(dead_code)]
     pub speed: f32,
 }
 
@@ -87,6 +87,7 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(WorldPlugin);
         app.add_plugins(GfxPlugin);
+        app.add_plugins(PerfMonitorPlugin);
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_message::<InteractableClicked>();
@@ -222,16 +223,9 @@ impl Plugin for SimulationPlugin {
                 .run_if(in_state(PauseMenuState::Settings)),
         );
 
-        // ── FixedUpdate ───────────────────────────────────────────────────
-        app.add_systems(
-            FixedUpdate,
-            update_dynamic_backgrounds.in_set(SimSet::Running),
-        );
-
         // ── Resources / States ────────────────────────────────────────────
         app.init_state::<SimulationState>();
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
-        app.init_resource::<SvgTextureCache>();
     }
 }

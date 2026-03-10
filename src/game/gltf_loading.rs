@@ -2,7 +2,10 @@ use crate::game::GameEntity;
 
 use super::gfx::camera::PlayerCamera;
 use bevy::{
-    log, picking::mesh_picking::ray_cast::MeshRayCast, prelude::*, scene::SceneInstanceReady,
+    log,
+    picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
+    prelude::*,
+    scene::SceneInstanceReady,
 };
 
 #[derive(Component, Clone)]
@@ -165,6 +168,7 @@ pub fn check_interactions(
     >,
     marked_query: Query<Entity, With<HoveredOver>>,
     mut raycast: MeshRayCast,
+    interactable_filter: Query<(), With<Interactable>>,
 ) {
     let mut current_interaction: Option<Entity> = None;
 
@@ -175,8 +179,9 @@ pub fn check_interactions(
         // Create ray from camera
         let ray = Ray3d::new(camera_pos, Dir3::new(camera_forward).unwrap());
 
-        // Cast ray using Bevy's proper mesh raycasting
-        let hits = raycast.cast_ray(ray, &Default::default());
+        // Cast ray using Bevy's proper mesh raycasting — filter to interactable meshes only
+        let filter = |entity: Entity| interactable_filter.contains(entity);
+        let hits = raycast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&filter));
 
         let mut closest_hit: Option<(Entity, f32, String)> = None;
 
@@ -273,7 +278,6 @@ pub fn check_interactions(
 #[derive(Message)]
 pub struct InteractableClicked {
     pub entity: Entity,
-    pub interactable: Interactable,
 }
 
 pub fn detect_interactable_clicks(
@@ -286,10 +290,7 @@ pub fn detect_interactable_clicks(
             log::info!("Clicked on interactable: {}", interactable.name);
 
             // Emit event
-            click_events.write(InteractableClicked {
-                entity,
-                interactable: interactable.clone(),
-            });
+            click_events.write(InteractableClicked { entity });
         }
     }
 }

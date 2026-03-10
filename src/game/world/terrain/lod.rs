@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::game::gfx::camera::PlayerCamera;
+use crate::game::{gfx::camera::PlayerCamera, profiling::SystemTimings};
 
 use super::{TerrainChunk, constants::LOD_DISTANCES_SQ, mesh::LOD_LEVELS};
 
@@ -30,6 +30,7 @@ pub fn update_terrain_lod(
         &GlobalTransform,
     )>,
     mut lod_state: ResMut<TerrainLodState>,
+    mut timings: ResMut<SystemTimings>,
 ) {
     let Ok(camera_transform) = camera_query.single() else {
         return;
@@ -41,6 +42,8 @@ pub fn update_terrain_lod(
         return;
     }
     lod_state.last_camera_pos = camera_pos;
+
+    let t0 = std::time::Instant::now();
 
     for (mut chunk, mut mesh3d, aabb, global_transform) in chunk_query.iter_mut() {
         // AABB center is in local space; transform to world space
@@ -68,5 +71,12 @@ pub fn update_terrain_lod(
             mesh3d.0 = chunk.lod_meshes[new_lod].clone();
             chunk.current_lod = new_lod;
         }
+    }
+
+    let elapsed = t0.elapsed().as_secs_f32();
+    timings.lod_sum_secs += elapsed;
+    timings.lod_calls += 1;
+    if elapsed > timings.lod_max_secs {
+        timings.lod_max_secs = elapsed;
     }
 }

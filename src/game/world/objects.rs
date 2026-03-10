@@ -9,7 +9,7 @@ use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Read, Write as IoWrite},
+    io::Write as IoWrite,
     path::{Path, PathBuf},
 };
 
@@ -330,11 +330,6 @@ fn chunk_objects_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
         .join(format!("chunk_{}_{}.objects", cx, cy))
 }
 
-/// Returns the path to the `.objects` file for the given chunk, for existence checks.
-pub fn chunk_objects_file_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
-    chunk_objects_path(world_path, cx, cy)
-}
-
 pub(super) fn save_chunk_objects_file(
     file: &ChunkObjectsFile,
     world_path: &Path,
@@ -408,50 +403,3 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
     Ok(file)
 }
 
-fn load_chunk_objects_file(path: &Path) -> Result<ChunkObjectsFile, StorageError> {
-    let mut f = File::open(path)?;
-
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != CHUNK_OBJECTS_MAGIC {
-        return Err(StorageError::InvalidMagic);
-    }
-
-    let mut version_bytes = [0u8; 4];
-    f.read_exact(&mut version_bytes)?;
-    let version = u32::from_le_bytes(version_bytes);
-    if version != CHUNK_OBJECTS_VERSION {
-        return Err(StorageError::VersionMismatch {
-            expected: CHUNK_OBJECTS_VERSION,
-            found: version,
-        });
-    }
-
-    // Read chunk coords (informational only)
-    let mut coord = [0u8; 4];
-    f.read_exact(&mut coord)?;
-    let _cx = i32::from_le_bytes(coord);
-    f.read_exact(&mut coord)?;
-    let _cy = i32::from_le_bytes(coord);
-
-    let mut len_bytes = [0u8; 4];
-    f.read_exact(&mut len_bytes)?;
-    let data_len = u32::from_le_bytes(len_bytes) as usize;
-
-    let mut data = vec![0u8; data_len];
-    f.read_exact(&mut data)?;
-
-    let mut checksum_bytes = [0u8; 4];
-    f.read_exact(&mut checksum_bytes)?;
-    let stored = u32::from_le_bytes(checksum_bytes);
-    if stored != crc32fast::hash(&data) {
-        return Err(StorageError::ChecksumMismatch);
-    }
-
-    let archived = rkyv::access::<ArchivedChunkObjectsFile, RkyvError>(&data)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-    Ok(file)
-}

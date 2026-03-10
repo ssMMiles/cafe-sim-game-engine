@@ -1,5 +1,5 @@
 use super::objects::{
-    PlacedObject, PlacedObjectRegistry, PlacementConfig, spawn_placed_object, world_pos_to_chunk,
+    PlacedObjectRegistry, PlacementConfig, spawn_placed_object, world_pos_to_chunk,
 };
 use crate::game::GameEntity;
 use crate::game::gfx::camera::PlayerCamera;

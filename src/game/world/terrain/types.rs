@@ -6,7 +6,9 @@ use super::{CHUNK_SIZE, mesh::LOD_LEVELS};
 /// Marker component for terrain chunk entities
 #[derive(Component)]
 pub struct TerrainChunk {
+    #[allow(dead_code)]
     pub chunk_x: i32,
+    #[allow(dead_code)]
     pub chunk_y: i32,
     pub lod_meshes: [Handle<Mesh>; LOD_LEVELS],
     pub current_lod: usize,
@@ -29,6 +31,11 @@ impl HeightmapData {
             heights: HashMap::new(),
             tile_size,
         }
+    }
+
+    /// Returns the number of non-zero height tiles currently loaded in memory.
+    pub fn tile_count(&self) -> usize {
+        self.heights.len()
     }
 
     /// Get the pre-scaled height at tile coordinates (x, y). Returns 0.0 if not set.

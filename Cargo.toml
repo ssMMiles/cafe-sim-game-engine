@@ -3,13 +3,33 @@
 # [profile.dev]
 # codegen-backend = "cranelift"
 
+[[bin]]
+name = "game_engine"
+path = "src/main.rs"
+
 [lib]
+name = "game_engine_lib"
 crate-type = ["cdylib", "rlib"]
+
+[features]
+profiling = ["bevy/trace_chrome", "bevy/sysinfo_plugin"]
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 lto = true
 codegen-units = 1
 opt-level = 'z'
+
+[profile.release-native]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
 
 [package]
 name = "cafe-sim"
@@ -25,9 +45,6 @@ getrandom3 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 getrandom2 = { package = "getrandom", version = "0.2", features = ["js"] }
 image = "0.25.6"
 anyhow = "1.0.97"
-resvg = "0.45"
-usvg = "0.45"
-tiny-skia = "0.11"
 
 bevy_modern_pixel_camera = "0.5.1"
 
@@ -49,5 +66,6 @@ version = "0.18.0"
 default-features = true
 features = [
     "web", "webgpu",
+    "jpeg",
     # "trace_chrome",
 ]

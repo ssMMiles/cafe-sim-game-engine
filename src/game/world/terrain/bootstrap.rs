@@ -266,6 +266,7 @@ pub fn create_terrain(
         let world_path = std::path::PathBuf::from("worlds").join(&world_config.world_id);
 
         commands.insert_resource(storage::TerrainWorld {
+            chunk_state_map: storage::build_chunk_state_map(&metadata),
             metadata,
             world_path,
         });

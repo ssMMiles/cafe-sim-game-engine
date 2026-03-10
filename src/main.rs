@@ -1,3 +1,3 @@
 fn main() {
-    cafe_sim::run();
+    game_engine_lib::run();
 }

@@ -15,7 +15,7 @@ use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Read, Write as IoWrite},
+    io::Write as IoWrite,
     path::{Path, PathBuf},
 };
 
@@ -164,6 +164,19 @@ pub struct VertexMaterial {
 pub struct TerrainWorld {
     pub metadata: WorldMetadata,
     pub world_path: PathBuf,
+    /// Runtime O(1) lookup: chunk state by coordinates. Built from `metadata.chunk_index` on load
+    /// and kept in sync on writes. The serialized `chunk_index` Vec is the source of truth on disk.
+    pub chunk_state_map: HashMap<(i32, i32), ChunkState>,
+}
+
+/// Build a `chunk_state_map` from a `WorldMetadata`. Call this once when constructing
+/// `TerrainWorld` from loaded (or freshly-created) metadata.
+pub fn build_chunk_state_map(metadata: &WorldMetadata) -> HashMap<(i32, i32), ChunkState> {
+    metadata
+        .chunk_index
+        .iter()
+        .map(|e| ((e.chunk_x, e.chunk_y), e.state.clone()))
+        .collect()
 }
 
 /// Registry tracking loaded chunks
@@ -173,15 +186,6 @@ pub struct TerrainChunkRegistry {
     pub loaded_chunks: HashMap<(i32, i32), Entity>,
     /// Chunks with unsaved modifications
     pub dirty_chunks: HashSet<(i32, i32)>,
-}
-
-/// Component for chunks with runtime modifications (used by terrain editing tools)
-#[derive(Component, Default)]
-pub struct ModifiedTerrainChunk {
-    /// Pending height modifications
-    pub height_mods: Vec<HeightModification>,
-    /// Whether chunk needs GPU recompute
-    pub needs_gpu_update: bool,
 }
 
 /// Configuration for the terrain world.
@@ -265,55 +269,6 @@ pub fn save_world(world: &WorldMetadata, world_path: &Path) -> Result<(), Storag
     Ok(())
 }
 
-/// Load world metadata from disk
-pub fn load_world(world_path: &Path) -> Result<WorldMetadata, StorageError> {
-    let meta_path = world_path.join("world.meta");
-    let mut file = File::open(&meta_path)?;
-
-    // Read and validate header
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)?;
-    if &magic != WORLD_MAGIC {
-        return Err(StorageError::InvalidMagic);
-    }
-
-    let mut version_bytes = [0u8; 4];
-    file.read_exact(&mut version_bytes)?;
-    let version = u32::from_le_bytes(version_bytes);
-    if version != FORMAT_VERSION {
-        return Err(StorageError::VersionMismatch {
-            expected: FORMAT_VERSION,
-            found: version,
-        });
-    }
-
-    let mut len_bytes = [0u8; 4];
-    file.read_exact(&mut len_bytes)?;
-    let data_len = u32::from_le_bytes(len_bytes) as usize;
-
-    // Read data
-    let mut data = vec![0u8; data_len];
-    file.read_exact(&mut data)?;
-
-    // Read and verify checksum
-    let mut checksum_bytes = [0u8; 4];
-    file.read_exact(&mut checksum_bytes)?;
-    let stored_checksum = u32::from_le_bytes(checksum_bytes);
-    let computed_checksum = crc32fast::hash(&data);
-
-    if stored_checksum != computed_checksum {
-        return Err(StorageError::ChecksumMismatch);
-    }
-
-    // Deserialize
-    let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let metadata: WorldMetadata = rkyv::deserialize::<WorldMetadata, RkyvError>(archived)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-    Ok(metadata)
-}
-
 /// Save chunk data to disk
 pub fn save_chunk(chunk: &ChunkData, world_path: &Path) -> Result<(), StorageError> {
     let chunks_dir = world_path.join("chunks");
@@ -335,68 +290,6 @@ pub fn save_chunk(chunk: &ChunkData, world_path: &Path) -> Result<(), StorageErr
     file.write_all(&checksum.to_le_bytes())?;
 
     Ok(())
-}
-
-/// Load chunk data from disk
-pub fn load_chunk(
-    chunk_x: i32,
-    chunk_y: i32,
-    world_path: &Path,
-) -> Result<ChunkData, StorageError> {
-    let chunk_path = world_path
-        .join("chunks")
-        .join(format!("chunk_{}_{}.terrain", chunk_x, chunk_y));
-    let mut file = File::open(&chunk_path)?;
-
-    // Read and validate header
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)?;
-    if &magic != CHUNK_MAGIC {
-        return Err(StorageError::InvalidMagic);
-    }
-
-    let mut version_bytes = [0u8; 4];
-    file.read_exact(&mut version_bytes)?;
-    let version = u32::from_le_bytes(version_bytes);
-    if version != FORMAT_VERSION {
-        return Err(StorageError::VersionMismatch {
-            expected: FORMAT_VERSION,
-            found: version,
-        });
-    }
-
-    // Read chunk coordinates (for verification)
-    let mut coord_bytes = [0u8; 4];
-    file.read_exact(&mut coord_bytes)?;
-    let _stored_x = i32::from_le_bytes(coord_bytes);
-    file.read_exact(&mut coord_bytes)?;
-    let _stored_y = i32::from_le_bytes(coord_bytes);
-
-    let mut len_bytes = [0u8; 4];
-    file.read_exact(&mut len_bytes)?;
-    let data_len = u32::from_le_bytes(len_bytes) as usize;
-
-    // Read data
-    let mut data = vec![0u8; data_len];
-    file.read_exact(&mut data)?;
-
-    // Read and verify checksum
-    let mut checksum_bytes = [0u8; 4];
-    file.read_exact(&mut checksum_bytes)?;
-    let stored_checksum = u32::from_le_bytes(checksum_bytes);
-    let computed_checksum = crc32fast::hash(&data);
-
-    if stored_checksum != computed_checksum {
-        return Err(StorageError::ChecksumMismatch);
-    }
-
-    // Deserialize
-    let archived = rkyv::access::<ArchivedChunkData, RkyvError>(&data)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let chunk: ChunkData = rkyv::deserialize::<ChunkData, RkyvError>(archived)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-    Ok(chunk)
 }
 
 /// Parse chunk data from a raw byte slice (same binary format as `load_chunk`).
@@ -491,19 +384,6 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
     Ok(metadata)
 }
 
-/// Check if a chunk file exists
-pub fn chunk_exists(chunk_x: i32, chunk_y: i32, world_path: &Path) -> bool {
-    let chunk_path = world_path
-        .join("chunks")
-        .join(format!("chunk_{}_{}.terrain", chunk_x, chunk_y));
-    chunk_path.exists()
-}
-
-/// Check if a world exists at the given path
-pub fn world_exists(world_path: &Path) -> bool {
-    world_path.join("world.meta").exists()
-}
-
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -548,34 +428,6 @@ pub fn create_world_metadata(
     }
 }
 
-/// Create default chunk data for an unmodified chunk
-pub fn create_default_chunk_data(chunk_x: i32, chunk_y: i32, width: u32, height: u32) -> ChunkData {
-    ChunkData {
-        chunk_x,
-        chunk_y,
-        width,
-        height,
-        height_data: HeightData::UseBase,
-        material_data: MaterialData::Uniform,
-    }
-}
-
-/// Apply height modifications to a base height array
-pub fn apply_height_deltas(
-    base_heights: &mut [f32],
-    chunk_height: u32,
-    mods: &[HeightModification],
-) {
-    for m in mods {
-        let local_x = m.local_x();
-        let local_y = m.local_y();
-        let idx = (local_x * chunk_height + local_y) as usize;
-        if idx < base_heights.len() {
-            base_heights[idx] += m.delta;
-        }
-    }
-}
-
 /// Quantize height values to u16 for compact storage
 pub fn quantize_heights(heights: &[f32]) -> (Vec<u16>, f32, f32) {
     let min = heights.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -616,7 +468,8 @@ mod tests {
         let metadata = create_world_metadata("test".to_string(), 256, 256, 64, (1.0, 1.0), 10.0);
 
         save_world(&metadata, &world_path).unwrap();
-        let loaded = load_world(&world_path).unwrap();
+        let bytes = std::fs::read(world_path.join("world.meta")).unwrap();
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
 
         assert_eq!(loaded.world_id, metadata.world_id);
         assert_eq!(loaded.chunks_x, metadata.chunks_x);
@@ -628,14 +481,21 @@ mod tests {
         let dir = tempdir().unwrap();
         let world_path = dir.path().join("test_world");
 
-        let mut chunk = create_default_chunk_data(2, 3, 64, 64);
-        chunk.height_data = HeightData::Delta(vec![
-            HeightModification::new(10, 20, 5.0),
-            HeightModification::new(30, 40, -2.5),
-        ]);
+        let chunk = ChunkData {
+            chunk_x: 2,
+            chunk_y: 3,
+            width: 64,
+            height: 64,
+            height_data: HeightData::Delta(vec![
+                HeightModification::new(10, 20, 5.0),
+                HeightModification::new(30, 40, -2.5),
+            ]),
+            material_data: MaterialData::Uniform,
+        };
 
         save_chunk(&chunk, &world_path).unwrap();
-        let loaded = load_chunk(2i32, 3i32, &world_path).unwrap();
+        let bytes = std::fs::read(world_path.join("chunks/chunk_2_3.terrain")).unwrap();
+        let loaded = parse_chunk_from_bytes(&bytes).unwrap();
 
         assert_eq!(loaded.chunk_x, 2);
         assert_eq!(loaded.chunk_y, 3);

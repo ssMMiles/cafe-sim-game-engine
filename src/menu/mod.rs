@@ -3,7 +3,6 @@ use bevy::{log, prelude::*};
 use crate::AppState;
 
 mod main;
-pub mod ui_builder;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
 pub enum MenuScreen {

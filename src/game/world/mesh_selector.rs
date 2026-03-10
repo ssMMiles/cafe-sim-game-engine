@@ -7,6 +7,7 @@ use bevy::{
 use crate::{
     game::{GameEntity, world::objects::PlacementConfig},
     settings::UserSettings,
+    ui::{UiAnchors, UiTheme},
 };
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -167,6 +168,8 @@ pub fn setup_mesh_selector_panel(
     catalog: Res<MeshCatalog>,
     config: Res<PlacementConfig>,
     mut selector_index: ResMut<MeshSelectorIndex>,
+    anchors: Res<UiAnchors>,
+    theme: Res<UiTheme>,
 ) {
     if !selector.is_changed() || !selector.0 {
         return;
@@ -181,24 +184,23 @@ pub fn setup_mesh_selector_panel(
         .unwrap_or(0);
     selector_index.0 = selected_index;
 
-    // Root strip (absolute, pinned to bottom)
+    // Root strip — child of bottom anchor, spans full width
     let root = commands
         .spawn((
             GameEntity,
             MeshSelectorPanel,
             Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(0.0),
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
+                width: Val::Percent(100.0),
                 height: Val::Px(130.0),
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.8)),
+            BackgroundColor(theme.bg_panel),
             GlobalZIndex(50),
         ))
         .id();
+
+    commands.entity(anchors.bottom).add_child(root);
 
     // Inner scrollable row
     let row = commands
@@ -222,9 +224,9 @@ pub fn setup_mesh_selector_panel(
     for entry in &catalog.entries {
         let is_selected = entry.asset_path == selected_path;
         let card_color = if is_selected {
-            Color::srgb(0.3, 0.6, 1.0)
+            theme.highlight
         } else {
-            Color::srgb(0.15, 0.15, 0.15)
+            theme.bg_surface
         };
 
         let card = commands
@@ -248,10 +250,10 @@ pub fn setup_mesh_selector_panel(
                 GameEntity,
                 Text::new(entry.name.clone()),
                 TextFont {
-                    font_size: 12.0,
+                    font_size: theme.size_caption,
                     ..default()
                 },
-                TextColor(Color::WHITE),
+                TextColor(theme.text_white),
             ))
             .id();
 
@@ -285,6 +287,7 @@ pub fn scroll_mesh_selector(
     catalog: Res<MeshCatalog>,
     mut selector_index: ResMut<MeshSelectorIndex>,
     mut config: ResMut<PlacementConfig>,
+    theme: Res<UiTheme>,
 ) {
     if catalog.entries.is_empty() {
         return;
@@ -319,16 +322,15 @@ pub fn scroll_mesh_selector(
     }
 
     selector_index.0 = new_index;
-    let new_path = catalog.entries[new_index].asset_path.clone();
-    config.asset_path = new_path.clone();
+    config.asset_path = catalog.entries[new_index].asset_path.clone();
     config.scale = Vec3::splat(1.0);
 
     // Refresh card highlights
     for (button, mut bg) in card_query.iter_mut() {
-        bg.0 = if button.asset_path == new_path {
-            Color::srgb(0.3, 0.6, 1.0)
+        bg.0 = if button.asset_path == config.asset_path {
+            theme.highlight
         } else {
-            Color::srgb(0.15, 0.15, 0.15)
+            theme.bg_surface
         };
     }
 

@@ -1,11 +1,11 @@
 use bevy::{log, prelude::*};
 
-use crate::AppState;
-
-use super::{
-    MenuScreen,
-    ui_builder::{ButtonStyle, MenuCommandsExt, MenuContainerExt, UIColors},
+use crate::{
+    AppState,
+    ui::{ButtonVariant, UiExt, UiTheme},
 };
+
+use super::MenuScreen;
 
 #[derive(Component, Debug)]
 pub struct MainMenuScreen;
@@ -16,23 +16,39 @@ pub enum MainMenuButton {
     Settings,
 }
 
-pub fn setup_main_menu(mut commands: Commands) {
+pub fn setup_main_menu(mut commands: Commands, theme: Res<UiTheme>) {
     log::info!("Setting up the main menu screen");
 
     commands
-        .spawn_menu_container(MainMenuScreen, UIColors::BACKGROUND_DARK)
+        .spawn((
+            MainMenuScreen,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(theme.bg_dark),
+        ))
         .with_children(|parent| {
-            parent.spawn_button(
+            parent.ui_button(
                 "Start Game",
                 MainMenuButton::StartGame,
-                ButtonStyle::Primary,
+                ButtonVariant::Primary,
+                &theme,
             );
-            parent.spawn_button("Settings", MainMenuButton::Settings, ButtonStyle::Primary);
+            parent.ui_button(
+                "Settings",
+                MainMenuButton::Settings,
+                ButtonVariant::Primary,
+                &theme,
+            );
         });
 }
 
 pub fn handle_main_menu_button_press(
-    // mut commands: Commands,
     mut interaction_query: Query<
         (&Interaction, &MainMenuButton),
         (Changed<Interaction>, With<Button>),

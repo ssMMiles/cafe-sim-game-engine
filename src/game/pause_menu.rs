@@ -6,11 +6,11 @@ use bevy::{
 use super::SimulationState;
 use crate::{
     AppState,
-    menu::ui_builder::{ButtonStyle, MenuCommandsExt, MenuContainerExt, UIColors},
     settings::{
         EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
         MovementSpeedSetting, SliderSetting, UserSettings, slider_constants,
     },
+    ui::{ButtonVariant, UiExt, UiTheme},
 };
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
@@ -96,8 +96,8 @@ pub fn handle_pause_input(
     current_menu_state: Res<State<PauseMenuState>>,
     mut sim_next_state: ResMut<NextState<SimulationState>>,
     mut menu_next_state: ResMut<NextState<PauseMenuState>>,
-    mut windows: Query<&mut Window>,
-    mut cursor_options: Single<&mut CursorOptions>,
+    windows: Query<&mut Window>,
+    cursor_options: Single<&mut CursorOptions>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
         handle_cursor_lock(windows, cursor_options, &current_sim_state);
@@ -109,11 +109,9 @@ pub fn handle_pause_input(
             SimulationState::Paused => {
                 match current_menu_state.get() {
                     PauseMenuState::Settings => {
-                        // If in settings, go back to main pause menu
                         menu_next_state.set(PauseMenuState::Main);
                     }
                     PauseMenuState::Main => {
-                        // If in main pause menu, resume game
                         sim_next_state.set(SimulationState::Running);
                     }
                 }
@@ -122,23 +120,59 @@ pub fn handle_pause_input(
     }
 }
 
-pub fn setup_pause_menu(mut commands: Commands) {
+pub fn setup_pause_menu(mut commands: Commands, theme: Res<UiTheme>) {
     commands
-        .spawn_menu_container(PauseMenu, UIColors::BACKGROUND_OVERLAY)
+        .spawn((
+            PauseMenu,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(theme.bg_overlay),
+        ))
         .with_children(|parent| {
-            parent.spawn_title("PAUSED");
-            parent.spawn_button("Resume", PauseMenuButton::Resume, ButtonStyle::Primary);
-            parent.spawn_button("Settings", PauseMenuButton::Settings, ButtonStyle::Primary);
-            parent.spawn_button("Exit Game", PauseMenuButton::ExitGame, ButtonStyle::Danger);
+            parent.ui_title("PAUSED", &theme);
+            parent.ui_button("Resume", PauseMenuButton::Resume, ButtonVariant::Primary, &theme);
+            parent.ui_button(
+                "Settings",
+                PauseMenuButton::Settings,
+                ButtonVariant::Primary,
+                &theme,
+            );
+            parent.ui_button(
+                "Exit Game",
+                PauseMenuButton::ExitGame,
+                ButtonVariant::Danger,
+                &theme,
+            );
         });
 }
 
-pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>) {
+pub fn setup_pause_settings(
+    mut commands: Commands,
+    settings: Res<UserSettings>,
+    theme: Res<UiTheme>,
+) {
     commands
-        .spawn_menu_container(PauseSettings, UIColors::BACKGROUND_OVERLAY)
+        .spawn((
+            PauseSettings,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(theme.bg_overlay),
+        ))
         .with_children(|parent| {
-            parent.spawn_title("SETTINGS");
-            parent.spawn_slider(
+            parent.ui_title("SETTINGS", &theme);
+            parent.ui_slider(
                 MouseSensitivitySetting::get_label(),
                 MouseSensitivitySetting::get_value(&settings),
                 MouseSensitivitySetting::get_range().0,
@@ -146,8 +180,9 @@ pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>)
                 SliderHandle::<MouseSensitivitySetting>::default(),
                 SliderLabel::<MouseSensitivitySetting>::default(),
                 SliderTrack::<MouseSensitivitySetting>::default(),
+                &theme,
             );
-            parent.spawn_slider(
+            parent.ui_slider(
                 MovementSpeedSetting::get_label(),
                 MovementSpeedSetting::get_value(&settings),
                 MovementSpeedSetting::get_range().0,
@@ -155,8 +190,9 @@ pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>)
                 SliderHandle::<MovementSpeedSetting>::default(),
                 SliderLabel::<MovementSpeedSetting>::default(),
                 SliderTrack::<MovementSpeedSetting>::default(),
+                &theme,
             );
-            parent.spawn_slider(
+            parent.ui_slider(
                 EdgeDepthSensitivitySetting::get_label(),
                 EdgeDepthSensitivitySetting::get_value(&settings),
                 EdgeDepthSensitivitySetting::get_range().0,
@@ -164,8 +200,9 @@ pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>)
                 SliderHandle::<EdgeDepthSensitivitySetting>::default(),
                 SliderLabel::<EdgeDepthSensitivitySetting>::default(),
                 SliderTrack::<EdgeDepthSensitivitySetting>::default(),
+                &theme,
             );
-            parent.spawn_slider(
+            parent.ui_slider(
                 EdgeNormalSensitivitySetting::get_label(),
                 EdgeNormalSensitivitySetting::get_value(&settings),
                 EdgeNormalSensitivitySetting::get_range().0,
@@ -173,8 +210,9 @@ pub fn setup_pause_settings(mut commands: Commands, settings: Res<UserSettings>)
                 SliderHandle::<EdgeNormalSensitivitySetting>::default(),
                 SliderLabel::<EdgeNormalSensitivitySetting>::default(),
                 SliderTrack::<EdgeNormalSensitivitySetting>::default(),
+                &theme,
             );
-            parent.spawn_button("Back", SettingsButton::Back, ButtonStyle::Primary);
+            parent.ui_button("Back", SettingsButton::Back, ButtonVariant::Primary, &theme);
         });
 }
 
@@ -205,7 +243,6 @@ pub fn handle_pause_menu(
             match action {
                 PauseMenuButton::Resume => {
                     simulation_state.set(SimulationState::Running);
-                    // Lock cursor when resuming
                     cursor_options.grab_mode = CursorGrabMode::Locked;
                     cursor_options.visible = false;
                 }
@@ -215,7 +252,6 @@ pub fn handle_pause_menu(
                 PauseMenuButton::ExitGame => {
                     app_state.set(AppState::MainMenu);
                     simulation_state.set(SimulationState::Running);
-                    // Unlock cursor when exiting to main menu
                     cursor_options.grab_mode = CursorGrabMode::None;
                     cursor_options.visible = true;
                 }
@@ -248,75 +284,43 @@ pub fn handle_slider<T: Component + SliderSetting>(
 ) {
     let (min_value, max_value) = T::get_range();
 
-    // Check if we're currently dragging the handle
     let is_dragging = handle_query.iter().any(|(interaction, _)| {
         (*interaction == Interaction::Pressed || *interaction == Interaction::Hovered)
             && mouse_input.pressed(MouseButton::Left)
     });
 
-    // Handle track clicks (immediate jump to position)
-    for interaction in track_query.iter() {
-        if *interaction == Interaction::Pressed {
-            if let Ok(window) = windows.single() {
-                if let Some(cursor_pos) = window.cursor_position() {
-                    let normalized_value = calculate_normalized_position(cursor_pos, window);
+    let track_pressed = track_query
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed);
 
-                    // Update handle position
-                    if let Ok((_, mut handle_node)) = handle_query.single_mut() {
-                        handle_node.left =
-                            Val::Percent(calculate_handle_position(normalized_value));
-                    }
-
-                    // Update setting value
-                    let new_value = min_value + normalized_value * (max_value - min_value);
-                    T::set_value(&mut settings, new_value);
-                }
-            }
-        }
+    if !is_dragging && !track_pressed {
+        return;
     }
 
-    // Handle dragging (continuous movement while mouse is held down)
-    if is_dragging {
-        if let Ok(window) = windows.single() {
-            if let Some(cursor_pos) = window.cursor_position() {
-                let normalized_value = calculate_normalized_position(cursor_pos, window);
+    let Ok(window) = windows.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let normalized_value = calculate_normalized_position(cursor_pos, window);
 
-                // Update handle position
-                if let Ok((_, mut handle_node)) = handle_query.single_mut() {
-                    handle_node.left = Val::Percent(calculate_handle_position(normalized_value));
-                }
-
-                // Update setting value
-                let new_value = min_value + normalized_value * (max_value - min_value);
-                T::set_value(&mut settings, new_value);
-            }
-        }
+    if let Ok((_, mut handle_node)) = handle_query.single_mut() {
+        handle_node.left = Val::Percent(calculate_handle_position(normalized_value));
     }
+
+    let new_value = min_value + normalized_value * (max_value - min_value);
+    T::set_value(&mut settings, new_value);
 }
 
 fn calculate_normalized_position(cursor_pos: Vec2, window: &Window) -> f32 {
-    // For sliders, we'll use a simplified relative positioning
-    // Map cursor to a normalized value between 0 and 1
     let window_width = window.resolution.width();
     let window_center_x = window_width / 2.0;
-
-    // Calculate relative position from window center
     let relative_x = cursor_pos.x - window_center_x;
-
-    // Map to slider range (using constants)
     let slider_half_width = slider_constants::TRACK_WIDTH / 2.0;
     let clamped_x = relative_x.clamp(-slider_half_width, slider_half_width);
-    (clamped_x + slider_half_width) / (slider_constants::TRACK_WIDTH)
+    (clamped_x + slider_half_width) / slider_constants::TRACK_WIDTH
 }
 
 fn calculate_handle_position(normalized_value: f32) -> f32 {
-    // Calculate position to keep handle center within track bounds
     let usable_width = slider_constants::TRACK_WIDTH - slider_constants::HANDLE_WIDTH;
-
-    // Position handle so its center stays within track bounds
     let handle_left_position = normalized_value * usable_width;
-
-    // Convert to percentage
     (handle_left_position / slider_constants::TRACK_WIDTH) * 100.0
 }
 
@@ -327,17 +331,7 @@ pub fn update_slider_label<T: Component + SliderSetting>(
     if settings.is_changed() {
         for mut text in label_query.iter_mut() {
             let current_value = T::get_value(&settings);
-            let format_str = T::get_format();
-            let formatted_value = if format_str == "{:.3}" {
-                format!("{:.3}", current_value)
-            } else if format_str == "{:.2}" {
-                format!("{:.2}", current_value)
-            } else if format_str == "{:.1}" {
-                format!("{:.1}", current_value)
-            } else {
-                format!("{}", current_value)
-            };
-            **text = format!("{}: {}", T::get_label(), formatted_value);
+            **text = format!("{}: {}", T::get_label(), T::format_value(current_value));
         }
     }
 }

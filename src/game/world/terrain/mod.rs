@@ -17,7 +17,6 @@ pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
 use lod::{TerrainLodState, update_terrain_lod};
 use material::TerrainMaterial;
 
-pub use bootstrap::TerrainRenderAssets;
 use bootstrap::create_terrain;
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -38,12 +37,16 @@ impl Plugin for TerrainPlugin {
 
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();
+        app.init_resource::<save::PendingTerrainSave>();
 
         app.add_systems(
             Update,
             (create_terrain, update_terrain_lod).in_set(TerrainSet::Update),
         );
-        app.add_systems(Update, save::save_terrain.in_set(TerrainSet::Update));
+        app.add_systems(
+            Update,
+            (save::save_terrain, save::poll_terrain_save).in_set(TerrainSet::Update),
+        );
 
         app.init_resource::<edit::TerrainBrushHit>();
         app.add_systems(
@@ -54,6 +57,7 @@ impl Plugin for TerrainPlugin {
                 edit::raycast_terrain_hit,
                 edit::apply_terrain_brush,
                 edit::finalize_terrain_lod,
+                edit::update_brush_preview,
             )
                 .chain()
                 .in_set(TerrainSet::Edit),

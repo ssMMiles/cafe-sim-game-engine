@@ -22,8 +22,7 @@ pub fn update_outline(
     if !settings.outline_visible {
         // If outlines were just disabled, remove any existing outlines
         if settings.is_changed() {
-            for (entity, _, children) in interactable_query.iter() {
-                // commands.entity(entity).remove::<OutlineVolume>();
+            for (_, _, children) in interactable_query.iter() {
                 if let Some(children) = children {
                     propagate_outline_to_children(
                         &mut commands,
@@ -39,7 +38,7 @@ pub fn update_outline(
     }
 
     // Handle entities that are being interacted with (add white outline)
-    for (entity, interaction, children) in interactable_query.iter() {
+    for (_, interaction, children) in interactable_query.iter() {
         if interaction.is_some() {
             // Add outline to the main entity
             // commands.entity(entity).insert(OutlineVolume {
@@ -63,11 +62,6 @@ pub fn update_outline(
 
     // Handle entities that are no longer being interacted with (remove outline)
     for entity in removed_interactions.read() {
-        // Check if entity still exists before trying to remove component
-        if let Ok(mut entity_commands) = commands.get_entity(entity) {
-            // entity_commands.remove::<OutlineVolume>();
-        }
-
         // Also remove outlines from children if this is a scene
         if let Ok((_, children)) = all_interactables.get(entity) {
             if let Some(children) = children {
@@ -91,22 +85,6 @@ fn propagate_outline_to_children(
     children_query: &Query<&Children>,
 ) {
     for child in children.iter() {
-        // If this child is a mesh, add or remove outline
-        if mesh_query.contains(child) {
-            // Check if entity still exists before trying to modify it
-            if let Ok(mut entity_commands) = commands.get_entity(child) {
-                if add_outline {
-                    // entity_commands.insert(OutlineVolume {
-                    //     visible: true,
-                    //     width: 3.0,
-                    //     colour: Color::srgb(1.0, 1.0, 1.0),
-                    // });
-                } else {
-                    // entity_commands.remove::<OutlineVolume>();
-                }
-            }
-        }
-
         // Recursively check grandchildren
         if let Ok(grandchildren) = children_query.get(child) {
             propagate_outline_to_children(

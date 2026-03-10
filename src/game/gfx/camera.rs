@@ -12,7 +12,7 @@ use crate::{
 use bevy::{
     anti_alias::fxaa::Fxaa,
     camera::{RenderTarget, visibility::RenderLayers},
-    core_pipeline::prepass::{DepthPrepass, NormalPrepass},
+    core_pipeline::{prepass::{DepthPrepass, NormalPrepass}, tonemapping::Tonemapping},
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
     light::VolumetricFog,
@@ -27,8 +27,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-const RENDER_TEXTURE_WIDTH: u32 = 3840;
-const RENDER_TEXTURE_HEIGHT: u32 = 2160;
+pub const RENDER_TEXTURE_WIDTH: u32 = 1920;
+pub const RENDER_TEXTURE_HEIGHT: u32 = 1080;
 const CAMERA_CLEARANCE: f32 = 0.5; // Min camera height above terrain in FloorBased mode
 const EYE_HEIGHT: f32 = 1.7; // Camera offset above player origin in first-person
 const FOV_FIRST_PERSON: f32 = PI / 2.5; // ~72 degrees
@@ -36,7 +36,6 @@ const FOV_THIRD_PERSON: f32 = PI / 5.0; // ~36 degrees (original)
 
 #[derive(Component, Debug, Default)]
 pub struct PlayerCamera {
-    pub velocity: Vec3,
     pub yaw: f32,
     pub pitch: f32,
 }
@@ -47,7 +46,6 @@ pub struct RenderTextureSprite;
 pub fn setup_camera(
     commands: &mut Commands,
     images: &mut ResMut<Assets<Image>>,
-    meshes: &mut ResMut<Assets<Mesh>>,
 ) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
@@ -89,11 +87,7 @@ pub fn setup_camera(
             Camera3d::default(),
             Camera::default(),
             RenderTarget::Image(render_texture_handle.clone().into()),
-            PlayerCamera {
-                velocity: Vec3::ZERO,
-                yaw,
-                pitch,
-            },
+            PlayerCamera { yaw, pitch },
             Projection::Perspective(PerspectiveProjection {
                 fov: (PI / 5.),
                 ..default()
@@ -106,8 +100,12 @@ pub fn setup_camera(
             // Edge detection post-processing settings
             EdgeDetectionSettings::new(),
             Fxaa::default(),
+        ))
+        .insert((
             // HDR intermediate render target — required by VolumetricFog
             Hdr,
+            // Toon shaders already map HDR→display; skip the filmic LUT to avoid double-compression
+            Tonemapping::None,
             // Distance fog fading distant terrain into the warm horizon haze
             DistanceFog {
                 color: Color::srgba(0.85, 0.80, 0.72, 1.0),
