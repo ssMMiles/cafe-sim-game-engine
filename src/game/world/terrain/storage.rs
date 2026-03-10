@@ -398,6 +398,98 @@ pub fn load_chunk(
     Ok(chunk)
 }
 
+/// Parse chunk data from a raw byte slice (same binary format as `load_chunk`).
+/// Used by the async `ChunkDataLoader` which reads bytes via Bevy's `AssetServer`.
+pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
+    use std::io::Read as StdRead;
+    let mut cursor = std::io::Cursor::new(bytes);
+
+    let mut magic = [0u8; 4];
+    cursor.read_exact(&mut magic)?;
+    if &magic != CHUNK_MAGIC {
+        return Err(StorageError::InvalidMagic);
+    }
+
+    let mut version_bytes = [0u8; 4];
+    cursor.read_exact(&mut version_bytes)?;
+    let version = u32::from_le_bytes(version_bytes);
+    if version != FORMAT_VERSION {
+        return Err(StorageError::VersionMismatch {
+            expected: FORMAT_VERSION,
+            found: version,
+        });
+    }
+
+    let mut coord_bytes = [0u8; 4];
+    cursor.read_exact(&mut coord_bytes)?; // chunk_x
+    cursor.read_exact(&mut coord_bytes)?; // chunk_y
+
+    let mut len_bytes = [0u8; 4];
+    cursor.read_exact(&mut len_bytes)?;
+    let data_len = u32::from_le_bytes(len_bytes) as usize;
+
+    let mut data = vec![0u8; data_len];
+    cursor.read_exact(&mut data)?;
+
+    let mut checksum_bytes = [0u8; 4];
+    cursor.read_exact(&mut checksum_bytes)?;
+    let stored_checksum = u32::from_le_bytes(checksum_bytes);
+    if stored_checksum != crc32fast::hash(&data) {
+        return Err(StorageError::ChecksumMismatch);
+    }
+
+    let archived = rkyv::access::<ArchivedChunkData, RkyvError>(&data)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let chunk: ChunkData = rkyv::deserialize::<ChunkData, RkyvError>(archived)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+    Ok(chunk)
+}
+
+/// Parse world metadata from a raw byte slice (same binary format as `load_world`).
+/// Used by the async `WorldMetaLoader` which reads bytes via Bevy's `AssetServer`.
+pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, StorageError> {
+    use std::io::Read as StdRead;
+    let mut cursor = std::io::Cursor::new(bytes);
+
+    let mut magic = [0u8; 4];
+    cursor.read_exact(&mut magic)?;
+    if &magic != WORLD_MAGIC {
+        return Err(StorageError::InvalidMagic);
+    }
+
+    let mut version_bytes = [0u8; 4];
+    cursor.read_exact(&mut version_bytes)?;
+    let version = u32::from_le_bytes(version_bytes);
+    if version != FORMAT_VERSION {
+        return Err(StorageError::VersionMismatch {
+            expected: FORMAT_VERSION,
+            found: version,
+        });
+    }
+
+    let mut len_bytes = [0u8; 4];
+    cursor.read_exact(&mut len_bytes)?;
+    let data_len = u32::from_le_bytes(len_bytes) as usize;
+
+    let mut data = vec![0u8; data_len];
+    cursor.read_exact(&mut data)?;
+
+    let mut checksum_bytes = [0u8; 4];
+    cursor.read_exact(&mut checksum_bytes)?;
+    let stored_checksum = u32::from_le_bytes(checksum_bytes);
+    if stored_checksum != crc32fast::hash(&data) {
+        return Err(StorageError::ChecksumMismatch);
+    }
+
+    let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let metadata: WorldMetadata = rkyv::deserialize::<WorldMetadata, RkyvError>(archived)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+    Ok(metadata)
+}
+
 /// Check if a chunk file exists
 pub fn chunk_exists(chunk_x: u32, chunk_y: u32, world_path: &Path) -> bool {
     let chunk_path = world_path

@@ -17,6 +17,7 @@ pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
 use lod::{TerrainLodState, update_terrain_lod};
 use material::TerrainMaterial;
 
+pub use bootstrap::TerrainRenderAssets;
 use bootstrap::create_terrain;
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]

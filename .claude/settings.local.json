@@ -28,7 +28,8 @@
       "WebFetch(domain:avianphysics.com)",
       "WebFetch(domain:avian.rs)",
       "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo fetch 2>&1)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(grep doctest:*)"
     ],
     "deny": [],
     "ask": [],

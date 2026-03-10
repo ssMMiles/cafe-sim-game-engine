@@ -4,8 +4,11 @@ use bevy::{
     prelude::*,
 };
 
+pub mod chunk_assets;
 pub mod edit_mode;
+pub mod mesh_selector;
 pub mod objects;
+pub mod streaming;
 mod sky;
 pub mod terrain;
 
@@ -22,12 +25,18 @@ use crate::{
 };
 use edit_mode::{
     PlacementPreviewEntity, adjust_placement_scale, cleanup_placement_preview,
-    handle_edit_mode_click, setup_placement_preview, toggle_edit_mode, update_placement_preview,
+    handle_edit_mode_click, rebuild_preview_on_config_change, setup_placement_preview,
+    toggle_edit_mode, update_placement_preview,
 };
-use objects::{
-    ObjectsLoaded, PlacedObjectRegistry, PlacementConfig, delete_hovered_object,
-    load_placed_objects, save_placed_objects,
+use mesh_selector::{
+    MeshCatalog, MeshSelectorIndex, cleanup_mesh_selector_panel, discover_meshes,
+    mesh_selector_open, scroll_mesh_selector, setup_mesh_selector_panel, toggle_mesh_selector,
 };
+
+pub use mesh_selector::MeshSelectorOpen;
+use objects::{PlacedObjectRegistry, PlacementConfig, delete_hovered_object, save_placed_objects};
+use chunk_assets::{ChunkDataAsset, ChunkDataLoader, ChunkObjectsAsset, ChunkObjectsLoader, WorldMetaAsset, WorldMetaLoader};
+use streaming::{ChunkStreamingConfig, StreamingState, process_pending_chunks, update_streaming_ring};
 
 pub use sky::setup_sky;
 
@@ -52,6 +61,24 @@ impl Plugin for WorldPlugin {
 
         app.add_plugins(terrain::TerrainPlugin);
 
+        // Register chunk asset types and their loaders.
+        app.init_asset::<ChunkDataAsset>();
+        app.init_asset_loader::<ChunkDataLoader>();
+        app.init_asset::<ChunkObjectsAsset>();
+        app.init_asset_loader::<ChunkObjectsLoader>();
+        app.init_asset::<WorldMetaAsset>();
+        app.init_asset_loader::<WorldMetaLoader>();
+
+        // Streaming resources and systems.
+        app.init_resource::<ChunkStreamingConfig>();
+        app.init_resource::<StreamingState>();
+        app.add_systems(
+            Update,
+            (update_streaming_ring, process_pending_chunks)
+                .chain()
+                .in_set(terrain::TerrainSet::Update),
+        );
+
         app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::InGame));
         app.add_systems(
             Update,
@@ -60,7 +87,6 @@ impl Plugin for WorldPlugin {
                 .run_if(edit_mode_active),
         );
 
-        app.add_systems(Update, load_placed_objects.in_set(WorldSet::InGame));
         app.add_systems(Update, save_placed_objects.in_set(WorldSet::InGame));
         app.add_systems(
             Update,
@@ -76,8 +102,28 @@ impl Plugin for WorldPlugin {
 
         app.init_resource::<PlacementPreviewEntity>();
         app.init_resource::<PlacedObjectRegistry>();
-        app.init_resource::<ObjectsLoaded>();
         app.init_resource::<PlacementConfig>();
+
+        app.init_resource::<MeshCatalog>();
+        app.init_resource::<MeshSelectorOpen>();
+        app.init_resource::<MeshSelectorIndex>();
+        app.add_systems(Startup, discover_meshes);
+        app.add_systems(Update, toggle_mesh_selector.in_set(WorldSet::InGame));
+        app.add_systems(Update, setup_mesh_selector_panel.in_set(WorldSet::InGame));
+        app.add_systems(Update, cleanup_mesh_selector_panel.in_set(WorldSet::InGame));
+        app.add_systems(
+            Update,
+            scroll_mesh_selector
+                .in_set(WorldSet::Running)
+                .run_if(mesh_selector_open),
+        );
+        app.add_systems(
+            Update,
+            rebuild_preview_on_config_change
+                .in_set(WorldSet::InGame)
+                .run_if(edit_mode_active)
+                .run_if(resource_changed::<PlacementConfig>),
+        );
     }
 }
 

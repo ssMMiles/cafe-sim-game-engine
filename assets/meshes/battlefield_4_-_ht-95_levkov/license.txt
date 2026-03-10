@@ -1,0 +1,11 @@
+Model Information:
+* title:	Battlefield 4 - HT-95 Levkov
+* source:	https://sketchfab.com/3d-models/battlefield-4-ht-95-levkov-f30acebb46894d909be31865a425ae0e
+* author:	thientrung2004pr (https://sketchfab.com/U.SSCIFI)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Battlefield 4 - HT-95 Levkov" (https://sketchfab.com/3d-models/battlefield-4-ht-95-levkov-f30acebb46894d909be31865a425ae0e) by thientrung2004pr (https://sketchfab.com/U.SSCIFI) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

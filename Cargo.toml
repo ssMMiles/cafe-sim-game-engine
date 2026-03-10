@@ -48,6 +48,6 @@ tempfile = "3"
 version = "0.18.0"
 default-features = true
 features = [
-    "debug", "web", "webgpu",
+    "web", "webgpu",
     # "trace_chrome",
 ]

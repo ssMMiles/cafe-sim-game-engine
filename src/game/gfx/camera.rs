@@ -1,7 +1,12 @@
 use std::f32::consts::PI;
 
 use crate::{
-    game::{GameEntity, gfx::post_process::EdgeDetectionSettings, simulation::Player, world::terrain::HeightmapData},
+    game::{
+        GameEntity,
+        gfx::post_process::EdgeDetectionSettings,
+        simulation::Player,
+        world::{MeshSelectorOpen, terrain::HeightmapData},
+    },
     settings::{CameraView, MovementMode, UserSettings, setting_ranges},
 };
 use bevy::{
@@ -312,12 +317,14 @@ pub fn adjust_camera_distance(
     mut scroll_events: MessageReader<MouseWheel>,
     mut settings: ResMut<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
+    selector: Res<MeshSelectorOpen>,
 ) {
-    // Only adjust distance when in third person view, and not when Shift is held
-    // (Shift+scroll is reserved for placement scale adjustment)
+    // Yield scroll to the mesh-selector panel when it is open.
+    // Shift+scroll is reserved for placement scale adjustment.
     if settings.camera_view != CameraView::ThirdPerson
         || input.pressed(KeyCode::ShiftLeft)
         || input.pressed(KeyCode::ShiftRight)
+        || selector.0
     {
         return;
     }

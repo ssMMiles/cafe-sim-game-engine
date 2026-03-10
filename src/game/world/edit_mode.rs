@@ -106,8 +106,8 @@ pub fn setup_placement_preview(
     settings: Res<UserSettings>,
     config: Res<PlacementConfig>,
 ) {
-    // Only setup preview if edit mode just turned on and we don't already have one
-    if !settings.is_changed() || !settings.edit_mode || preview_entity.0.is_some() {
+    // Spawn preview whenever edit mode is active and no preview exists yet
+    if !settings.edit_mode || preview_entity.0.is_some() {
         return;
     }
 
@@ -206,6 +206,17 @@ pub fn cleanup_placement_preview(
     if let Some(entity) = preview_entity.0.take() {
         commands.entity(entity).despawn();
         log::info!("Placement preview entity removed");
+    }
+}
+
+/// When `PlacementConfig` changes (e.g. a new mesh is selected), despawn the
+/// existing preview so `setup_placement_preview` re-creates it next frame.
+pub fn rebuild_preview_on_config_change(
+    mut commands: Commands,
+    mut preview_entity: ResMut<PlacementPreviewEntity>,
+) {
+    if let Some(entity) = preview_entity.0.take() {
+        commands.entity(entity).despawn();
     }
 }
 

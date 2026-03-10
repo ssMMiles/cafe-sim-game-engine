@@ -9,7 +9,8 @@ use super::{GameEntity, SimulationConfig};
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS, CharacterState};
 use crate::game::gfx::camera::setup_camera;
 use crate::game::gfx::toon_material::ToonMaterial;
-use crate::game::world::objects::{ObjectsLoaded, PlacedObjectRegistry};
+use crate::game::world::objects::PlacedObjectRegistry;
+use crate::game::world::streaming::StreamingState;
 use crate::settings::UserSettings;
 
 #[derive(Component, Debug)]
@@ -103,9 +104,9 @@ pub fn exit(
     game_entities: Query<Entity, With<GameEntity>>,
     mut cursor_options: Single<&mut CursorOptions>,
     mut registry: ResMut<PlacedObjectRegistry>,
-    mut loaded: ResMut<ObjectsLoaded>,
+    mut streaming_state: ResMut<StreamingState>,
 ) {
-    // Despawn all game entities
+    // Despawn all game entities (includes terrain chunks, placed objects, etc.)
     for entity in game_entities.iter() {
         commands.entity(entity).despawn();
     }
@@ -117,7 +118,7 @@ pub fn exit(
     cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
     cursor_options.visible = true;
 
-    // Reset object placement state so re-entering the game reloads cleanly
+    // Reset placement and streaming state so re-entering the game starts fresh.
     *registry = PlacedObjectRegistry::default();
-    loaded.0 = false;
+    *streaming_state = StreamingState::default();
 }

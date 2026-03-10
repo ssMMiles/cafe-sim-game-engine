@@ -1,5 +1,9 @@
 use avian3d::{debug_render::{PhysicsDebugPlugin, PhysicsGizmos}, prelude::PhysicsPlugins};
-use bevy::{asset::AssetMetaCheck, prelude::*, window::PresentMode};
+use bevy::{
+    asset::{AssetMetaCheck, io::AssetSourceBuilder},
+    prelude::*,
+    window::PresentMode,
+};
 
 mod game;
 mod menu;
@@ -10,7 +14,15 @@ use wasm_bindgen::prelude::*;
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
 pub fn run() {
-    App::new()
+    // Register a custom "world" asset source pointing to the project root CWD.
+    // Chunk files are loaded as "world://worlds/{id}/chunks/chunk_X_Y.terrain".
+    // Must be registered before DefaultPlugins (which includes AssetPlugin).
+    let mut app = App::new();
+    app.register_asset_source(
+        "world",
+        AssetSourceBuilder::platform_default(".", None),
+    );
+    app
         .add_plugins(
             DefaultPlugins
                 .set(AssetPlugin {

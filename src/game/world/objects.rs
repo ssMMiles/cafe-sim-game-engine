@@ -27,7 +27,7 @@ const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 const CHUNK_OBJECTS_VERSION: u32 = 1;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
-const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
+pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
 
 // ============================================================================
 // Serializable Data Structures
@@ -78,10 +78,6 @@ impl PlacedObjectRegistry {
     }
 }
 
-/// One-shot guard: set to true once objects have been loaded for this session.
-#[derive(Resource, Default)]
-pub struct ObjectsLoaded(pub bool);
-
 /// Configuration for the currently-selected placement object.
 #[derive(Resource)]
 pub struct PlacementConfig {
@@ -109,7 +105,7 @@ pub fn world_pos_to_chunk(world_x: f32, world_z: f32) -> (u32, u32) {
 }
 
 // ============================================================================
-// Spawn Helper
+// Spawn / Despawn Helpers
 // ============================================================================
 
 pub(super) fn spawn_placed_object(
@@ -147,93 +143,81 @@ pub(super) fn spawn_placed_object(
     entity
 }
 
+/// Spawn all objects described in a `ChunkObjectsFile` and register them.
+pub fn spawn_chunk_objects(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    registry: &mut PlacedObjectRegistry,
+    chunk_objects: &ChunkObjectsFile,
+) {
+    let chunk = (chunk_objects.chunk_x, chunk_objects.chunk_y);
+    let mut max_id: u64 = 0;
+
+    for record in &chunk_objects.objects {
+        let transform = Transform {
+            translation: Vec3::from(record.position),
+            rotation: Quat::from_xyzw(
+                record.rotation[0],
+                record.rotation[1],
+                record.rotation[2],
+                record.rotation[3],
+            ),
+            scale: Vec3::from(record.scale),
+        };
+
+        let handle: Handle<Scene> = asset_server.load(&record.asset_path);
+        let entity = spawn_interactable_scene(
+            commands,
+            (
+                GameEntity,
+                PlacedObject {
+                    id: record.id,
+                    asset_path: record.asset_path.clone(),
+                    chunk,
+                },
+                Interactable {
+                    name: "Object".to_string(),
+                    distance: 5.0,
+                },
+                SceneRoot(handle),
+                transform,
+                GlobalTransform::default(),
+                RigidBody::Static,
+                ColliderConstructorHierarchy::new(ColliderConstructor::TrimeshFromMesh),
+            ),
+        );
+        registry.by_id.insert(record.id, entity);
+        max_id = max_id.max(record.id);
+    }
+
+    // Advance next_id past any loaded ids so new allocations don't collide.
+    if max_id >= registry.next_id {
+        registry.next_id = max_id + 1;
+    }
+}
+
+/// Despawn all placed objects belonging to `chunk` and remove them from the registry.
+pub fn despawn_chunk_objects(
+    commands: &mut Commands,
+    registry: &mut PlacedObjectRegistry,
+    placed_query: &Query<(Entity, &PlacedObject)>,
+    chunk: (u32, u32),
+) {
+    let to_despawn: Vec<(u64, Entity)> = placed_query
+        .iter()
+        .filter(|(_, obj)| obj.chunk == chunk)
+        .map(|(entity, obj)| (obj.id, entity))
+        .collect();
+
+    for (id, entity) in to_despawn {
+        registry.by_id.remove(&id);
+        commands.entity(entity).despawn();
+    }
+}
+
 // ============================================================================
 // Systems
 // ============================================================================
-
-/// Runs once after TerrainWorld is available. Scans `chunks/*.objects` and
-/// spawns all previously-saved placed objects.
-pub fn load_placed_objects(
-    mut commands: Commands,
-    terrain_world: Option<Res<TerrainWorld>>,
-    asset_server: Res<AssetServer>,
-    mut registry: ResMut<PlacedObjectRegistry>,
-    mut loaded: ResMut<ObjectsLoaded>,
-) {
-    if loaded.0 || terrain_world.is_none() {
-        return;
-    }
-    loaded.0 = true;
-
-    let world_path = &terrain_world.unwrap().world_path;
-    let chunks_dir = world_path.join("chunks");
-
-    let Ok(entries) = fs::read_dir(&chunks_dir) else {
-        info!(
-            "No chunks directory found at {:?} — skipping object load",
-            chunks_dir
-        );
-        return;
-    };
-
-    let mut max_id: u64 = 0;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("objects") {
-            continue;
-        }
-
-        match load_chunk_objects_file(&path) {
-            Ok(file) => {
-                for record in &file.objects {
-                    let transform = Transform {
-                        translation: Vec3::from(record.position),
-                        rotation: Quat::from_xyzw(
-                            record.rotation[0],
-                            record.rotation[1],
-                            record.rotation[2],
-                            record.rotation[3],
-                        ),
-                        scale: Vec3::from(record.scale),
-                    };
-
-                    let chunk = (file.chunk_x, file.chunk_y);
-                    let handle: Handle<Scene> = asset_server.load(&record.asset_path);
-                    let entity = spawn_interactable_scene(
-                        &mut commands,
-                        (
-                            GameEntity,
-                            PlacedObject {
-                                id: record.id,
-                                asset_path: record.asset_path.clone(),
-                                chunk,
-                            },
-                            Interactable {
-                                name: "Object".to_string(),
-                                distance: 5.0,
-                            },
-                            SceneRoot(handle),
-                            transform,
-                            GlobalTransform::default(),
-                            RigidBody::Static,
-                            ColliderConstructorHierarchy::new(ColliderConstructor::TrimeshFromMesh),
-                        ),
-                    );
-                    registry.by_id.insert(record.id, entity);
-                    if record.id > max_id {
-                        max_id = record.id;
-                    }
-                }
-            }
-            Err(e) => error!("Failed to load objects file {:?}: {}", path, e),
-        }
-    }
-
-    // next_id must be above all loaded ids
-    registry.next_id = max_id + 1;
-    info!("Loaded placed objects; next_id = {}", registry.next_id);
-}
 
 /// Saves all dirty object chunks on Shift+S, alongside terrain saving.
 pub fn save_placed_objects(
@@ -324,6 +308,11 @@ fn chunk_objects_path(world_path: &Path, cx: u32, cy: u32) -> PathBuf {
         .join(format!("chunk_{}_{}.objects", cx, cy))
 }
 
+/// Returns the path to the `.objects` file for the given chunk, for existence checks.
+pub fn chunk_objects_file_path(world_path: &Path, cx: u32, cy: u32) -> PathBuf {
+    chunk_objects_path(world_path, cx, cy)
+}
+
 pub(super) fn save_chunk_objects_file(
     file: &ChunkObjectsFile,
     world_path: &Path,
@@ -347,6 +336,54 @@ pub(super) fn save_chunk_objects_file(
     f.write_all(&checksum.to_le_bytes())?;
 
     Ok(())
+}
+
+/// Parse a `ChunkObjectsFile` from raw bytes (same binary format as `load_chunk_objects_file`).
+/// Used by the async `ChunkObjectsLoader` which reads bytes via Bevy's `AssetServer`.
+pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, StorageError> {
+    use std::io::Read as StdRead;
+    let mut cursor = std::io::Cursor::new(bytes);
+
+    let mut magic = [0u8; 4];
+    cursor.read_exact(&mut magic)?;
+    if &magic != CHUNK_OBJECTS_MAGIC {
+        return Err(StorageError::InvalidMagic);
+    }
+
+    let mut version_bytes = [0u8; 4];
+    cursor.read_exact(&mut version_bytes)?;
+    let version = u32::from_le_bytes(version_bytes);
+    if version != CHUNK_OBJECTS_VERSION {
+        return Err(StorageError::VersionMismatch {
+            expected: CHUNK_OBJECTS_VERSION,
+            found: version,
+        });
+    }
+
+    let mut coord = [0u8; 4];
+    cursor.read_exact(&mut coord)?; // chunk_x
+    cursor.read_exact(&mut coord)?; // chunk_y
+
+    let mut len_bytes = [0u8; 4];
+    cursor.read_exact(&mut len_bytes)?;
+    let data_len = u32::from_le_bytes(len_bytes) as usize;
+
+    let mut data = vec![0u8; data_len];
+    cursor.read_exact(&mut data)?;
+
+    let mut checksum_bytes = [0u8; 4];
+    cursor.read_exact(&mut checksum_bytes)?;
+    let stored = u32::from_le_bytes(checksum_bytes);
+    if stored != crc32fast::hash(&data) {
+        return Err(StorageError::ChecksumMismatch);
+    }
+
+    let archived = rkyv::access::<ArchivedChunkObjectsFile, RkyvError>(&data)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+    Ok(file)
 }
 
 fn load_chunk_objects_file(path: &Path) -> Result<ChunkObjectsFile, StorageError> {
