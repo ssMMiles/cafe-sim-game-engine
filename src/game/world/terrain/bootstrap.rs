@@ -37,15 +37,14 @@ pub struct TerrainRenderAssets {
 /// Data produced by the background mesh-generation task.
 ///
 /// All fields are `Send + Sync` so the result can be moved back to the main thread.
-/// Heights for the avian heightfield collider are included here but the collider
-/// itself is constructed on the main thread (physics world is not Send).
+/// `Collider` is built off the main thread since `parry3d::Shape: DowncastSync` (Send + Sync).
 pub struct ChunkComputeResult {
     pub chunk_x: i32,
     pub chunk_y: i32,
     pub lod_meshes: [Mesh; LOD_LEVELS],
     pub aabb: Aabb,
-    /// Row-major heights for avian `Collider::heightfield`: `hf_heights[lx][ly]`
-    pub hf_heights: Vec<Vec<f32>>,
+    pub collider: Collider,
+    pub collider_offset: Vec3,
 }
 
 /// Pure function: compute all LOD meshes and prepare heightfield data for a chunk.
@@ -90,17 +89,36 @@ pub fn compute_chunk_meshes(
         mesh
     });
 
-    // Build the 2-D height array required by avian's `Collider::heightfield`.
-    let hf_heights: Vec<Vec<f32>> = (0..CHUNK_SIZE)
-        .map(|lx| (0..CHUNK_SIZE).map(|ly| heights[lx * CHUNK_SIZE + ly]).collect())
+    // Build the heightfield collider off the main thread.
+    // Downsampled by HF_STRIDE — 64×64 is more than precise enough for character collision
+    // and is 16× less data for avian to build its BVH over.
+    // parry3d::Shape: DowncastSync (Send + Sync), so Collider is safe to construct here.
+    const HF_STRIDE: usize = 4;
+    let hf_size = CHUNK_SIZE.div_ceil(HF_STRIDE);
+    let hf_heights: Vec<Vec<f32>> = (0..hf_size)
+        .map(|hx| {
+            let lx = (hx * HF_STRIDE).min(CHUNK_SIZE - 1);
+            (0..hf_size)
+                .map(|hy| {
+                    let ly = (hy * HF_STRIDE).min(CHUNK_SIZE - 1);
+                    heights[lx * CHUNK_SIZE + ly]
+                })
+                .collect()
+        })
         .collect();
+
+    let physical_width = (CHUNK_SIZE - 1) as f32 * tile_size.0;
+    let physical_depth = (CHUNK_SIZE - 1) as f32 * tile_size.1;
+    let collider = Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
+    let collider_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
 
     ChunkComputeResult {
         chunk_x,
         chunk_y,
         lod_meshes,
         aabb: aabb_out.unwrap(),
-        hf_heights,
+        collider,
+        collider_offset,
     }
 }
 
@@ -129,14 +147,6 @@ pub fn spawn_chunk_from_result(
     let lod_mesh_handles: [Handle<Mesh>; LOD_LEVELS] =
         result.lod_meshes.map(|m| meshes.add(m));
 
-    let physical_width = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
-    let physical_depth = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.1;
-    let hf_collider = Collider::heightfield(
-        result.hf_heights,
-        Vec3::new(physical_width, 1.0, physical_depth),
-    );
-    let hf_local_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
-
     let entity = commands
         .spawn((
             GameEntity,
@@ -157,8 +167,8 @@ pub fn spawn_chunk_from_result(
         .id();
 
     commands.entity(entity).with_child((
-        hf_collider,
-        Transform::from_translation(hf_local_offset),
+        result.collider,
+        Transform::from_translation(result.collider_offset),
         avian3d::debug_render::DebugRender::none(),
     ));
 
