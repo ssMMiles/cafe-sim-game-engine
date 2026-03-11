@@ -132,7 +132,11 @@ impl Plugin for SimulationPlugin {
             Update,
             TerrainSet::Update.run_if(in_state(AppState::InGame)),
         );
-        app.configure_sets(Update, TerrainSet::Edit.run_if(in_state(AppState::InGame)));
+        app.configure_sets(
+            Update,
+            TerrainSet::Edit
+                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+        );
 
         // ── OnEnter / OnExit ──────────────────────────────────────────────
         app.add_systems(

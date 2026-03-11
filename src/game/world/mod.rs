@@ -84,7 +84,7 @@ impl Plugin for WorldPlugin {
                 .in_set(terrain::TerrainSet::Update),
         );
 
-        app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::Running));
+        app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::InGame));
         app.add_systems(
             Update,
             handle_edit_mode_click
