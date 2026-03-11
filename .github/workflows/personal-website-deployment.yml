@@ -25,9 +25,9 @@ jobs:
                   cd game-engine
                   npm install -g wasm-pack wasm-opt
                   wasm-pack build --target web --no-opt
-                  wasm-opt -Oz -o pkg/cafe_sim_bg_optimised.wasm pkg/cafe_sim_bg.wasm
+                  wasm-opt -Oz -o pkg/game_engine_lib_bg_optimised.wasm pkg/game_engine_lib_bg.wasm
 
-                  mv pkg/cafe_sim_bg_optimised.wasm pkg/cafe_sim_bg.wasm
+                  mv pkg/game_engine_lib_bg_optimised.wasm pkg/game_engine_lib_bg.wasm
 
                   cp -r pkg/. ../simple-website/game
                   cp -r assets/. ../simple-website/game/assets
