@@ -1,13 +1,8 @@
-use bevy::{
-    pbr::MaterialExtension, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef,
-};
+use bevy::{pbr::MaterialExtension, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef};
 
 // Define the Material Extension
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct ToonMaterial {
-    #[uniform(100)]
-    pub color: LinearRgba,
-}
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
+pub struct ToonMaterial {}
 
 impl MaterialExtension for ToonMaterial {
     fn fragment_shader() -> ShaderRef {

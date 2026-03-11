@@ -105,8 +105,9 @@ fn fragment(
         view_bindings::view.view_from_world[3].z
     ), pbr_input.world_position);
 
-    // Accumulate a scalar lighting intensity in HDR lux space.
-    // Using luminance so the sun's color tint doesn't cause per-channel hue shifts.
+    // Accumulate lighting in normalised [0, 1] space so toon bands span the full
+    // angular range of the sun rather than saturating immediately.
+    // Directional lights use pure NdotL (independent of physical lux units).
     var lighting = 0.0;
 
     // Directional lights
@@ -120,10 +121,10 @@ fn fragment(
             shadow = shadows::fetch_directional_shadow(i, pbr_input.world_position, pbr_input.world_normal, view_z);
         }
 
-        lighting += NdotL * luminance((*light).color.rgb) * shadow;
+        lighting += NdotL * shadow;
     }
 
-    // Point lights
+    // Point lights — use smooth range falloff in [0, 1] instead of raw lux attenuation
     let cluster_index = clustering::fragment_cluster_index(pbr_input.frag_coord.xy, view_z, pbr_input.is_orthographic);
     var clusterable_object_index_ranges = clustering::unpack_clusterable_object_index_ranges(cluster_index);
 
@@ -138,20 +139,17 @@ fn fragment(
         let NdotL = max(dot(N, normalize(light_to_frag)), 0.0);
 
         let inverse_range_squared = (*light).color_inverse_square_range.w;
-        let attenuation = 1.0 / max(distance_squared, 0.0001);
         let smooth_attenuation = 1.0 - min(distance_squared * inverse_range_squared, 1.0);
-        let range_attenuation = attenuation * smooth_attenuation * smooth_attenuation;
 
         var shadow = 1.0;
         if ((*light).flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
             shadow = shadows::fetch_point_shadow(light_id, pbr_input.world_position, pbr_input.world_normal);
         }
 
-        lighting += NdotL * luminance((*light).color_inverse_square_range.rgb) * range_attenuation * shadow;
+        lighting += NdotL * smooth_attenuation * smooth_attenuation * shadow;
     }
 
-    // Bring from HDR lux space to display range, then quantize into toon bands
-    lighting *= view_bindings::view.exposure;
+    // Quantize into toon bands — lighting is already in [0, 1]
     let toon_factor = toon_band(lighting, 5.0);
 
     // Ambient is a continuous floor so unlit areas aren't pitch black

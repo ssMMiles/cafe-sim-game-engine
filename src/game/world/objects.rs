@@ -15,7 +15,7 @@ use std::{
 
 use crate::game::{
     GameEntity,
-    gltf_loading::{Interactable, spawn_interactable_scene},
+    gltf_loading::{ConvertToToon, Interactable, spawn_interactable_scene},
     world::terrain::storage::StorageError,
 };
 
@@ -132,6 +132,7 @@ pub(super) fn spawn_placed_object(
                 name: "Object".to_string(),
                 distance: 5.0,
             },
+            ConvertToToon,
             SceneRoot(handle),
             transform,
             GlobalTransform::default(),
@@ -180,6 +181,7 @@ pub fn spawn_chunk_objects(
                     name: "Object".to_string(),
                     distance: 5.0,
                 },
+                ConvertToToon,
                 SceneRoot(handle),
                 transform,
                 GlobalTransform::default(),
