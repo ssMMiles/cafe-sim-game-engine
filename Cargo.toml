@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 profiling = ["bevy/trace_chrome", "bevy/sysinfo_plugin", "bevy/debug"]
 tracy = ["bevy/trace_tracy", "bevy/debug"]
 physics_debug = ["avian3d/debug-plugin"]
+opfs = []
 
 [profile.dev]
 # codegen-backend = "cranelift"
@@ -55,6 +56,17 @@ log = "0.4.29"
 wasm-bindgen = "0.2.111"
 
 avian3d = { version = "0.5" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Window", "Navigator", "StorageManager",
+    "FileSystemDirectoryHandle", "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions", "FileSystemGetFileOptions",
+    "FileSystemWritableFileStream",
+    "File",
+] }
+js-sys = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

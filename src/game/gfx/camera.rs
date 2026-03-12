@@ -12,7 +12,10 @@ use crate::{
 use bevy::{
     anti_alias::fxaa::Fxaa,
     camera::{RenderTarget, visibility::RenderLayers},
-    core_pipeline::{prepass::{DepthPrepass, NormalPrepass}, tonemapping::Tonemapping},
+    core_pipeline::{
+        prepass::{DepthPrepass, NormalPrepass},
+        tonemapping::Tonemapping,
+    },
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
     light::VolumetricFog,
@@ -43,10 +46,7 @@ pub struct PlayerCamera {
 #[derive(Component)]
 pub struct RenderTextureSprite;
 
-pub fn setup_camera(
-    commands: &mut Commands,
-    images: &mut ResMut<Assets<Image>>,
-) {
+pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
 

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::game::{gfx::camera::PlayerCamera};
+use crate::game::gfx::camera::PlayerCamera;
 
 use super::{TerrainChunk, constants::LOD_DISTANCES_SQ, mesh::LOD_LEVELS};
 
@@ -41,7 +41,6 @@ pub fn update_terrain_lod(
         return;
     }
     lod_state.last_camera_pos = camera_pos;
-
 
     for (mut chunk, mut mesh3d, aabb, global_transform) in chunk_query.iter_mut() {
         // AABB center is in local space; transform to world space

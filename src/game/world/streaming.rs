@@ -1,32 +1,37 @@
 //! Chunk streaming system — spawns/despawns terrain and object chunks based on
-//! how close the player is, using Bevy's `AssetServer` for async I/O.
+//! how close the player is.
 //!
-//! # Lifecycle of a chunk
+//! # Lifecycle of a chunk (native / non-OPFS)
 //!
-//! 1. `update_streaming_ring` determines which chunks should be loaded.
-//!    - If the chunk has saved terrain modifications it issues an async load via
-//!      `asset_server.load("world://…/chunk_X_Y.terrain")`.
-//!    - Always issues an async load for the `.objects` file; a 404 is treated as
-//!      empty objects (no fast-path to avoid `std::fs` calls for WASM compat).
-//!    - All chunks go into `StreamingState::pending`.
+//! 1. `update_streaming_ring` issues async AssetServer loads for terrain + objects files.
+//!    All chunks go into `StreamingState::pending`.
 //!
 //! 2. `launch_chunk_tasks` checks load state every frame.
-//!    When both handles are done (Loaded or Failed) it patches `HeightmapData`,
-//!    extracts the height array, and spawns a background `AsyncComputeTaskPool` task
-//!    to generate LOD meshes off the main thread. The chunk moves to `computing`.
+//!    When both handles are done it patches `HeightmapData`, extracts the height array,
+//!    and spawns a background `AsyncComputeTaskPool` task to generate LOD meshes.
+//!    The chunk moves to `computing`.
 //!
-//! 3. `finalize_computed_chunks` polls the background tasks each frame.
-//!    When a task completes it calls `spawn_chunk_from_result` (main thread only,
-//!    for physics collider construction) and spawns any loaded objects.
+//! 3. `finalize_computed_chunks` polls background tasks each frame.
+//!    When a task completes it calls `spawn_chunk_from_result` and spawns any loaded objects.
+//!
+//! # Lifecycle of a chunk (wasm+opfs)
+//!
+//! 1. `update_streaming_ring` issues `spawn_local` futures to read from OPFS.
+//!    Parsing happens inside the future. Typed results land in Arc<Mutex<Option<...>>> slots.
+//!
+//! 2. `launch_chunk_tasks` polls the slots. Once both are ready it patches the heightmap
+//!    (on main thread) and spawns the compute task with parsed data.
+//!    `ComputingChunk.objects_data` carries the pre-parsed `Option<ChunkObjectsFile>`.
+//!
+//! 3. `finalize_computed_chunks` uses `computing.objects_data` directly (no asset lookup).
 
 use bevy::{
-    asset::LoadState,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::game::{simulation::Player};
+use crate::game::simulation::Player;
 
 use super::{
     chunk_assets::{ChunkDataAsset, ChunkObjectsAsset},
@@ -43,6 +48,9 @@ use super::{
         storage::{ChunkState, TerrainChunkRegistry, TerrainWorld},
     },
 };
+
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+use super::{objects::ChunkObjectsFile, terrain::storage::ChunkData};
 
 // ============================================================================
 // Resources
@@ -78,19 +86,41 @@ impl Default for ChunkStreamingConfig {
     }
 }
 
-/// A chunk that has been requested but is still loading its asset files.
+// ── Slot type aliases for the wasm+opfs path ──────────────────────────────────
+//
+// `None`      → load still pending
+// `Some(None)` → loaded, but nothing was stored (flat / 404)
+// `Some(Some(data))` → loaded with parsed data
+
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+type TerrainSlot = std::sync::Arc<std::sync::Mutex<Option<Option<ChunkData>>>>;
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+type ObjectsSlot = std::sync::Arc<std::sync::Mutex<Option<Option<ChunkObjectsFile>>>>;
+
+/// A chunk that has been requested but is still loading its data.
 pub struct PendingChunk {
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     /// `None` → chunk has no terrain file (flat); terrain is already ready.
     pub terrain_handle: Option<Handle<ChunkDataAsset>>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     /// Always present. `Failed` (e.g. 404) is treated as empty objects.
     pub objects_handle: Handle<ChunkObjectsAsset>,
+
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    pub opfs_terrain: TerrainSlot,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    pub opfs_objects: ObjectsSlot,
 }
 
 /// A chunk whose mesh-generation task is running in the background.
 pub struct ComputingChunk {
     pub task: Task<ChunkComputeResult>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     /// Retained so we can spawn objects once the task finishes.
     pub objects_handle: Handle<ChunkObjectsAsset>,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    /// Pre-parsed at launch time; used directly in `finalize_computed_chunks`.
+    pub objects_data: Option<ChunkObjectsFile>,
 }
 
 /// Runtime state for the streaming system.
@@ -98,7 +128,7 @@ pub struct ComputingChunk {
 pub struct StreamingState {
     /// Chunks whose entities are currently live in the world.
     pub loaded: HashSet<(i32, i32)>,
-    /// Chunks that are waiting for their asset files to finish loading.
+    /// Chunks that are waiting for their data to finish loading.
     pub pending: HashMap<(i32, i32), PendingChunk>,
     /// Chunks whose mesh-generation task is running in the background.
     pub computing: HashMap<(i32, i32), ComputingChunk>,
@@ -109,14 +139,15 @@ pub struct StreamingState {
 // ============================================================================
 
 /// Determines which chunks should be in the streaming ring and:
-/// - Issues asset loads for newly in-range chunks.
+/// - Issues asset/OPFS loads for newly in-range chunks.
 /// - Despawns chunks that have moved beyond the unload radius (and evicts their tiles).
 /// - Cancels background compute tasks for chunks that go out of range.
 pub fn update_streaming_ring(
     player_query: Query<&Transform, With<Player>>,
     terrain_world: Option<Res<TerrainWorld>>,
     config: Res<ChunkStreamingConfig>,
-    asset_server: Res<AssetServer>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] asset_server: Res<AssetServer>,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
     mut commands: Commands,
     mut state: ResMut<StreamingState>,
     chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
@@ -201,38 +232,119 @@ pub fn update_streaming_ring(
             .map(|s| *s != ChunkState::Unmodified)
             .unwrap_or(false);
 
-        let terrain_handle = has_terrain_file.then(|| {
-            asset_server.load::<ChunkDataAsset>(format!(
-                "world://worlds/{}/chunks/chunk_{}_{}.terrain",
+        #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+        {
+            let terrain_handle = has_terrain_file.then(|| {
+                asset_server.load::<ChunkDataAsset>(format!(
+                    "world://worlds/{}/chunks/chunk_{}_{}.terrain",
+                    metadata.world_id, cx, cy
+                ))
+            });
+
+            // Always issue the objects load. Failed (404) → treated as empty.
+            let objects_handle = asset_server.load::<ChunkObjectsAsset>(format!(
+                "world://worlds/{}/chunks/chunk_{}_{}.objects",
                 metadata.world_id, cx, cy
-            ))
-        });
+            ));
 
-        // Always issue the objects load. Failed (404) → treated as empty.
-        let objects_handle = asset_server.load::<ChunkObjectsAsset>(format!(
-            "world://worlds/{}/chunks/chunk_{}_{}.objects",
-            metadata.world_id, cx, cy
-        ));
+            state.pending.insert(
+                (cx, cy),
+                PendingChunk {
+                    terrain_handle,
+                    objects_handle,
+                },
+            );
+        }
 
-        state.pending.insert(
-            (cx, cy),
-            PendingChunk {
-                terrain_handle,
-                objects_handle,
-            },
-        );
+        #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+        {
+            use super::objects::parse_chunk_objects_from_bytes;
+            use super::terrain::storage::parse_chunk_from_bytes;
+            use std::sync::{Arc, Mutex};
+            use wasm_bindgen_futures::spawn_local;
+
+            let terrain_slot: TerrainSlot = Arc::new(Mutex::new(None));
+            let objects_slot: ObjectsSlot = Arc::new(Mutex::new(None));
+
+            // Terrain: only load if there is saved data; otherwise immediately mark flat.
+            if has_terrain_file {
+                let s = crate::storage::wasm::WasmStorage;
+                let key = format!(
+                    "worlds/{}/chunks/chunk_{}_{}.terrain",
+                    metadata.world_id, cx, cy
+                );
+                let slot = terrain_slot.clone();
+                spawn_local(async move {
+                    let result = match s.load(&key).await {
+                        Ok(Some(bytes)) => match parse_chunk_from_bytes(&bytes) {
+                            Ok(data) => Some(data),
+                            Err(e) => {
+                                log::warn!("Failed to parse terrain for chunk ({cx},{cy}): {e}");
+                                None
+                            }
+                        },
+                        Ok(None) => None,
+                        Err(e) => {
+                            log::warn!("OPFS terrain load error for ({cx},{cy}): {e}");
+                            None
+                        }
+                    };
+                    *slot.lock().unwrap() = Some(result);
+                });
+            } else {
+                // No file → immediately ready as flat.
+                *terrain_slot.lock().unwrap() = Some(None);
+            }
+
+            // Objects: always try; None on 404 or parse error means empty chunk.
+            {
+                let s = crate::storage::wasm::WasmStorage;
+                let key = format!(
+                    "worlds/{}/chunks/chunk_{}_{}.objects",
+                    metadata.world_id, cx, cy
+                );
+                let slot = objects_slot.clone();
+                spawn_local(async move {
+                    let result = match s.load(&key).await {
+                        Ok(Some(bytes)) => match parse_chunk_objects_from_bytes(&bytes) {
+                            Ok(data) => Some(data),
+                            Err(e) => {
+                                log::warn!("Failed to parse objects for chunk ({cx},{cy}): {e}");
+                                None
+                            }
+                        },
+                        Ok(None) => None,
+                        Err(e) => {
+                            log::warn!("OPFS objects load error for ({cx},{cy}): {e}");
+                            None
+                        }
+                    };
+                    *slot.lock().unwrap() = Some(result);
+                });
+            }
+
+            state.pending.insert(
+                (cx, cy),
+                PendingChunk {
+                    opfs_terrain: terrain_slot,
+                    opfs_objects: objects_slot,
+                },
+            );
+        }
     }
 }
 
-/// Checks pending chunk asset loads and, for each fully-loaded chunk, patches
+/// Checks pending chunk data loads and, for each fully-loaded chunk, patches
 /// `HeightmapData` and spawns a background `AsyncComputeTaskPool` task to generate
 /// LOD meshes off the main thread.
 ///
 /// Spawning background tasks is cheap (just a queue push), so no per-frame budget
 /// is applied here — the budget in `finalize_computed_chunks` limits main-thread cost.
 pub fn launch_chunk_tasks(
-    asset_server: Res<AssetServer>,
-    chunk_data_assets: Res<Assets<ChunkDataAsset>>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] asset_server: Res<AssetServer>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] chunk_data_assets: Res<
+        Assets<ChunkDataAsset>,
+    >,
     mut state: ResMut<StreamingState>,
     heightmap: Option<ResMut<HeightmapData>>,
 ) {
@@ -240,97 +352,136 @@ pub fn launch_chunk_tasks(
         return;
     };
 
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+    {
+        use bevy::asset::LoadState;
 
-    // Determine which pending chunks have all their assets resolved.
-    let mut ready_with_data: Vec<(i32, i32)> = Vec::new();
-    let mut ready_flat: Vec<(i32, i32)> = Vec::new();
+        // Determine which pending chunks have all their assets resolved.
+        let mut ready_with_data: Vec<(i32, i32)> = Vec::new();
+        let mut ready_flat: Vec<(i32, i32)> = Vec::new();
 
-    for (&chunk, pending) in state.pending.iter() {
-        let terrain_state = match &pending.terrain_handle {
-            None => Some(true), // flat — no file needed
-            Some(h) => match asset_server.load_state(h.id()) {
-                LoadState::Loaded => Some(true),
-                LoadState::Failed(_) => {
-                    warn!(
-                        "Failed to load terrain for chunk {:?}, spawning flat",
-                        chunk
-                    );
-                    Some(false) // failed → spawn flat
-                }
-                _ => None, // still loading
-            },
-        };
+        for (&chunk, pending) in state.pending.iter() {
+            let terrain_state = match &pending.terrain_handle {
+                None => Some(true), // flat — no file needed
+                Some(h) => match asset_server.load_state(h.id()) {
+                    LoadState::Loaded => Some(true),
+                    LoadState::Failed(_) => {
+                        warn!(
+                            "Failed to load terrain for chunk {:?}, spawning flat",
+                            chunk
+                        );
+                        Some(false) // failed → spawn flat
+                    }
+                    _ => None, // still loading
+                },
+            };
 
-        let objects_done = matches!(
-            asset_server.load_state(pending.objects_handle.id()),
-            LoadState::Loaded | LoadState::Failed(_)
-        );
+            let objects_done = matches!(
+                asset_server.load_state(pending.objects_handle.id()),
+                LoadState::Loaded | LoadState::Failed(_)
+            );
 
-        if let Some(terrain_loaded) = terrain_state {
-            if objects_done {
-                if terrain_loaded {
-                    ready_with_data.push(chunk);
-                } else {
-                    ready_flat.push(chunk);
+            if let Some(terrain_loaded) = terrain_state {
+                if objects_done {
+                    if terrain_loaded {
+                        ready_with_data.push(chunk);
+                    } else {
+                        ready_flat.push(chunk);
+                    }
                 }
             }
         }
+
+        let thread_pool = AsyncComputeTaskPool::get();
+
+        // Launch tasks for chunks with terrain data.
+        for chunk_coord in ready_with_data {
+            let Some(pending) = state.pending.remove(&chunk_coord) else {
+                continue;
+            };
+            let (cx, cy) = chunk_coord;
+
+            // Patch heightmap with stored modifications (must happen on main thread,
+            // keeps HeightmapData correct for physics/gameplay queries).
+            let chunk_data = pending
+                .terrain_handle
+                .as_ref()
+                .and_then(|h| chunk_data_assets.get(h))
+                .map(|asset| {
+                    apply_chunk_to_heightmap(&mut heightmap, &asset.0);
+                    asset.0.clone()
+                });
+
+            let task = thread_pool
+                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE) });
+
+            state.computing.insert(
+                chunk_coord,
+                ComputingChunk {
+                    task,
+                    objects_handle: pending.objects_handle,
+                },
+            );
+        }
+
+        // Launch tasks for flat (data-less) chunks.
+        for chunk_coord in ready_flat {
+            let Some(pending) = state.pending.remove(&chunk_coord) else {
+                continue;
+            };
+            let (cx, cy) = chunk_coord;
+
+            let task =
+                thread_pool.spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE) });
+
+            state.computing.insert(
+                chunk_coord,
+                ComputingChunk {
+                    task,
+                    objects_handle: pending.objects_handle,
+                },
+            );
+        }
     }
 
-    let thread_pool = AsyncComputeTaskPool::get();
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    {
+        // Collect chunks where both slots are ready.
+        let ready: Vec<(i32, i32)> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                p.opfs_terrain.lock().unwrap().is_some() && p.opfs_objects.lock().unwrap().is_some()
+            })
+            .map(|(&coord, _)| coord)
+            .collect();
 
-    // Launch tasks for chunks with terrain data.
-    for chunk_coord in ready_with_data {
-        let Some(pending) = state.pending.remove(&chunk_coord) else {
-            continue;
-        };
-        let (cx, cy) = chunk_coord;
+        let thread_pool = AsyncComputeTaskPool::get();
 
-        // Patch heightmap with stored modifications (must happen on main thread,
-        // keeps HeightmapData correct for physics/gameplay queries).
-        let chunk_data = pending
-            .terrain_handle
-            .as_ref()
-            .and_then(|h| chunk_data_assets.get(h))
-            .map(|asset| {
-                apply_chunk_to_heightmap(&mut heightmap, &asset.0);
-                asset.0.clone()
-            });
+        for chunk_coord in ready {
+            let Some(pending) = state.pending.remove(&chunk_coord) else {
+                continue;
+            };
+            let (cx, cy) = chunk_coord;
 
-        // Height extraction happens inside the async task (no main-thread HashMap cost).
-        let task = thread_pool.spawn(async move {
-            compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE)
-        });
+            // Both slots are Some at this point — take the inner values.
+            let terrain_data: Option<ChunkData> =
+                pending.opfs_terrain.lock().unwrap().take().flatten();
+            let objects_data: Option<ChunkObjectsFile> =
+                pending.opfs_objects.lock().unwrap().take().flatten();
 
-        state.computing.insert(
-            chunk_coord,
-            ComputingChunk {
-                task,
-                objects_handle: pending.objects_handle,
-            },
-        );
-    }
+            // Patch heightmap on the main thread if there is terrain data.
+            if let Some(ref data) = terrain_data {
+                apply_chunk_to_heightmap(&mut heightmap, data);
+            }
 
-    // Launch tasks for flat (data-less) chunks.
-    for chunk_coord in ready_flat {
-        let Some(pending) = state.pending.remove(&chunk_coord) else {
-            continue;
-        };
-        let (cx, cy) = chunk_coord;
+            let task = thread_pool
+                .spawn(async move { compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE) });
 
-        // No heightmap patch needed. Flat chunks produce a zero-filled height array
-        // inside the task — no main-thread work at all.
-        let task = thread_pool.spawn(async move {
-            compute_chunk_meshes(None, cx, cy, TILE_SIZE)
-        });
-
-        state.computing.insert(
-            chunk_coord,
-            ComputingChunk {
-                task,
-                objects_handle: pending.objects_handle,
-            },
-        );
+            state
+                .computing
+                .insert(chunk_coord, ComputingChunk { task, objects_data });
+        }
     }
 }
 
@@ -342,7 +493,9 @@ pub fn launch_chunk_tasks(
 pub fn finalize_computed_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    chunk_objects_assets: Res<Assets<ChunkObjectsAsset>>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] chunk_objects_assets: Res<
+        Assets<ChunkObjectsAsset>,
+    >,
     mut state: ResMut<StreamingState>,
     config: Res<ChunkStreamingConfig>,
     chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
@@ -387,8 +540,14 @@ pub fn finalize_computed_chunks(
             result,
         );
 
+        #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
         if let Some(asset) = chunk_objects_assets.get(&computing.objects_handle) {
             spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, &asset.0);
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+        if let Some(ref objects) = computing.objects_data {
+            spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, objects);
         }
 
         state.loaded.insert(chunk_coord);

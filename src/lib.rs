@@ -1,6 +1,4 @@
-use avian3d::{
-    prelude::PhysicsPlugins,
-};
+use avian3d::prelude::PhysicsPlugins;
 use bevy::{
     asset::{AssetMetaCheck, io::AssetSourceBuilder},
     prelude::*,
@@ -13,6 +11,7 @@ use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 mod game;
 mod menu;
 mod settings;
+mod storage;
 mod ui;
 
 #[cfg(target_arch = "wasm32")]
@@ -27,8 +26,7 @@ pub fn run() {
     app.register_asset_source("world", AssetSourceBuilder::platform_default(".", None));
 
     #[cfg(feature = "physics_debug")]
-    app
-        .add_plugins(PhysicsDebugPlugin::default())
+    app.add_plugins(PhysicsDebugPlugin::default())
         .insert_gizmo_config(
             PhysicsGizmos {
                 collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
@@ -38,7 +36,7 @@ pub fn run() {
                 enabled: false,
                 ..default()
             },
-    );
+        );
 
     app.add_plugins(
         DefaultPlugins
@@ -57,6 +55,7 @@ pub fn run() {
     )
     // .add_plugins(OutlinePlugin)
     .add_plugins(PhysicsPlugins::default())
+    .add_plugins(storage::StoragePlugin)
     .add_plugins(settings::SettingsPlugin)
     .add_plugins(ui::UiPlugin)
     .add_plugins(menu::MenuPlugin)

@@ -33,6 +33,21 @@
 - `bevy::tasks::futures` module has `check_ready` and `now_or_never`; `poll_once` is at crate root from `futures_lite`
 - Tasks are cancelled automatically when dropped
 
+## OPFS Feature Flag Pattern (March 2026)
+- Feature flag: `opfs = []` in Cargo.toml `[features]`
+- Active condition: `#[cfg(all(target_arch = "wasm32", feature = "opfs"))]`
+- `WasmStorage` is `Clone + Copy` (zero-cost unit struct) — pass into closures directly with `let s = crate::storage::wasm::WasmStorage;`
+- OPFS futures are `!Send` — use `wasm_bindgen_futures::spawn_local` (NOT `AsyncComputeTaskPool`)
+- Slot pattern for async results: `Arc<Mutex<Option<T>>>` — poll in Update, write inside `spawn_local`
+- Slot poll: `slot.lock().unwrap().take()` — returns `Option<T>`, `None` = still pending
+- All CPU work (serialization/parsing) goes inside the `spawn_local` closure to avoid blocking main thread
+- Key format for OPFS: `"worlds/{world_id}/chunks/chunk_{cx}_{cy}.terrain"` / `.objects"`, `"worlds/{world_id}/world.meta"`
+- Serialization helpers: `serialize_world`, `serialize_chunk` in `terrain/storage.rs`; `serialize_chunk_objects` in `objects.rs`
+- Terrain bootstrap OPFS slot type: `Arc<Mutex<Option<Result<Option<Vec<u8>>, String>>>>`
+- Chunk load slot types: `TerrainSlot = Arc<Mutex<Option<Option<ChunkData>>>>`, `ObjectsSlot = Arc<Mutex<Option<Option<ChunkObjectsFile>>>>`
+- `PendingChunk` and `ComputingChunk` are fully cfg-split between native (handles) and wasm+opfs (slots/data)
+- `wasm_bindgen_futures` is a `[target.'cfg(target_arch = "wasm32")'.dependencies]` — use `use wasm_bindgen_futures::spawn_local;` inside cfg blocks only
+
 ## Doctest Gotcha
 - `//! ``` ... ` code blocks in module-level doc comments are treated as Rust doctests
 - Use `//! ```text` for non-Rust content (file trees, pseudocode, etc.)

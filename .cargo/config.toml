@@ -1,5 +1,6 @@
 [target.wasm32-unknown-unknown]
 runner = "wasm-server-runner"
+rustflags = ["--cfg", "feature=\"opfs\""]
 
 # Enable max optimizations for dependencies, but not for our code:
 # From https://bevy-cheatbook.github.io/pitfalls/performance.html

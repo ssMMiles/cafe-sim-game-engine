@@ -6,12 +6,9 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
-use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::Write as IoWrite,
-    path::{Path, PathBuf},
-};
+use std::collections::{HashMap, HashSet};
+#[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+use std::fs;
 
 use crate::game::{
     GameEntity,
@@ -228,6 +225,7 @@ pub fn save_placed_objects(
     terrain_world: Option<Res<TerrainWorld>>,
     mut registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(&PlacedObject, &Transform)>,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
     if !(input.just_pressed(KeyCode::KeyS)
         && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight)))
@@ -247,8 +245,12 @@ pub fn save_placed_objects(
     let dirty: Vec<(i32, i32)> = registry.dirty_chunks.drain().collect();
     info!("Saving {} dirty object chunk(s)", dirty.len());
 
-    for (cx, cy) in dirty {
-        // Collect all objects belonging to this chunk
+    // Build the list of (file, serialized_bytes) pairs once, shared by both paths.
+    let world_id = terrain_world.metadata.world_id.clone();
+    let mut writes: Vec<(String, Vec<u8>, i32, i32)> = Vec::new();
+
+    for (cx, cy) in &dirty {
+        let (cx, cy) = (*cx, *cy);
         let objects: Vec<PlacedObjectRecord> = placed_query
             .iter()
             .filter(|(obj, _)| obj.chunk == (cx, cy))
@@ -271,10 +273,47 @@ pub fn save_placed_objects(
             objects,
         };
 
-        match save_chunk_objects_file(&file, &terrain_world.world_path) {
-            Ok(()) => info!("Saved objects for chunk ({cx}, {cy})"),
-            Err(e) => error!("Failed to save objects for chunk ({cx}, {cy}): {e}"),
+        match serialize_chunk_objects(&file) {
+            Ok(bytes) => {
+                let key = format!("worlds/{}/chunks/chunk_{}_{}.objects", world_id, cx, cy);
+                writes.push((key, bytes, cx, cy));
+            }
+            Err(e) => error!("Failed to serialize objects for chunk ({cx}, {cy}): {e}"),
         }
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+    {
+        let world_path = terrain_world.world_path.clone();
+        for (_, bytes, cx, cy) in writes {
+            let chunks_dir = world_path.join("chunks");
+            if let Err(e) = fs::create_dir_all(&chunks_dir) {
+                error!("Failed to create chunks dir: {e}");
+                continue;
+            }
+            let path = world_path
+                .join("chunks")
+                .join(format!("chunk_{}_{}.objects", cx, cy));
+            match fs::write(&path, &bytes) {
+                Ok(()) => info!("Saved objects for chunk ({cx}, {cy})"),
+                Err(e) => error!("Failed to save objects for chunk ({cx}, {cy}): {e}"),
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    {
+        use wasm_bindgen_futures::spawn_local;
+        let s = crate::storage::wasm::WasmStorage;
+        spawn_local(async move {
+            for (key, bytes, cx, cy) in writes {
+                if let Err(e) = s.save(&key, &bytes).await {
+                    log::error!("OPFS objects save failed for chunk ({cx}, {cy}): {e}");
+                } else {
+                    log::info!("Saved objects for chunk ({cx}, {cy}) to OPFS");
+                }
+            }
+        });
     }
 }
 
@@ -323,38 +362,26 @@ pub fn delete_hovered_object(
 }
 
 // ============================================================================
-// Private I/O
+// I/O Helpers
 // ============================================================================
 
-fn chunk_objects_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
-    world_path
-        .join("chunks")
-        .join(format!("chunk_{}_{}.objects", cx, cy))
-}
-
-pub(super) fn save_chunk_objects_file(
-    file: &ChunkObjectsFile,
-    world_path: &Path,
-) -> Result<(), StorageError> {
-    let chunks_dir = world_path.join("chunks");
-    fs::create_dir_all(&chunks_dir)?;
-
-    let path = chunk_objects_path(world_path, file.chunk_x, file.chunk_y);
-
-    let bytes = rkyv::to_bytes::<RkyvError>(file)
+/// Serialize a `ChunkObjectsFile` into the canonical binary frame
+/// (magic + version + coords + len + rkyv + crc32).
+/// Use this to produce bytes for writing to any backing store (fs, OPFS, etc.).
+pub fn serialize_chunk_objects(file: &ChunkObjectsFile) -> Result<Vec<u8>, StorageError> {
+    let rkyv_bytes = rkyv::to_bytes::<RkyvError>(file)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let checksum = crc32fast::hash(&bytes);
+    let checksum = crc32fast::hash(&rkyv_bytes);
 
-    let mut f = File::create(&path)?;
-    f.write_all(CHUNK_OBJECTS_MAGIC)?;
-    f.write_all(&CHUNK_OBJECTS_VERSION.to_le_bytes())?;
-    f.write_all(&file.chunk_x.to_le_bytes())?;
-    f.write_all(&file.chunk_y.to_le_bytes())?;
-    f.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    f.write_all(&bytes)?;
-    f.write_all(&checksum.to_le_bytes())?;
-
-    Ok(())
+    let mut out = Vec::with_capacity(4 + 4 + 4 + 4 + 4 + rkyv_bytes.len() + 4);
+    out.extend_from_slice(CHUNK_OBJECTS_MAGIC);
+    out.extend_from_slice(&CHUNK_OBJECTS_VERSION.to_le_bytes());
+    out.extend_from_slice(&file.chunk_x.to_le_bytes());
+    out.extend_from_slice(&file.chunk_y.to_le_bytes());
+    out.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&rkyv_bytes);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    Ok(out)
 }
 
 /// Parse a `ChunkObjectsFile` from raw bytes (same binary format as `load_chunk_objects_file`).
@@ -404,4 +431,3 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
 
     Ok(file)
 }
-
