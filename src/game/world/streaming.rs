@@ -26,7 +26,7 @@ use bevy::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::game::{profiling::SystemTimings, simulation::Player};
+use crate::game::{simulation::Player};
 
 use super::{
     chunk_assets::{ChunkDataAsset, ChunkObjectsAsset},
@@ -123,7 +123,6 @@ pub fn update_streaming_ring(
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(Entity, &PlacedObject)>,
     mut heightmap: Option<ResMut<HeightmapData>>,
-    mut timings: ResMut<SystemTimings>,
 ) {
     // All three are inserted together by create_terrain; wait until they're available.
     let Some(terrain_world) = terrain_world else {
@@ -136,8 +135,6 @@ pub fn update_streaming_ring(
     let Ok(player_transform) = player_query.single() else {
         return;
     };
-
-    let t0 = std::time::Instant::now();
 
     let player_pos = player_transform.translation;
     let (player_cx, player_cy) = world_pos_to_chunk(player_pos.x, player_pos.z);
@@ -225,16 +222,6 @@ pub fn update_streaming_ring(
             },
         );
     }
-
-    let elapsed = t0.elapsed().as_secs_f32();
-    timings.ring_sum_secs += elapsed;
-    timings.ring_calls += 1;
-    if elapsed > timings.ring_max_secs {
-        timings.ring_max_secs = elapsed;
-    }
-    timings.chunks_loaded = state.loaded.len();
-    timings.chunks_computing = state.computing.len();
-    timings.chunks_pending = state.pending.len();
 }
 
 /// Checks pending chunk asset loads and, for each fully-loaded chunk, patches
@@ -248,13 +235,11 @@ pub fn launch_chunk_tasks(
     chunk_data_assets: Res<Assets<ChunkDataAsset>>,
     mut state: ResMut<StreamingState>,
     heightmap: Option<ResMut<HeightmapData>>,
-    mut timings: ResMut<SystemTimings>,
 ) {
     let Some(mut heightmap) = heightmap else {
         return;
     };
 
-    let t0 = std::time::Instant::now();
 
     // Determine which pending chunks have all their assets resolved.
     let mut ready_with_data: Vec<(i32, i32)> = Vec::new();
@@ -347,13 +332,6 @@ pub fn launch_chunk_tasks(
             },
         );
     }
-
-    let elapsed = t0.elapsed().as_secs_f32();
-    timings.launch_sum_secs += elapsed;
-    timings.launch_calls += 1;
-    if elapsed > timings.launch_max_secs {
-        timings.launch_max_secs = elapsed;
-    }
 }
 
 /// Polls background mesh-generation tasks and finalizes any that are complete.
@@ -371,13 +349,10 @@ pub fn finalize_computed_chunks(
     render_assets: Option<Res<TerrainRenderAssets>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     asset_server: Res<AssetServer>,
-    mut timings: ResMut<SystemTimings>,
 ) {
     let (Some(mut chunk_registry), Some(render_assets)) = (chunk_registry, render_assets) else {
         return;
     };
-
-    let t0 = std::time::Instant::now();
 
     let budget = config.max_spawns_per_frame;
     let mut ready_chunks: Vec<(i32, i32)> = Vec::new();
@@ -417,13 +392,6 @@ pub fn finalize_computed_chunks(
         }
 
         state.loaded.insert(chunk_coord);
-    }
-
-    let elapsed = t0.elapsed().as_secs_f32();
-    timings.finalize_sum_secs += elapsed;
-    timings.finalize_calls += 1;
-    if elapsed > timings.finalize_max_secs {
-        timings.finalize_max_secs = elapsed;
     }
 }
 
