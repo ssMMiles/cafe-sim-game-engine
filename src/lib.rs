@@ -13,6 +13,7 @@ use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 mod game;
 mod menu;
 mod settings;
+mod storage;
 mod ui;
 
 #[cfg(target_arch = "wasm32")]
@@ -57,6 +58,7 @@ pub fn run() {
     )
     // .add_plugins(OutlinePlugin)
     .add_plugins(PhysicsPlugins::default())
+    .add_plugins(storage::StoragePlugin)
     .add_plugins(settings::SettingsPlugin)
     .add_plugins(ui::UiPlugin)
     .add_plugins(menu::MenuPlugin)
