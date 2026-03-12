@@ -1,5 +1,4 @@
 use avian3d::{
-    debug_render::{PhysicsDebugPlugin, PhysicsGizmos},
     prelude::PhysicsPlugins,
 };
 use bevy::{
@@ -7,6 +6,9 @@ use bevy::{
     prelude::*,
     window::PresentMode,
 };
+
+#[cfg(feature = "physics_debug")]
+use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 
 mod game;
 mod menu;
@@ -23,6 +25,21 @@ pub fn run() {
     // Must be registered before DefaultPlugins (which includes AssetPlugin).
     let mut app = App::new();
     app.register_asset_source("world", AssetSourceBuilder::platform_default(".", None));
+
+    #[cfg(feature = "physics_debug")]
+    app
+        .add_plugins(PhysicsDebugPlugin::default())
+        .insert_gizmo_config(
+            PhysicsGizmos {
+                collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
+                ..PhysicsGizmos::none()
+            },
+            GizmoConfig {
+                enabled: false,
+                ..default()
+            },
+    );
+
     app.add_plugins(
         DefaultPlugins
             .set(AssetPlugin {
@@ -40,17 +57,6 @@ pub fn run() {
     )
     // .add_plugins(OutlinePlugin)
     .add_plugins(PhysicsPlugins::default())
-    .add_plugins(PhysicsDebugPlugin::default())
-    .insert_gizmo_config(
-        PhysicsGizmos {
-            collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
-            ..PhysicsGizmos::none()
-        },
-        GizmoConfig {
-            enabled: false,
-            ..default()
-        },
-    )
     .add_plugins(settings::SettingsPlugin)
     .add_plugins(ui::UiPlugin)
     .add_plugins(menu::MenuPlugin)

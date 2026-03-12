@@ -29,6 +29,10 @@ pub struct SystemTimings {
     pub lod_sum_secs: f32,
     pub lod_max_secs: f32,
     pub lod_calls: u32,
+    // launch_chunk_tasks
+    pub launch_sum_secs: f32,
+    pub launch_max_secs: f32,
+    pub launch_calls: u32,
     // streaming state snapshot (written by ring system)
     pub chunks_loaded: usize,
     pub chunks_computing: usize,
@@ -63,6 +67,7 @@ fn log_perf_summary(
     let finalize_avg = timings.finalize_sum_secs / timings.finalize_calls.max(1) as f32;
     let ring_avg = timings.ring_sum_secs / timings.ring_calls.max(1) as f32;
     let lod_avg = timings.lod_sum_secs / timings.lod_calls.max(1) as f32;
+    let launch_avg = timings.launch_sum_secs / timings.launch_calls.max(1) as f32;
 
     let tile_count = heightmap.as_ref().map(|h| h.tile_count()).unwrap_or(0);
     let entity_count = entities.iter().count();
@@ -86,6 +91,11 @@ fn log_perf_summary(
         "[PERF]   update_streaming_ring    : {:.3}ms / {:.2}ms",
         ring_avg * 1000.0,
         timings.ring_max_secs * 1000.0
+    );
+    info!(
+        "[PERF]   launch_chunk_tasks       : {:.3}ms / {:.2}ms",
+        launch_avg * 1000.0,
+        timings.launch_max_secs * 1000.0
     );
     info!(
         "[PERF]   update_terrain_lod       : {:.3}ms / {:.2}ms  [ran {}/{WINDOW_SIZE} frames]",
@@ -114,6 +124,8 @@ fn log_perf_summary(
     timings.finalize_calls = 0;
     timings.ring_sum_secs = 0.0;
     timings.ring_calls = 0;
+    timings.launch_sum_secs = 0.0;
+    timings.launch_calls = 0;
     timings.lod_sum_secs = 0.0;
     timings.lod_calls = 0;
 }
@@ -129,6 +141,6 @@ impl Plugin for PerfMonitorPlugin {
         #[cfg(feature = "profiling")]
         app.add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin);
 
-        app.add_systems(Last, (collect_frame_time, log_perf_summary).chain());
+        // app.add_systems(Last, (collect_frame_time, log_perf_summary).chain());
     }
 }

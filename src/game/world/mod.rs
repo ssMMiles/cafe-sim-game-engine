@@ -171,12 +171,13 @@ pub fn setup(
         DirectionalLight {
             color: Color::srgb(1.0, 1.0, 0.9), // Warm sunlight hue
             illuminance: 2000.0,               // Bright sunlight
-            shadows_enabled: true,
+            shadows_enabled: false,
             ..default()
         },
         CascadeShadowConfigBuilder {
-            maximum_distance: 600.0,
-            first_cascade_far_bound: 50.0,
+            num_cascades: 1,
+            maximum_distance: 150.0,
+            first_cascade_far_bound: 30.0,
             ..default()
         }
         .build(),

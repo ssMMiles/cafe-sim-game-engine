@@ -38,7 +38,7 @@ use super::{
         HeightmapData, TILE_SIZE,
         bootstrap::{
             ChunkComputeResult, TerrainRenderAssets, apply_chunk_to_heightmap,
-            compute_chunk_meshes, extract_chunk_heights, spawn_chunk_from_result,
+            compute_chunk_meshes, spawn_chunk_from_result,
         },
         storage::{ChunkState, TerrainChunkRegistry, TerrainWorld},
     },
@@ -248,10 +248,13 @@ pub fn launch_chunk_tasks(
     chunk_data_assets: Res<Assets<ChunkDataAsset>>,
     mut state: ResMut<StreamingState>,
     heightmap: Option<ResMut<HeightmapData>>,
+    mut timings: ResMut<SystemTimings>,
 ) {
     let Some(mut heightmap) = heightmap else {
         return;
     };
+
+    let t0 = std::time::Instant::now();
 
     // Determine which pending chunks have all their assets resolved.
     let mut ready_with_data: Vec<(i32, i32)> = Vec::new();
@@ -298,20 +301,20 @@ pub fn launch_chunk_tasks(
         };
         let (cx, cy) = chunk_coord;
 
-        // Patch heightmap with stored modifications (must happen on main thread).
-        if let Some(terrain_asset) = pending
+        // Patch heightmap with stored modifications (must happen on main thread,
+        // keeps HeightmapData correct for physics/gameplay queries).
+        let chunk_data = pending
             .terrain_handle
             .as_ref()
             .and_then(|h| chunk_data_assets.get(h))
-        {
-            apply_chunk_to_heightmap(&mut heightmap, &terrain_asset.0);
-        }
+            .map(|asset| {
+                apply_chunk_to_heightmap(&mut heightmap, &asset.0);
+                asset.0.clone()
+            });
 
-        // Extract heights into an owned Vec so the task can move it off-thread.
-        let heights = extract_chunk_heights(&heightmap, cx, cy);
-
+        // Height extraction happens inside the async task (no main-thread HashMap cost).
         let task = thread_pool.spawn(async move {
-            compute_chunk_meshes(heights, cx, cy, TILE_SIZE)
+            compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE)
         });
 
         state.computing.insert(
@@ -330,12 +333,10 @@ pub fn launch_chunk_tasks(
         };
         let (cx, cy) = chunk_coord;
 
-        // No heightmap patch needed — use whatever is already in HeightmapData
-        // (implicitly 0.0 for tiles never written).
-        let heights = extract_chunk_heights(&heightmap, cx, cy);
-
+        // No heightmap patch needed. Flat chunks produce a zero-filled height array
+        // inside the task — no main-thread work at all.
         let task = thread_pool.spawn(async move {
-            compute_chunk_meshes(heights, cx, cy, TILE_SIZE)
+            compute_chunk_meshes(None, cx, cy, TILE_SIZE)
         });
 
         state.computing.insert(
@@ -345,6 +346,13 @@ pub fn launch_chunk_tasks(
                 objects_handle: pending.objects_handle,
             },
         );
+    }
+
+    let elapsed = t0.elapsed().as_secs_f32();
+    timings.launch_sum_secs += elapsed;
+    timings.launch_calls += 1;
+    if elapsed > timings.launch_max_secs {
+        timings.launch_max_secs = elapsed;
     }
 }
 

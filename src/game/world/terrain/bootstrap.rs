@@ -47,19 +47,65 @@ pub struct ChunkComputeResult {
     pub collider_offset: Vec3,
 }
 
+/// Reconstruct a flat height array for a chunk directly from its saved `ChunkData`,
+/// without touching `HeightmapData`. This is designed to run off the main thread.
+///
+/// Returns a `Vec<f32>` of length `CHUNK_SIZE * CHUNK_SIZE` indexed as
+/// `heights[lx * CHUNK_SIZE + ly]`, matching the format expected by `compute_chunk_meshes`.
+fn heights_from_chunk_data(chunk_data: Option<&ChunkData>) -> Vec<f32> {
+    let total = CHUNK_SIZE * CHUNK_SIZE;
+    let mut heights = vec![0.0f32; total];
+
+    let Some(data) = chunk_data else {
+        return heights; // flat (unmodified) chunk — base is all zeros
+    };
+
+    match &data.height_data {
+        HeightData::UseBase => {
+            // No stored modifications; the implicit base (0.0) is already set.
+        }
+        HeightData::Delta(mods) => {
+            for m in mods {
+                let lx = m.local_x() as usize;
+                let ly = m.local_y() as usize;
+                if lx < CHUNK_SIZE && ly < CHUNK_SIZE {
+                    heights[lx * CHUNK_SIZE + ly] += m.delta;
+                }
+            }
+        }
+        HeightData::Full {
+            heights: stored,
+            height_min,
+            height_max,
+        } => {
+            let dequantized = dequantize_heights(stored, *height_min, *height_max);
+            let ch = data.height as usize;
+            for lx in 0..data.width as usize {
+                for ly in 0..ch {
+                    if lx * CHUNK_SIZE + ly < total {
+                        heights[lx * CHUNK_SIZE + ly] = dequantized[lx * ch + ly];
+                    }
+                }
+            }
+        }
+    }
+
+    heights
+}
+
 /// Pure function: compute all LOD meshes and prepare heightfield data for a chunk.
 ///
-/// `heights` is a flat `Vec<f32>` of length `chunk_size * chunk_size`, indexed as
-/// `heights[lx * chunk_size + ly]` for local tile `(lx, ly)`. The chunk covers
-/// global tiles `[start_x .. start_x + chunk_size)` × `[start_y .. start_y + chunk_size)`.
+/// `chunk_data` is the optional saved terrain data for this chunk. Heights are
+/// reconstructed from it off the main thread — no `HeightmapData` access required.
 ///
 /// This function is designed to run off the main thread (no Bevy world access).
 pub fn compute_chunk_meshes(
-    heights: Vec<f32>,
+    chunk_data: Option<ChunkData>,
     chunk_x: i32,
     chunk_y: i32,
     tile_size: (f32, f32),
 ) -> ChunkComputeResult {
+    let heights = heights_from_chunk_data(chunk_data.as_ref());
     let cs = (CHUNK_SIZE - 1) as i32;
     let start_x = chunk_x * cs;
     let start_y = chunk_y * cs;
@@ -177,21 +223,6 @@ pub fn spawn_chunk_from_result(
         .insert((result.chunk_x, result.chunk_y), entity);
 
     entity
-}
-
-/// Extract a flat height array for a chunk from the global `HeightmapData`.
-///
-/// Returns a `Vec<f32>` of length `CHUNK_SIZE * CHUNK_SIZE` indexed as
-/// `heights[lx * CHUNK_SIZE + ly]`, ready to pass to `compute_chunk_meshes`.
-pub fn extract_chunk_heights(heightmap: &HeightmapData, chunk_x: i32, chunk_y: i32) -> Vec<f32> {
-    let cs = (CHUNK_SIZE - 1) as i32;
-    let start_x = chunk_x * cs;
-    let start_y = chunk_y * cs;
-    (0..CHUNK_SIZE)
-        .flat_map(|lx| {
-            (0..CHUNK_SIZE).map(move |ly| heightmap.get_tile(start_x + lx as i32, start_y + ly as i32))
-        })
-        .collect()
 }
 
 /// Two-stage setup system.
