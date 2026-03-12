@@ -106,16 +106,14 @@ pub fn handle_pause_input(
             SimulationState::Running => {
                 sim_next_state.set(SimulationState::Paused);
             }
-            SimulationState::Paused => {
-                match current_menu_state.get() {
-                    PauseMenuState::Settings => {
-                        menu_next_state.set(PauseMenuState::Main);
-                    }
-                    PauseMenuState::Main => {
-                        sim_next_state.set(SimulationState::Running);
-                    }
+            SimulationState::Paused => match current_menu_state.get() {
+                PauseMenuState::Settings => {
+                    menu_next_state.set(PauseMenuState::Main);
                 }
-            }
+                PauseMenuState::Main => {
+                    sim_next_state.set(SimulationState::Running);
+                }
+            },
         }
     }
 }
@@ -136,7 +134,12 @@ pub fn setup_pause_menu(mut commands: Commands, theme: Res<UiTheme>) {
         ))
         .with_children(|parent| {
             parent.ui_title("PAUSED", &theme);
-            parent.ui_button("Resume", PauseMenuButton::Resume, ButtonVariant::Primary, &theme);
+            parent.ui_button(
+                "Resume",
+                PauseMenuButton::Resume,
+                ButtonVariant::Primary,
+                &theme,
+            );
             parent.ui_button(
                 "Settings",
                 PauseMenuButton::Settings,
@@ -298,7 +301,9 @@ pub fn handle_slider<T: Component + SliderSetting>(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Some(cursor_pos) = window.cursor_position() else {
+        return;
+    };
     let normalized_value = calculate_normalized_position(cursor_pos, window);
 
     if let Ok((_, mut handle_node)) = handle_query.single_mut() {

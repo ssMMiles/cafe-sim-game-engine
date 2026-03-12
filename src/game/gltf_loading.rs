@@ -1,7 +1,4 @@
-use crate::game::{
-    GameEntity,
-    gfx::toon_material::ToonMaterial,
-};
+use crate::game::{GameEntity, gfx::toon_material::ToonMaterial};
 
 use super::gfx::camera::PlayerCamera;
 use bevy::{

@@ -1,4 +1,6 @@
-use bevy::{pbr::MaterialExtension, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef};
+use bevy::{
+    pbr::MaterialExtension, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef,
+};
 
 // Define the Material Extension
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]

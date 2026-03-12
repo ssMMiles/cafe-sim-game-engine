@@ -13,8 +13,8 @@ pub struct UiTheme {
     pub text_dim: Color,    // secondary/dim text
     pub text_accent: Color, // value text (blue tint)
     pub text_white: Color,
-    pub highlight: Color,   // selection highlight
-    pub positive: Color,    // positive/active state
+    pub highlight: Color, // selection highlight
+    pub positive: Color,  // positive/active state
 
     // Typography
     pub size_title: f32,   // 48.0

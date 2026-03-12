@@ -57,11 +57,7 @@ pub fn setup(
     commands.insert_resource(SimulationConfig::default());
 
     // Setup the game world
-    crate::game::world::setup(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-    );
+    crate::game::world::setup(&mut commands, &mut meshes, &mut materials);
 }
 
 pub fn exit(
