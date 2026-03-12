@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 profiling = ["bevy/trace_chrome", "bevy/sysinfo_plugin", "bevy/debug"]
 tracy = ["bevy/trace_tracy", "bevy/debug"]
 physics_debug = ["avian3d/debug-plugin"]
+opfs = []
 
 [profile.dev]
 # codegen-backend = "cranelift"

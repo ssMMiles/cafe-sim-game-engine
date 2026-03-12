@@ -10,7 +10,7 @@ use web_sys::{
 use super::StorageError;
 
 /// OPFS-backed storage for WASM. Unit struct — trivially Send + Sync.
-#[derive(Resource)]
+#[derive(Resource, Clone, Copy)]
 pub struct WasmStorage;
 
 impl WasmStorage {
@@ -34,12 +34,11 @@ impl WasmStorage {
                 .dyn_into()
                 .map_err(js_err)?;
 
-        let writable: FileSystemWritableFileStream =
-            JsFuture::from(file_handle.create_writable())
-                .await
-                .map_err(js_err)?
-                .dyn_into()
-                .map_err(js_err)?;
+        let writable: FileSystemWritableFileStream = JsFuture::from(file_handle.create_writable())
+            .await
+            .map_err(js_err)?
+            .dyn_into()
+            .map_err(js_err)?;
 
         let array = Uint8Array::from(bytes);
         let chunk = array.unchecked_ref::<Object>();
@@ -73,9 +72,7 @@ impl WasmStorage {
             .dyn_into()
             .map_err(js_err)?;
 
-        let array_buffer = JsFuture::from(file.array_buffer())
-            .await
-            .map_err(js_err)?;
+        let array_buffer = JsFuture::from(file.array_buffer()).await.map_err(js_err)?;
 
         Ok(Some(Uint8Array::new(&array_buffer).to_vec()))
     }
@@ -137,12 +134,11 @@ async fn navigate_to(
     for part in parts {
         let mut opts = FileSystemGetDirectoryOptions::new();
         opts.create(create);
-        current =
-            JsFuture::from(current.get_directory_handle_with_options(part, &opts))
-                .await
-                .map_err(js_err)?
-                .dyn_into()
-                .map_err(js_err)?;
+        current = JsFuture::from(current.get_directory_handle_with_options(part, &opts))
+            .await
+            .map_err(js_err)?
+            .dyn_into()
+            .map_err(js_err)?;
     }
     Ok(current)
 }
@@ -167,17 +163,17 @@ async fn collect_keys_recursive(
         .dyn_into()
         .map_err(js_err)?;
 
-    let next_fn: js_sys::Function =
-        js_sys::Reflect::get(&iterator, &JsValue::from_str("next"))
-            .map_err(reflect_err)?
-            .dyn_into()
-            .map_err(js_err)?;
+    let next_fn: js_sys::Function = js_sys::Reflect::get(&iterator, &JsValue::from_str("next"))
+        .map_err(reflect_err)?
+        .dyn_into()
+        .map_err(js_err)?;
 
     loop {
-        let result =
-            JsFuture::from(js_sys::Promise::from(next_fn.call0(&iterator).map_err(js_err)?))
-                .await
-                .map_err(js_err)?;
+        let result = JsFuture::from(js_sys::Promise::from(
+            next_fn.call0(&iterator).map_err(js_err)?,
+        ))
+        .await
+        .map_err(js_err)?;
 
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
             .map_err(reflect_err)?
@@ -201,8 +197,8 @@ async fn collect_keys_recursive(
             format!("{prefix}/{name}")
         };
 
-        let kind = js_sys::Reflect::get(&handle, &JsValue::from_str("kind"))
-            .map_err(reflect_err)?;
+        let kind =
+            js_sys::Reflect::get(&handle, &JsValue::from_str("kind")).map_err(reflect_err)?;
         if kind == JsValue::from_str("file") {
             out.push(child_path);
         } else {

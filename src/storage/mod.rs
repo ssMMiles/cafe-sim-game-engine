@@ -30,7 +30,7 @@ impl fmt::Display for StorageError {
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(target_arch = "wasm32")]
-mod wasm;
+pub mod wasm;
 
 /// Platform-specific storage backend. Use this type alias throughout the game
 /// so no call site needs `#[cfg]`.

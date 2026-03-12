@@ -1,13 +1,10 @@
 //! Bevy systems for saving terrain data to disk asynchronously.
 
-use bevy::{
-    prelude::*,
-    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
-};
+use bevy::prelude::*;
 
 use super::storage::{
     ChunkData, ChunkIndexEntry, ChunkState, HeightData, MaterialData, TerrainChunkRegistry,
-    TerrainWorld, quantize_heights, save_chunk, save_world,
+    TerrainWorld, quantize_heights,
 };
 use super::{CHUNK_SIZE, HeightmapData};
 
@@ -21,21 +18,33 @@ struct SaveResult {
 }
 
 /// Holds the in-flight background save task (at most one at a time).
+///
+/// On native (and wasm32 without the `opfs` feature): wraps a `Task<SaveResult>`
+/// from `AsyncComputeTaskPool`.
+/// On wasm32+opfs: wraps an `Arc<Mutex<Option<SaveResult>>>` polled from a
+/// `spawn_local` future (OPFS futures are `!Send`).
+#[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
 #[derive(Resource, Default)]
-pub struct PendingTerrainSave(Option<Task<SaveResult>>);
+pub struct PendingTerrainSave(Option<bevy::tasks::Task<SaveResult>>);
+
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+#[derive(Resource, Default)]
+pub struct PendingTerrainSave(Option<std::sync::Arc<std::sync::Mutex<Option<SaveResult>>>>);
 
 // ============================================================================
 // Systems
 // ============================================================================
 
 /// On Shift+S: drain dirty chunks, clone all data, and hand off to a background
-/// task.  The main thread is not blocked waiting for any I/O.
+/// task (native) or a `spawn_local` future (wasm+opfs).
+/// The main thread is not blocked waiting for any I/O.
 pub fn save_terrain(
     input: Res<ButtonInput<KeyCode>>,
     terrain_world: Option<Res<TerrainWorld>>,
     registry: Option<ResMut<TerrainChunkRegistry>>,
     heightmap: Option<Res<HeightmapData>>,
     mut pending: ResMut<PendingTerrainSave>,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
     if !(input.just_pressed(KeyCode::KeyS)
         && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight)))
@@ -61,28 +70,85 @@ pub fn save_terrain(
     }
 
     let dirty: Vec<(i32, i32)> = registry.dirty_chunks.drain().collect();
-    info!(
-        "Saving {} dirty chunk(s) to {:?} (background)",
-        dirty.len(),
-        terrain_world.world_path
-    );
+    info!("Saving {} dirty chunk(s) (background)", dirty.len(),);
 
     let chunks: Vec<ChunkData> = dirty
         .iter()
         .map(|&(cx, cy)| extract_chunk_data(&heightmap, cx, cy))
         .collect();
     let metadata_snapshot = terrain_world.metadata.clone();
-    let world_path = terrain_world.world_path.clone();
 
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        let mut saved_chunks = Vec::new();
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+    {
+        use super::storage::{save_chunk, save_world};
+        use bevy::tasks::AsyncComputeTaskPool;
+
+        let world_path = terrain_world.world_path.clone();
+
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            let mut saved_chunks = Vec::new();
+            let mut meta = metadata_snapshot;
+
+            for chunk in &chunks {
+                let cx = chunk.chunk_x;
+                let cy = chunk.chunk_y;
+                match save_chunk(chunk, &world_path) {
+                    Ok(()) => {
+                        if let Some(entry) = meta
+                            .chunk_index
+                            .iter_mut()
+                            .find(|e| e.chunk_x == cx && e.chunk_y == cy)
+                        {
+                            entry.state = ChunkState::FullyOverwritten;
+                        } else {
+                            meta.chunk_index.push(ChunkIndexEntry {
+                                chunk_x: cx,
+                                chunk_y: cy,
+                                state: ChunkState::FullyOverwritten,
+                            });
+                        }
+                        saved_chunks.push((cx, cy));
+                    }
+                    Err(e) => error!("Failed to save chunk ({cx}, {cy}): {e}"),
+                }
+            }
+
+            meta.last_saved = 0;
+
+            let world_meta_ok = match save_world(&meta, &world_path) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!("Failed to save world metadata: {e}");
+                    false
+                }
+            };
+
+            SaveResult {
+                saved_chunks,
+                world_meta_ok,
+            }
+        });
+
+        pending.0 = Some(task);
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    {
+        use super::storage::{serialize_chunk, serialize_world};
+        use std::sync::{Arc, Mutex};
+        use wasm_bindgen_futures::spawn_local;
+
+        let world_id = terrain_world.metadata.world_id.clone();
+
+        // Serialize synchronously on the main thread (sub-ms per chunk), then fire-and-forget.
+        let mut serialized: Vec<(i32, i32, Vec<u8>)> = Vec::new();
         let mut meta = metadata_snapshot;
 
         for chunk in &chunks {
             let cx = chunk.chunk_x;
             let cy = chunk.chunk_y;
-            match save_chunk(chunk, &world_path) {
-                Ok(()) => {
+            match serialize_chunk(chunk) {
+                Ok(bytes) => {
                     if let Some(entry) = meta
                         .chunk_index
                         .iter_mut()
@@ -96,45 +162,97 @@ pub fn save_terrain(
                             state: ChunkState::FullyOverwritten,
                         });
                     }
-                    saved_chunks.push((cx, cy));
+                    serialized.push((cx, cy, bytes));
                 }
-                Err(e) => error!("Failed to save chunk ({cx}, {cy}): {e}"),
+                Err(e) => error!("Failed to serialize chunk ({cx}, {cy}): {e}"),
             }
         }
 
         meta.last_saved = 0;
-
-        let world_meta_ok = match save_world(&meta, &world_path) {
-            Ok(()) => true,
+        let meta_bytes = match serialize_world(&meta) {
+            Ok(b) => Some(b),
             Err(e) => {
-                error!("Failed to save world metadata: {e}");
-                false
+                error!("Failed to serialize world metadata: {e}");
+                None
             }
         };
 
-        SaveResult {
-            saved_chunks,
-            world_meta_ok,
-        }
-    });
+        // saved_chunks will be the successful chunk coords.
+        let saved_chunk_coords: Vec<(i32, i32)> =
+            serialized.iter().map(|&(cx, cy, _)| (cx, cy)).collect();
 
-    pending.0 = Some(task);
+        let slot: Arc<Mutex<Option<SaveResult>>> = Arc::new(Mutex::new(None));
+        pending.0 = Some(slot.clone());
+
+        let s = crate::storage::wasm::WasmStorage;
+        spawn_local(async move {
+            let mut saved_chunks = Vec::new();
+
+            for (cx, cy, bytes) in serialized {
+                let key = format!("worlds/{}/chunks/chunk_{}_{}.terrain", world_id, cx, cy);
+                if let Err(e) = s.save(&key, &bytes).await {
+                    log::error!("OPFS terrain save failed for chunk ({cx}, {cy}): {e}");
+                } else {
+                    saved_chunks.push((cx, cy));
+                }
+            }
+
+            let world_meta_ok = if let Some(bytes) = meta_bytes {
+                let key = format!("worlds/{}/world.meta", world_id);
+                match s.save(&key, &bytes).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::error!("OPFS world.meta save failed: {e}");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            *slot.lock().unwrap() = Some(SaveResult {
+                saved_chunks,
+                world_meta_ok,
+            });
+        });
+    }
 }
 
-/// Poll the background save task each frame; once complete, apply results to
+/// Poll the background save task/slot each frame; once complete, apply results to
 /// the live `TerrainWorld` resource.
 pub fn poll_terrain_save(
     mut pending: ResMut<PendingTerrainSave>,
     terrain_world: Option<ResMut<TerrainWorld>>,
 ) {
-    let Some(task) = pending.0.as_mut() else {
-        return;
-    };
-    let Some(result) = check_ready(task) else {
-        return;
-    };
-    pending.0 = None;
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+    {
+        use bevy::tasks::futures::check_ready;
 
+        let Some(task) = pending.0.as_mut() else {
+            return;
+        };
+        let Some(result) = check_ready(task) else {
+            return;
+        };
+        pending.0 = None;
+        apply_save_result(result, terrain_world);
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    {
+        let Some(slot) = pending.0.as_ref() else {
+            return;
+        };
+        let result = slot.lock().unwrap().take();
+        let Some(result) = result else {
+            return;
+        };
+        pending.0 = None;
+        apply_save_result(result, terrain_world);
+    }
+}
+
+fn apply_save_result(result: SaveResult, terrain_world: Option<ResMut<TerrainWorld>>) {
     let Some(mut terrain_world) = terrain_world else {
         return;
     };
@@ -170,7 +288,11 @@ pub fn poll_terrain_save(
 // Helpers
 // ============================================================================
 
-fn extract_chunk_data(heightmap: &HeightmapData, chunk_x: i32, chunk_y: i32) -> ChunkData {
+pub(super) fn extract_chunk_data(
+    heightmap: &HeightmapData,
+    chunk_x: i32,
+    chunk_y: i32,
+) -> ChunkData {
     let cs = (CHUNK_SIZE - 1) as i32;
     let start_x = chunk_x * cs;
     let start_y = chunk_y * cs;
