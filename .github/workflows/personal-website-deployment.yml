@@ -24,7 +24,7 @@ jobs:
             - run: |
                   cd game-engine
                   npm install -g wasm-pack wasm-opt
-                  wasm-pack build --target web --release
+                  wasm-pack build --target web --release --features opfs
 
                   cp -r pkg/. ../simple-website/game
                   cp -r assets/. ../simple-website/game/assets
