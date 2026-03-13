@@ -16,7 +16,9 @@ use outline::{toggle_outline, update_outline};
 use physics_debug::{sync_physics_debug, toggle_physics_debug};
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 
-use crate::game::gfx::toon_material::ToonMaterial;
+use crate::game::gfx::toon_material::{
+    DefaultToonLightmap, ToonMaterial, create_default_toon_lightmap,
+};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GfxSet {
@@ -28,8 +30,14 @@ pub enum GfxSet {
 
 pub struct GfxPlugin;
 
+fn setup_default_toon_lightmap(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let handle = create_default_toon_lightmap(&mut images);
+    commands.insert_resource(DefaultToonLightmap(handle));
+}
+
 impl Plugin for GfxPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup_default_toon_lightmap);
         app.add_systems(Update, toggle_crosshair.in_set(GfxSet::InGame));
         app.add_systems(Update, update_crosshair_display.in_set(GfxSet::InGame));
         app.add_systems(Update, resize_render_texture_sprite.in_set(GfxSet::InGame));

@@ -1,6 +1,6 @@
 #import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
+    pbr_fragment::pbr_input_from_vertex_output,
+    pbr_bindings,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     shadows,
@@ -23,6 +23,11 @@
 var stone_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var stone_sampler: sampler;
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+var lightmap_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+var lightmap_sampler: sampler;
 
 // Scale controlling how many world units span one texture repeat.
 // Larger = stones appear larger / more spread out.
@@ -76,8 +81,13 @@ fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    let double_sided = false;
+    var pbr_input = pbr_input_from_vertex_output(in, is_front, double_sided);
+    // Read base color directly from the material uniform — we skip
+    // pbr_input_from_standard_material because terrain has no UV0 and that
+    // function assumes uv is defined whenever any UV set is present.
+    pbr_input.material.base_color = pbr_bindings::material.base_color;
+    pbr_input.material.flags = pbr_bindings::material.flags;
 
     // Sample with stochastic UV offset to break up visible tiling.
     // Fixed mip level avoids automatic selection blurring sparse textures to white at distance.
@@ -149,8 +159,21 @@ fn fragment(
         lighting += NdotL * smooth_attenuation * smooth_attenuation * shadow;
     }
 
-    // Quantize into toon bands — lighting is already in [0, 1]
-    let toon_factor = toon_band(lighting, 5.0);
+    // Sample the baked lightmap (shadow + AO packed into a single R channel).
+    // A white (1.0) texel is the default before any bake has been run, so
+    // this multiplication is a no-op until baked data is applied.
+    // Guard with VERTEX_UVS_B in case UV2 is absent (shouldn't happen for
+    // terrain, but prevents a hard shader error if it ever does).
+#ifdef VERTEX_UVS_B
+    let lm = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
+#else
+    let lm = 1.0;
+#endif
+
+    // Scale the accumulated real-time lighting by the baked factor before
+    // quantization. This maps baked shadow/AO naturally onto the toon bands
+    // without changing the band count or the ambient floor.
+    let toon_factor = toon_band(lighting * lm, 5.0);
 
     // Ambient is a continuous floor so unlit areas aren't pitch black
     let ambient_floor = luminance(view_bindings::lights.ambient_color.rgb) * view_bindings::view.exposure;

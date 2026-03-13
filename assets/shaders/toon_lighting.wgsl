@@ -1,6 +1,6 @@
 #import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
+    pbr_fragment::pbr_input_from_vertex_output,
+    pbr_bindings,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     shadows,
@@ -19,6 +19,11 @@
 }
 #endif
 
+@group(#{MATERIAL_BIND_GROUP}) @binding(100)
+var lightmap_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+var lightmap_sampler: sampler;
+
 // Perceptual luminance from a linear RGB color
 fn luminance(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -34,8 +39,13 @@ fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    let double_sided = false;
+    var pbr_input = pbr_input_from_vertex_output(in, is_front, double_sided);
+    // Read base color from the material uniform directly to avoid
+    // pbr_input_from_standard_material's dependency on uv (VERTEX_UVS_A) when
+    // only VERTEX_UVS_B is defined on the mesh.
+    pbr_input.material.base_color = pbr_bindings::material.base_color;
+    pbr_input.material.flags = pbr_bindings::material.flags;
 
 #ifdef PREPASS_PIPELINE
     let out = deferred_output(in, pbr_input);
@@ -96,8 +106,17 @@ fn fragment(
         lighting += NdotL * smooth_attenuation * smooth_attenuation * shadow;
     }
 
-    // Quantize into toon bands — lighting is already in [0, 1]
-    let toon_factor = toon_band(lighting, 5.0);
+    // Sample the baked lightmap (shadow + AO packed into a single R channel).
+    // uv_b is only present when VERTEX_UVS_B is defined (i.e. mesh has ATTRIBUTE_UV_1).
+    // Before baking, meshes lack UV2 so we fall back to 1.0 (no-op).
+#ifdef VERTEX_UVS_B
+    let lm = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
+#else
+    let lm = 1.0;
+#endif
+
+    // Scale accumulated real-time lighting by the baked factor before quantization.
+    let toon_factor = toon_band(lighting * lm, 5.0);
 
     // Ambient is a continuous floor so unlit areas aren't pitch black
     let ambient_floor = luminance(view_bindings::lights.ambient_color.rgb) * view_bindings::view.exposure;

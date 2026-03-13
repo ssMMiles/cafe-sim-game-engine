@@ -1,14 +1,16 @@
 use avian3d::prelude::*;
 use bevy::{
+    asset::RenderAssetUsages,
     camera::primitives::Aabb,
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     pbr::ExtendedMaterial,
     prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
 use super::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE,
-    material::TerrainMaterial,
+    material::{DefaultLightmap, TerrainMaterial, create_default_lightmap},
     mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::{self, ChunkData, HeightData, TerrainChunkRegistry, dequantize_heights},
 };
@@ -176,16 +178,49 @@ pub fn compute_chunk_meshes(
     }
 }
 
+/// Load a saved lightmap PNG synchronously and register it as a Bevy `Image` asset.
+///
+/// Returns `None` if the file does not exist, cannot be read, or cannot be decoded.
+/// Only available on non-wasm targets since it uses `std::fs`.
+#[cfg(not(target_arch = "wasm32"))]
+fn try_load_lightmap(path: &std::path::Path, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+    if !path.exists() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?;
+    let gray = img.to_luma8();
+    let image = Image::new(
+        Extent3d {
+            width: gray.width(),
+            height: gray.height(),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        gray.into_raw(),
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    Some(images.add(image))
+}
+
 /// Spawn a terrain chunk entity from pre-computed mesh data.
 ///
 /// Called on the main thread after background mesh generation completes.
 /// Inserts the meshes into `Assets<Mesh>`, builds the avian heightfield collider,
 /// and registers the entity in `TerrainChunkRegistry`.
+///
+/// Each chunk gets its own cloned material so lightmaps can differ per-chunk.
+/// If a saved lightmap PNG exists at `world_path/chunks/chunk_{cx}_{cy}_lightmap.png`,
+/// it is loaded synchronously and applied to the chunk's material.
 pub fn spawn_chunk_from_result(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     chunk_registry: &mut TerrainChunkRegistry,
     render_assets: &TerrainRenderAssets,
+    terrain_materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    images: &mut Assets<Image>,
+    world_path: Option<&std::path::Path>,
     result: ChunkComputeResult,
 ) -> Entity {
     let cs = (CHUNK_SIZE - 1) as i32;
@@ -200,11 +235,30 @@ pub fn spawn_chunk_from_result(
 
     let lod_mesh_handles: [Handle<Mesh>; LOD_LEVELS] = result.lod_meshes.map(|m| meshes.add(m));
 
+    // Clone the shared base material to give this chunk its own instance.
+    // This allows each chunk to hold a different lightmap texture without
+    // affecting other chunks.
+    let chunk_material = if let Some(base) = terrain_materials.get(&render_assets.material) {
+        let mut mat = base.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(wp) = world_path {
+            let lm_path = wp
+                .join("chunks")
+                .join(format!("chunk_{}_{}_lightmap.png", result.chunk_x, result.chunk_y));
+            if let Some(handle) = try_load_lightmap(&lm_path, images) {
+                mat.extension.lightmap = handle;
+            }
+        }
+        terrain_materials.add(mat)
+    } else {
+        render_assets.material.clone()
+    };
+
     let entity = commands
         .spawn((
             GameEntity,
             Mesh3d(lod_mesh_handles[0].clone()),
-            MeshMaterial3d(render_assets.material.clone()),
+            MeshMaterial3d(chunk_material),
             Transform::from_translation(offset),
             GlobalTransform::default(),
             Visibility::Inherited,
@@ -272,6 +326,7 @@ pub fn create_terrain(
     >,
     mut commands: Commands,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut images: ResMut<Assets<Image>>,
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] world_meta_assets: Res<
         Assets<WorldMetaAsset>,
     >,
@@ -400,6 +455,7 @@ pub fn create_terrain(
             &mut commands,
             &mut terrain_materials,
             &asset_server,
+            &mut images,
         );
     }
 }
@@ -413,6 +469,7 @@ fn finalize_terrain_setup(
     commands: &mut Commands,
     terrain_materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
     asset_server: &AssetServer,
+    images: &mut Assets<Image>,
 ) {
     let width = world_config.grid_width as usize;
     let height = world_config.grid_height as usize;
@@ -437,6 +494,10 @@ fn finalize_terrain_setup(
             });
         });
 
+    // Create the default (1×1 white) lightmap and store it as a shared resource.
+    let default_lightmap = create_default_lightmap(images);
+    commands.insert_resource(DefaultLightmap(default_lightmap.clone()));
+
     let material = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::srgb(0.81, 0.62, 0.60),
@@ -445,7 +506,10 @@ fn finalize_terrain_setup(
             reflectance: 0.0,
             ..default()
         },
-        extension: TerrainMaterial { stone_texture },
+        extension: TerrainMaterial {
+            stone_texture,
+            lightmap: default_lightmap,
+        },
     });
 
     commands.insert_resource(TerrainRenderAssets { material });

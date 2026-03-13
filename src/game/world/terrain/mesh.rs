@@ -40,6 +40,8 @@ pub fn generate_lod_mesh(
 
     let mut positions = Vec::with_capacity(surface_count + perimeter);
     let mut normals = Vec::with_capacity(surface_count + perimeter);
+    let mut uv0s: Vec<[f32; 2]> = Vec::with_capacity(surface_count + perimeter);
+    let mut uv1s: Vec<[f32; 2]> = Vec::with_capacity(surface_count + perimeter);
 
     // Helper: sample height using global tile coords (signed), clamped to chunk bounds.
     let sample = |lx: usize, ly: usize| -> f32 {
@@ -77,6 +79,16 @@ pub fn generate_lod_mesh(
                 local_x as f32 * tile_size.0,
                 h,
                 local_y as f32 * tile_size.1,
+            ]);
+
+            // UV0: all zeros — required to satisfy VERTEX_UVS_A in pbr_fragment.wgsl
+            uv0s.push([0.0, 0.0]);
+
+            // Lightmap UV2: simple normalized planar XZ projection within the chunk.
+            // UV range [0, 1] spans the full chunk footprint at all LOD levels.
+            uv1s.push([
+                local_x as f32 / (chunk_width - 1) as f32,
+                local_y as f32 / (chunk_height - 1) as f32,
             ]);
 
             // Compute normal from 4-neighbor heights
@@ -145,6 +157,9 @@ pub fn generate_lod_mesh(
         let pos = positions[base_idx as usize];
         positions.push([pos[0], pos[1] - skirt_depth, pos[2]]);
         normals.push([0.0, 0.0, 0.0]); // zero normal marks skirt vertices
+        // Skirt vertices share UVs with their surface counterpart.
+        uv0s.push([0.0, 0.0]);
+        uv1s.push(uv1s[base_idx as usize]);
     }
 
     let skirt_len = skirt_edge.len();
@@ -173,6 +188,8 @@ pub fn generate_lod_mesh(
     mesh.insert_indices(Indices::U32(indices));
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0s);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1s);
 
     (mesh, aabb)
 }

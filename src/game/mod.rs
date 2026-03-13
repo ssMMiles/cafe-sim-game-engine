@@ -1,7 +1,4 @@
-use bevy::{
-    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    prelude::*,
-};
+use bevy::prelude::*;
 
 use crate::{
     AppState,
@@ -17,7 +14,6 @@ mod gfx;
 mod gltf_loading;
 pub mod pause_menu;
 pub mod physics;
-mod profiling;
 mod simulation;
 mod ui_displays;
 pub mod world;
@@ -37,7 +33,6 @@ use pause_menu::{
     update_slider_label,
 };
 use physics::character_physics;
-use profiling::PerfMonitorPlugin;
 use simulation::{exit, setup};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
@@ -85,11 +80,11 @@ pub enum SimSet {
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(feature = "profiling")]
+        app.add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin);
+
         app.add_plugins(WorldPlugin);
         app.add_plugins(GfxPlugin);
-        app.add_plugins(PerfMonitorPlugin);
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default());
-        app.add_plugins(LogDiagnosticsPlugin::default());
         app.add_message::<InteractableClicked>();
 
         // ── Set configuration ─────────────────────────────────────────────

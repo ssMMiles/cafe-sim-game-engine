@@ -8,6 +8,8 @@
 fn vertex(
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,          // UV0 — all zeros, satisfies VERTEX_UVS_A
+    @location(3) uv_b: vec2<f32>,        // UV1 — lightmap coords
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
     var out: VertexOutput;
@@ -25,6 +27,9 @@ fn vertex(
     } else {
         out.world_normal = normal;
     }
+
+    out.uv = uv;
+    out.uv_b = uv_b;
 
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = instance_index;
