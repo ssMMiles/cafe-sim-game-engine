@@ -240,77 +240,77 @@
 </script>
 
     <script type="module">
-                    import init from "./pkg/game_engine_lib.js";
+        import init from "./pkg/game_engine_lib.js";
 
-                    const overlay = document.getElementById('loading-overlay');
-                    const spinner = document.getElementById('spinner');
-                    const progressWrap = document.getElementById('progress-wrap');
-                    const progressFill = document.getElementById('progress-fill');
-                    const statusEl = document.getElementById('status');
+        const overlay = document.getElementById('loading-overlay');
+        const spinner = document.getElementById('spinner');
+        const progressWrap = document.getElementById('progress-wrap');
+        const progressFill = document.getElementById('progress-fill');
+        const statusEl = document.getElementById('status');
 
-                    // Spawn ambient particles
-                    for (let i = 0; i < 16; i++) {
-                        const el = document.createElement('div');
-                        el.className = 'particle';
-                        const size = 3 + Math.random() * 6;
-                        el.style.cssText = [
-                            `width:${size}px`,
-                            `height:${size}px`,
-                            `left:${8 + Math.random() * 84}%`,
-                            `bottom:${Math.random() * 40}%`,
-                            `--dx:${(Math.random() - 0.5) * 90}px`,
-                            `animation-duration:${7 + Math.random() * 9}s`,
-                            `animation-delay:${-Math.random() * 12}s`,
-                        ].join(';');
-                        overlay.appendChild(el);
+        // Spawn ambient particles
+        for (let i = 0; i < 16; i++) {
+            const el = document.createElement('div');
+            el.className = 'particle';
+            const size = 3 + Math.random() * 6;
+            el.style.cssText = [
+                `width:${size}px`,
+                `height:${size}px`,
+                `left:${8 + Math.random() * 84}%`,
+                `bottom:${Math.random() * 40}%`,
+                `--dx:${(Math.random() - 0.5) * 90}px`,
+                `animation-duration:${7 + Math.random() * 9}s`,
+                `animation-delay:${-Math.random() * 12}s`,
+            ].join(';');
+            overlay.appendChild(el);
+        }
+
+        function setStatus(text, prominent = false) {
+            statusEl.textContent = text;
+            statusEl.classList.toggle('prominent', prominent);
+        }
+
+        function setProgress(pct) {
+            progressFill.style.width = Math.min(100, pct) + '%';
+            progressFill.classList.toggle('active', pct < 100);
+        }
+
+        // XHR-based download with progress — more reliable than fetch+ReadableStream
+        function downloadWasm(url) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('GET', url, true);
+                xhr.responseType = 'arraybuffer';
+
+                xhr.onloadstart = () => {
+                    setStatus('Downloading  0%');
+                    spinner.style.display = 'none';
+                    progressWrap.classList.add('visible');
+                };
+
+                xhr.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        const pct = (e.loaded / e.total) * 100;
+                        setProgress(pct);
+                        setStatus(`Downloading  ${Math.round(pct)}%`);
+                    } else {
+                        setStatus(`Downloading  ${(e.loaded / 1048576).toFixed(1)} MB`, true);
                     }
+                };
 
-                    function setStatus(text, prominent = false) {
-                        statusEl.textContent = text;
-                        statusEl.classList.toggle('prominent', prominent);
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        setProgress(100);
+                        resolve(new Uint8Array(xhr.response));
+                    } else {
+                        reject(new Error(`HTTP ${xhr.status}`));
                     }
+                };
 
-                    function setProgress(pct) {
-                        progressFill.style.width = Math.min(100, pct) + '%';
-                        progressFill.classList.toggle('active', pct < 100);
-                    }
-
-                    // XHR-based download with progress — more reliable than fetch+ReadableStream
-                    function downloadWasm(url) {
-                        return new Promise((resolve, reject) => {
-                            const xhr = new XMLHttpRequest();
-                            xhr.open('GET', url, true);
-                            xhr.responseType = 'arraybuffer';
-
-                            xhr.onloadstart = () => {
-                                setStatus('Downloading  0%');
-                                spinner.style.display = 'none';
-                                progressWrap.classList.add('visible');
-                            };
-
-                            xhr.onprogress = (e) => {
-                                if (e.lengthComputable) {
-                                    const pct = (e.loaded / e.total) * 100;
-                                    setProgress(pct);
-                                    setStatus(`Downloading  ${Math.round(pct)}%`);
-                                } else {
-                                    setStatus(`Downloading  ${(e.loaded / 1048576).toFixed(1)} MB`, true);
-                                }
-                            };
-
-                            xhr.onload = () => {
-                                if (xhr.status >= 200 && xhr.status < 300) {
-                                    setProgress(100);
-                                    resolve(new Uint8Array(xhr.response));
-                                } else {
-                                    reject(new Error(`HTTP ${xhr.status}`));
-                                }
-                            };
-
-                            xhr.onerror = () => reject(new Error('Network error'));
-                            xhr.send();
-                        });
-                    }
+                xhr.onerror = () => reject(new Error('Network error'));
+                xhr.send();
+            });
+        }
 
         async function run() {
             try {

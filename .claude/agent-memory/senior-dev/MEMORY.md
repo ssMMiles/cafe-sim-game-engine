@@ -18,6 +18,7 @@
 - `src/game/world/terrain/edit.rs` — brush systems; `toggle_terrain_edit_mode`, `apply_terrain_brush`
 - `src/game/world/streaming.rs` — `update_streaming_ring`, `launch_chunk_tasks`, `finalize_computed_chunks`
 - `src/game/world/objects.rs` — `PlacedObject`, `world_pos_to_chunk`, `spawn_chunk_objects`
+- `src/game/world/baking/` — lightmap baking pipeline (see Baking System section)
 
 ## Async Chunk Mesh Generation (March 2026)
 - `spawn_terrain_chunk` was replaced with a 3-stage async pipeline (see streaming.rs)
@@ -51,3 +52,32 @@
 ## Doctest Gotcha
 - `//! ``` ... ` code blocks in module-level doc comments are treated as Rust doctests
 - Use `//! ```text` for non-Rust content (file trees, pseudocode, etc.)
+
+## Bevy 0.18 API Notes
+- `RenderAssetUsages` is at `bevy::asset::RenderAssetUsages` (NOT `bevy::render::render_asset::RenderAssetUsages` — that is a private re-import)
+- `GlobalTransform::to_matrix()` returns `Mat4` (NOT `compute_matrix()`)
+- `Children` iterates as `&Entity` (slice::Iter) — use `.to_vec()` or `for &child in children.iter()` to get owned Entity
+- Events use `#[derive(Message)]` + `MessageWriter<T>` / `MessageReader<T>` + `app.add_message::<T>()`
+- `EventWriter`/`EventReader`/`add_event` do NOT exist in this project's Bevy 0.18 setup
+- `.after()` cannot be called directly on free function items — use `.chain()` or configure in system sets
+
+## Baking System (March 2026)
+- Module: `src/game/world/baking/` with `mod.rs`, `raycast.rs`, `terrain.rs`, `objects.rs`, `uv_unwrap.rs`
+- Trigger: Shift+B in edit mode → `BakeMessage` → `run_bake` system (`.chain()` after `trigger_bake`)
+- `BakeConfig` resource: `terrain_resolution`, `mesh_resolution`, `ao_rays`, `ao_radius`, `shadow_steps`
+- `LightmapUvCache(HashSet<AssetId<Mesh>>)` resource: tracks which meshes have had xatlas UV2 generated
+- Terrain lightmaps: R8Unorm PNG, per-chunk, `worlds/{id}/chunks/chunk_{cx}_{cy}_lightmap.png`
+- Object lightmaps: R8Unorm PNG, per placed-object id, `worlds/{id}/objects/obj_{id}_lightmap.png`
+- Combined value per texel: `shadow * 0.5 + ao * 0.5`
+- New direct dependencies: `xatlas-rs = "0.1.3"`, `bytemuck`
+
+## Lightmap Shader Bindings (March 2026)
+- `TerrainMaterial`: stone_texture at 100/101, lightmap at 102/103
+- `ToonMaterial`: lightmap at 100/101 (previously the struct had no bindings and was `Default`)
+- Default lightmaps: `DefaultLightmap` resource (terrain) / `DefaultToonLightmap` resource (toon)
+  - Both are 1x1 white R8Unorm — created at startup, no-op until baked data is applied
+  - `DefaultLightmap` inserted by `create_terrain` in bootstrap.rs (Stage 2)
+  - `DefaultToonLightmap` inserted by `setup_default_toon_lightmap` Startup system in gfx/mod.rs
+- Terrain UV2: planar XZ projection [0,1] per chunk stored in `ATTRIBUTE_UV_1` (location 3)
+- `terrain.wgsl` vertex shader: manually reads `@location(3) uv_b`, writes `out.uv_b`
+- Both fragment shaders: `lm = textureSample(lightmap, sampler, in.uv_b).r` then `toon_band(lighting * lm, 5.0)`
