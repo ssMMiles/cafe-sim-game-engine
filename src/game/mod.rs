@@ -83,6 +83,8 @@ impl Plugin for SimulationPlugin {
         #[cfg(feature = "profiling")]
         app.add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin);
 
+        app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
+
         app.add_plugins(WorldPlugin);
         app.add_plugins(GfxPlugin);
         app.add_message::<InteractableClicked>();
