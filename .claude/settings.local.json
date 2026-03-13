@@ -31,7 +31,8 @@
       "Bash(find:*)",
       "Bash(grep doctest:*)",
       "Bash(cd /c/Users/Miles/Documents/projects/cafe-sim && cargo check 2>&1 | grep \"error\\\\[\" | head -5 && git stash pop)",
-      "Bash(tail:*)"
+      "Bash(tail:*)",
+      "Bash(cd \"C:\\\\Users\\\\Miles\\\\Documents\\\\projects\\\\cafe-sim\\\\.worktrees\\\\wasm-save\" && cargo fmt 2>&1)"
     ],
     "deny": [],
     "ask": [],

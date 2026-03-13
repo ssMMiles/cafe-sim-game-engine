@@ -14,8 +14,7 @@ use bevy::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::Write as IoWrite,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -250,22 +249,46 @@ impl std::fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
+/// Serialize world metadata into the canonical binary frame (magic + version + len + rkyv + crc32).
+/// Use this to produce bytes for writing to any backing store (fs, OPFS, etc.).
+pub fn serialize_world(world: &WorldMetadata) -> Result<Vec<u8>, StorageError> {
+    let rkyv_bytes = rkyv::to_bytes::<RkyvError>(world)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let checksum = crc32fast::hash(&rkyv_bytes);
+
+    let mut out = Vec::with_capacity(4 + 4 + 4 + rkyv_bytes.len() + 4);
+    out.extend_from_slice(WORLD_MAGIC);
+    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&rkyv_bytes);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    Ok(out)
+}
+
+/// Serialize chunk data into the canonical binary frame (magic + version + coords + len + rkyv + crc32).
+/// Use this to produce bytes for writing to any backing store (fs, OPFS, etc.).
+pub fn serialize_chunk(chunk: &ChunkData) -> Result<Vec<u8>, StorageError> {
+    let rkyv_bytes = rkyv::to_bytes::<RkyvError>(chunk)
+        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+    let checksum = crc32fast::hash(&rkyv_bytes);
+
+    let mut out = Vec::with_capacity(4 + 4 + 4 + 4 + 4 + rkyv_bytes.len() + 4);
+    out.extend_from_slice(CHUNK_MAGIC);
+    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&chunk.chunk_x.to_le_bytes());
+    out.extend_from_slice(&chunk.chunk_y.to_le_bytes());
+    out.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&rkyv_bytes);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    Ok(out)
+}
+
 /// Save world metadata to disk
 pub fn save_world(world: &WorldMetadata, world_path: &Path) -> Result<(), StorageError> {
     fs::create_dir_all(world_path)?;
     let meta_path = world_path.join("world.meta");
-
-    let bytes = rkyv::to_bytes::<RkyvError>(world)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let checksum = crc32fast::hash(&bytes);
-
-    let mut file = File::create(&meta_path)?;
-    file.write_all(WORLD_MAGIC)?;
-    file.write_all(&FORMAT_VERSION.to_le_bytes())?;
-    file.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    file.write_all(&bytes)?;
-    file.write_all(&checksum.to_le_bytes())?;
-
+    let out = serialize_world(world)?;
+    fs::write(&meta_path, &out)?;
     Ok(())
 }
 
@@ -273,22 +296,9 @@ pub fn save_world(world: &WorldMetadata, world_path: &Path) -> Result<(), Storag
 pub fn save_chunk(chunk: &ChunkData, world_path: &Path) -> Result<(), StorageError> {
     let chunks_dir = world_path.join("chunks");
     fs::create_dir_all(&chunks_dir)?;
-
     let chunk_path = chunks_dir.join(format!("chunk_{}_{}.terrain", chunk.chunk_x, chunk.chunk_y));
-
-    let bytes = rkyv::to_bytes::<RkyvError>(chunk)
-        .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let checksum = crc32fast::hash(&bytes);
-
-    let mut file = File::create(&chunk_path)?;
-    file.write_all(CHUNK_MAGIC)?;
-    file.write_all(&FORMAT_VERSION.to_le_bytes())?;
-    file.write_all(&chunk.chunk_x.to_le_bytes())?;
-    file.write_all(&chunk.chunk_y.to_le_bytes())?;
-    file.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    file.write_all(&bytes)?;
-    file.write_all(&checksum.to_le_bytes())?;
-
+    let out = serialize_chunk(chunk)?;
+    fs::write(&chunk_path, &out)?;
     Ok(())
 }
 

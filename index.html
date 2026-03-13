@@ -5,60 +5,352 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WGPU Web Demo</title>
+    <title>Swag Gaming</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
+        :root {
+            --espresso:    #120705;
+            --crema:       #c4844f;
+            --steam:       #f2e4d0;
+            --plum:        #1e0e1a;
+            --teal:        #0a1614;
+            --card-bg:     rgba(255, 248, 240, 0.03);
+            --card-border: rgba(196, 132, 79, 0.2);
+            --track-bg:    rgba(255, 248, 240, 0.06);
         }
-        
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
         html, body {
             width: 100%;
             height: 100%;
             overflow: hidden;
         }
 
+        body {
+            background: var(--espresso);
+        }
+
         canvas {
             background-color: black;
-            display: block;  /* Prevents extra space below canvas */
+            display: block;
             width: 100vw !important;
             height: 100vh !important;
         }
+
+        /* ── Loading overlay ── */
+        #loading-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background:
+                radial-gradient(ellipse 60% 50% at 25% 15%, rgba(160, 65, 25, 0.18) 0%, transparent 60%),
+                radial-gradient(ellipse 55% 45% at 75% 85%, rgba(90, 30, 75, 0.22) 0%, transparent 60%),
+                radial-gradient(ellipse 40% 60% at 80% 20%, rgba(15, 55, 50, 0.14) 0%, transparent 55%),
+                linear-gradient(158deg, #120705 0%, #1e0e1a 48%, #0a1614 100%);
+            transition: opacity 0.8s ease;
+        }
+
+        #loading-overlay.fade-out {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* Floating particles */
+        .particle {
+            position: absolute;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(196, 132, 79, 0.25) 0%, transparent 70%);
+            animation: particle-drift linear infinite;
+            pointer-events: none;
+        }
+
+        @keyframes particle-drift {
+            0%   { transform: translateY(0) translateX(0);                    opacity: 0; }
+            8%   { opacity: 1; }
+            88%  { opacity: 0.4; }
+            100% { transform: translateY(-45vh) translateX(var(--dx, 20px)); opacity: 0; }
+        }
+
+        /* ── Card ── */
+        .loading-card {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 26px;
+            padding: 52px 64px 46px;
+            width: min(400px, 88vw);
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 1px;
+            backdrop-filter: blur(24px) saturate(120%);
+            -webkit-backdrop-filter: blur(24px) saturate(120%);
+            box-shadow:
+                0 0 0 1px rgba(196, 132, 79, 0.05),
+                0 40px 100px rgba(0, 0, 0, 0.65),
+                inset 0 1px 0 rgba(255, 248, 240, 0.04);
+        }
+
+        /* Corner marks */
+        .corner {
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            border-color: rgba(196, 132, 79, 0.35);
+            border-style: solid;
+        }
+        .corner.tl { top: 11px;    left: 11px;    border-width: 1px 0 0 1px; }
+        .corner.tr { top: 11px;    right: 11px;   border-width: 1px 1px 0 0; }
+        .corner.bl { bottom: 11px; left: 11px;    border-width: 0 0 1px 1px; }
+        .corner.br { bottom: 11px; right: 11px;   border-width: 0 1px 1px 0; }
+
+        /* Title */
+        .loading-title {
+            font-family: 'Palatino Linotype', 'Palatino', 'Book Antiqua', Georgia, serif;
+            font-size: 2.1rem;
+            font-weight: 400;
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            color: var(--steam);
+            text-shadow:
+                0 0 50px rgba(196, 132, 79, 0.35),
+                0 1px 2px rgba(0, 0, 0, 0.5);
+            line-height: 1;
+            padding-right: 0.3em; /* optical offset for letter-spacing */
+        }
+
+        /* Thin rule */
+        .rule {
+            width: 36px;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(196, 132, 79, 0.45), transparent);
+            margin: -6px 0;
+        }
+
+        /* Spinner */
+        .spinner {
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            border: 1.5px solid rgba(196, 132, 79, 0.12);
+            border-top-color:  rgba(196, 132, 79, 0.85);
+            border-right-color: rgba(196, 132, 79, 0.35);
+            animation: spin 0.85s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+            flex-shrink: 0;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Progress bar */
+        .progress-wrap {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+        .progress-wrap.visible { opacity: 1; }
+
+        .progress-track {
+            width: 100%;
+            height: 2px;
+            background: var(--track-bg);
+            border-radius: 2px;
+            overflow: visible;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, rgba(196, 132, 79, 0.5), #c4844f 80%, #dda06a);
+            border-radius: 2px;
+            transition: width 0.12s linear;
+            position: relative;
+        }
+
+        /* Glowing tip */
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            right: -1px;
+            top: -3px;
+            width: 5px;
+            height: 8px;
+            background: rgba(225, 165, 110, 0.9);
+            border-radius: 50%;
+            filter: blur(2px);
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .progress-fill.active::after { opacity: 1; }
+
+        /* Status */
+        .status {
+            font-family: 'Courier New', 'Courier', monospace;
+            font-size: 0.65rem;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: rgba(242, 228, 208, 0.3);
+            text-align: center;
+            min-height: 1em;
+            transition: color 0.3s ease;
+        }
+        .status.prominent { color: rgba(242, 228, 208, 0.45); }
     </style>
 </head>
 
 <body id="wasm-example">
+<div id="loading-overlay">
+    <div class="loading-card">
+        <div class="corner tl"></div>
+        <div class="corner tr"></div>
+        <div class="corner bl"></div>
+        <div class="corner br"></div>
+
+        <h1 class="loading-title">Swag Gaming</h1>
+        <div class="rule"></div>
+
+        <div class="spinner" id="spinner"></div>
+
+        <div class="progress-wrap" id="progress-wrap">
+            <div class="progress-track">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+        </div>
+
+        <p class="status" id="status">Connecting&hellip;</p>
+    </div>
+</div>
+
+<!-- Fallback: catches module import failures where the script block never runs -->
+<script>
+    window.__wasmLoaded = false;
+    window.addEventListener('error', function (e) {
+        document.getElementById('status').textContent = 'Script error — see console';
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+        document.getElementById('status').textContent = 'Load error — see console';
+        console.error('Unhandled rejection:', e.reason);
+    });
+</script>
+
     <script type="module">
-        import init from "./pkg/cafe_sim.js";
-        
+                    import init from "./pkg/game_engine_lib.js";
+
+                    const overlay = document.getElementById('loading-overlay');
+                    const spinner = document.getElementById('spinner');
+                    const progressWrap = document.getElementById('progress-wrap');
+                    const progressFill = document.getElementById('progress-fill');
+                    const statusEl = document.getElementById('status');
+
+                    // Spawn ambient particles
+                    for (let i = 0; i < 16; i++) {
+                        const el = document.createElement('div');
+                        el.className = 'particle';
+                        const size = 3 + Math.random() * 6;
+                        el.style.cssText = [
+                            `width:${size}px`,
+                            `height:${size}px`,
+                            `left:${8 + Math.random() * 84}%`,
+                            `bottom:${Math.random() * 40}%`,
+                            `--dx:${(Math.random() - 0.5) * 90}px`,
+                            `animation-duration:${7 + Math.random() * 9}s`,
+                            `animation-delay:${-Math.random() * 12}s`,
+                        ].join(';');
+                        overlay.appendChild(el);
+                    }
+
+                    function setStatus(text, prominent = false) {
+                        statusEl.textContent = text;
+                        statusEl.classList.toggle('prominent', prominent);
+                    }
+
+                    function setProgress(pct) {
+                        progressFill.style.width = Math.min(100, pct) + '%';
+                        progressFill.classList.toggle('active', pct < 100);
+                    }
+
+                    // XHR-based download with progress — more reliable than fetch+ReadableStream
+                    function downloadWasm(url) {
+                        return new Promise((resolve, reject) => {
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('GET', url, true);
+                            xhr.responseType = 'arraybuffer';
+
+                            xhr.onloadstart = () => {
+                                setStatus('Downloading  0%');
+                                spinner.style.display = 'none';
+                                progressWrap.classList.add('visible');
+                            };
+
+                            xhr.onprogress = (e) => {
+                                if (e.lengthComputable) {
+                                    const pct = (e.loaded / e.total) * 100;
+                                    setProgress(pct);
+                                    setStatus(`Downloading  ${Math.round(pct)}%`);
+                                } else {
+                                    setStatus(`Downloading  ${(e.loaded / 1048576).toFixed(1)} MB`, true);
+                                }
+                            };
+
+                            xhr.onload = () => {
+                                if (xhr.status >= 200 && xhr.status < 300) {
+                                    setProgress(100);
+                                    resolve(new Uint8Array(xhr.response));
+                                } else {
+                                    reject(new Error(`HTTP ${xhr.status}`));
+                                }
+                            };
+
+                            xhr.onerror = () => reject(new Error('Network error'));
+                            xhr.send();
+                        });
+                    }
+
         async function run() {
             try {
-                const wasm = await init();
+                setStatus('Downloading\u2026', true);
 
-                const canvas = document.querySelector('canvas');
-                
-                // // Handle high DPI displays
-                // const dpr = window.devicePixelRatio || 1;
-                // canvas.width = canvas.clientWidth * dpr;
-                // canvas.height = canvas.clientHeight * dpr;
-                
-                // Handle visibility changes
+                // ── Phase 1: download with progress ───────────────────────
+                const wasmBytes = await downloadWasm('./pkg/game_engine_lib_bg.wasm');
+
+                // ── Phase 2: compile + init ───────────────────────────────
+                progressWrap.classList.remove('visible');
+                spinner.style.display = '';
+                setStatus('Initializing\u2026', true);
+
+                await init({ module_or_path: wasmBytes });
+
+                // ── Phase 3: fade out ─────────────────────────────────────
+                overlay.classList.add('fade-out');
+                overlay.addEventListener('transitionend', () => {
+                    overlay.style.display = 'none';
+                }, { once: true });
+
                 document.addEventListener('visibilitychange', () => {
                     if (document.hidden) {
                         console.log("Page hidden");
                     } else {
                         console.log("Page visible");
-                        // Force a resize when becoming visible again
                         window.dispatchEvent(new Event('resize'));
                     }
                 });
 
                 console.log("WASM Loaded");
+
             } catch (e) {
+                spinner.style.display = 'none';
+                progressWrap.classList.remove('visible');
+                setStatus(`Error: ${e.message} — see console`, true);
                 console.error("Failed to load WASM:", e);
             }
         }
-        
+
         run();
     </script>
 </body>

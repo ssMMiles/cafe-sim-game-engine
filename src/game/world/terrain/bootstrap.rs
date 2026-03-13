@@ -1,6 +1,5 @@
 use avian3d::prelude::*;
 use bevy::{
-    asset::LoadState,
     camera::primitives::Aabb,
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     pbr::ExtendedMaterial,
@@ -24,9 +23,17 @@ pub struct TerrainProcessed;
 #[derive(Component)]
 pub struct TerrainSetupMarker;
 
-/// Holds the in-flight handle for async `world.meta` loading.
+/// Holds the in-flight handle for async `world.meta` loading (native / non-OPFS path).
+#[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
 #[derive(Component)]
 pub(crate) struct WorldMetaHandle(Handle<WorldMetaAsset>);
+
+/// Holds the OPFS load slot for `world.meta` (wasm+opfs path).
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+#[derive(Component)]
+pub(crate) struct WorldMetaOpfsHandle(
+    std::sync::Arc<std::sync::Mutex<Option<Result<Option<Vec<u8>>, String>>>>,
+);
 
 /// Shared render assets created once during terrain setup, reused for every spawned chunk.
 #[derive(Resource)]
@@ -155,7 +162,8 @@ pub fn compute_chunk_meshes(
 
     let physical_width = (CHUNK_SIZE - 1) as f32 * tile_size.0;
     let physical_depth = (CHUNK_SIZE - 1) as f32 * tile_size.1;
-    let collider = Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
+    let collider =
+        Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
     let collider_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
 
     ChunkComputeResult {
@@ -190,8 +198,7 @@ pub fn spawn_chunk_from_result(
         start_y as f32 * TILE_SIZE.1,
     );
 
-    let lod_mesh_handles: [Handle<Mesh>; LOD_LEVELS] =
-        result.lod_meshes.map(|m| meshes.add(m));
+    let lod_mesh_handles: [Handle<Mesh>; LOD_LEVELS] = result.lod_meshes.map(|m| meshes.add(m));
 
     let entity = commands
         .spawn((
@@ -225,18 +232,18 @@ pub fn spawn_chunk_from_result(
     entity
 }
 
-/// Two-stage setup system.
+/// Two-stage (native) or two-stage (wasm+opfs) setup system.
 ///
-/// **Stage 1** (marker present, no handle yet): issues an async load for `world.meta`
-/// and attaches a `WorldMetaHandle` to the marker entity.
+/// **Native stages:**
+/// - Stage 1: marker present, no handle → issue AssetServer load for `world.meta`
+/// - Stage 2: handle present, not processed → wait for asset, then finalize terrain setup
 ///
-/// **Stage 2** (handle present, not yet processed): waits for the asset to resolve,
-/// then inserts all terrain resources (`TerrainWorld`, `TerrainChunkRegistry`,
-/// `HeightmapData`, `TerrainRenderAssets`) and marks the entity `TerrainProcessed`.
-/// If the load fails (new world), fresh metadata is created instead.
+/// **WASM+opfs stages:**
+/// - Stage 0: marker present, no OPFS handle → issue `spawn_local` OPFS load
+/// - Stage 1: OPFS handle present, not processed → poll slot, then finalize terrain setup
 pub fn create_terrain(
-    // Stage 1: marker present, no handle yet, not processed
-    marker_fresh: Query<
+    // Stage 1 native: marker present, no handle yet, not processed
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] marker_fresh: Query<
         Entity,
         (
             With<TerrainSetupMarker>,
@@ -244,101 +251,212 @@ pub fn create_terrain(
             Without<TerrainProcessed>,
         ),
     >,
-    // Stage 2: handle present, not yet processed
-    marker_loading: Query<
+    // Stage 2 native: handle present, not yet processed
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] marker_loading: Query<
         (Entity, &WorldMetaHandle),
+        (With<TerrainSetupMarker>, Without<TerrainProcessed>),
+    >,
+    // Stage 0 wasm+opfs: marker present, no OPFS slot yet, not processed
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))] marker_fresh: Query<
+        Entity,
+        (
+            With<TerrainSetupMarker>,
+            Without<WorldMetaOpfsHandle>,
+            Without<TerrainProcessed>,
+        ),
+    >,
+    // Stage 1 wasm+opfs: OPFS slot present, not yet processed
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))] marker_loading: Query<
+        (Entity, &WorldMetaOpfsHandle),
         (With<TerrainSetupMarker>, Without<TerrainProcessed>),
     >,
     mut commands: Commands,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
-    world_meta_assets: Res<Assets<WorldMetaAsset>>,
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] world_meta_assets: Res<
+        Assets<WorldMetaAsset>,
+    >,
     world_config: Res<storage::WorldConfig>,
     asset_server: Res<AssetServer>,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
-    // ── Stage 1: issue the world.meta load ────────────────────────────────────
+    // ── Stage fresh: initiate load ─────────────────────────────────────────────
     for entity in marker_fresh.iter() {
-        let path = format!("world://worlds/{}/world.meta", world_config.world_id);
-        let handle = asset_server.load::<WorldMetaAsset>(path);
-        commands.entity(entity).insert(WorldMetaHandle(handle));
-    }
-
-    // ── Stage 2: wait for load, then finalise terrain setup ───────────────────
-    for (entity, meta_handle) in marker_loading.iter() {
-        let load_state = asset_server.load_state(meta_handle.0.id());
-
-        // Still in flight — check again next frame.
-        if matches!(load_state, LoadState::Loading | LoadState::NotLoaded) {
-            continue;
+        #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+        {
+            let path = format!("world://worlds/{}/world.meta", world_config.world_id);
+            let handle = asset_server.load::<WorldMetaAsset>(path);
+            commands.entity(entity).insert(WorldMetaHandle(handle));
         }
 
+        #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+        {
+            use std::sync::{Arc, Mutex};
+            use wasm_bindgen_futures::spawn_local;
+
+            let slot: Arc<Mutex<Option<Result<Option<Vec<u8>>, String>>>> =
+                Arc::new(Mutex::new(None));
+            let key = format!("worlds/{}/world.meta", world_config.world_id);
+            let s = crate::storage::wasm::WasmStorage;
+            let slot_clone = slot.clone();
+            spawn_local(async move {
+                let result = s.load(&key).await.map_err(|e| e.to_string());
+                *slot_clone.lock().unwrap() = Some(result);
+            });
+            commands.entity(entity).insert(WorldMetaOpfsHandle(slot));
+        }
+    }
+
+    // ── Stage loading: wait then finalize ─────────────────────────────────────
+    for (entity, meta_handle) in marker_loading.iter() {
         let width = world_config.grid_width as usize;
         let height = world_config.grid_height as usize;
 
-        let metadata = if matches!(load_state, LoadState::Loaded) {
-            if let Some(asset) = world_meta_assets.get(&meta_handle.0) {
-                info!("Loaded world metadata for '{}'", world_config.world_id);
-                asset.0.clone()
+        // Resolve metadata depending on the platform path.
+        #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+        let metadata_opt: Option<storage::WorldMetadata> = {
+            use bevy::asset::LoadState;
+
+            let load_state = asset_server.load_state(meta_handle.0.id());
+
+            // Still in flight — check again next frame.
+            if matches!(load_state, LoadState::Loading | LoadState::NotLoaded) {
+                continue;
+            }
+
+            let metadata = if matches!(load_state, LoadState::Loaded) {
+                if let Some(asset) = world_meta_assets.get(&meta_handle.0) {
+                    info!("Loaded world metadata for '{}'", world_config.world_id);
+                    asset.0.clone()
+                } else {
+                    warn!(
+                        "WorldMetaAsset unexpectedly missing after Loaded state, using fresh metadata"
+                    );
+                    make_fresh_metadata(&world_config, width, height)
+                }
             } else {
-                // Loaded state but asset unavailable — shouldn't happen, but fall back.
-                warn!(
-                    "WorldMetaAsset unexpectedly missing after Loaded state, using fresh metadata"
+                info!(
+                    "No saved world.meta for '{}', starting fresh",
+                    world_config.world_id
                 );
                 make_fresh_metadata(&world_config, width, height)
-            }
-        } else {
-            // Failed (404 = new world, or corrupt file)
-            info!(
-                "No saved world.meta for '{}', starting fresh",
-                world_config.world_id
-            );
-            make_fresh_metadata(&world_config, width, height)
+            };
+
+            Some(metadata)
         };
 
+        #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+        let metadata_opt: Option<storage::WorldMetadata> = {
+            use super::storage::parse_world_meta_from_bytes;
+
+            // Poll the slot — if None, still waiting.
+            let maybe_result = meta_handle.0.lock().unwrap().take();
+            let Some(result) = maybe_result else {
+                continue;
+            };
+
+            let metadata = match result {
+                Ok(Some(bytes)) => match parse_world_meta_from_bytes(&bytes) {
+                    Ok(meta) => {
+                        info!(
+                            "Loaded world metadata from OPFS for '{}'",
+                            world_config.world_id
+                        );
+                        meta
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse world.meta from OPFS ({e}), starting fresh");
+                        make_fresh_metadata(&world_config, width, height)
+                    }
+                },
+                Ok(None) => {
+                    info!(
+                        "No saved world.meta in OPFS for '{}', starting fresh",
+                        world_config.world_id
+                    );
+                    make_fresh_metadata(&world_config, width, height)
+                }
+                Err(e) => {
+                    warn!("OPFS world.meta load error ({e}), starting fresh");
+                    make_fresh_metadata(&world_config, width, height)
+                }
+            };
+
+            Some(metadata)
+        };
+
+        let Some(metadata) = metadata_opt else {
+            continue;
+        };
+
+        // world_path is used by native save I/O. On OPFS builds it's kept as a
+        // canonical identifier (not used for fs::write).
         let world_path = std::path::PathBuf::from("worlds").join(&world_config.world_id);
 
-        commands.insert_resource(storage::TerrainWorld {
-            chunk_state_map: storage::build_chunk_state_map(&metadata),
+        finalize_terrain_setup(
+            entity,
             metadata,
             world_path,
-        });
-        commands.insert_resource(TerrainChunkRegistry::default());
-
-        // Sparse heightmap — starts empty (all tiles implicitly 0.0).
-        commands.insert_resource(HeightmapData::new(TILE_SIZE));
-
-        // Shared terrain material — created once, reused by every chunk.
-        let stone_texture: Handle<Image> = asset_server.load_with_settings(
-            "textures/terrain.png",
-            |s: &mut ImageLoaderSettings| {
-                s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                    address_mode_u: ImageAddressMode::Repeat,
-                    address_mode_v: ImageAddressMode::Repeat,
-                    ..ImageSamplerDescriptor::default()
-                });
-            },
-        );
-
-        let material = terrain_materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb(0.81, 0.62, 0.60),
-                perceptual_roughness: 1.0,
-                metallic: 0.0,
-                reflectance: 0.0,
-                ..default()
-            },
-            extension: TerrainMaterial { stone_texture },
-        });
-
-        commands.insert_resource(TerrainRenderAssets { material });
-
-        // Mark processed so this system never runs again for this entity.
-        commands.entity(entity).insert(TerrainProcessed);
-
-        info!(
-            "Terrain setup: {}x{} tile seed, CHUNK_SIZE={}, waiting for streaming to spawn chunks",
-            width, height, CHUNK_SIZE
+            &world_config,
+            &mut commands,
+            &mut terrain_materials,
+            &asset_server,
         );
     }
+}
+
+/// Shared finalisation logic: inserts all terrain resources and marks the entity processed.
+fn finalize_terrain_setup(
+    entity: Entity,
+    metadata: storage::WorldMetadata,
+    world_path: std::path::PathBuf,
+    world_config: &storage::WorldConfig,
+    commands: &mut Commands,
+    terrain_materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    asset_server: &AssetServer,
+) {
+    let width = world_config.grid_width as usize;
+    let height = world_config.grid_height as usize;
+
+    commands.insert_resource(storage::TerrainWorld {
+        chunk_state_map: storage::build_chunk_state_map(&metadata),
+        metadata,
+        world_path,
+    });
+    commands.insert_resource(TerrainChunkRegistry::default());
+
+    // Sparse heightmap — starts empty (all tiles implicitly 0.0).
+    commands.insert_resource(HeightmapData::new(TILE_SIZE));
+
+    // Shared terrain material — created once, reused by every chunk.
+    let stone_texture: Handle<Image> =
+        asset_server.load_with_settings("textures/terrain.png", |s: &mut ImageLoaderSettings| {
+            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                address_mode_u: ImageAddressMode::Repeat,
+                address_mode_v: ImageAddressMode::Repeat,
+                ..ImageSamplerDescriptor::default()
+            });
+        });
+
+    let material = terrain_materials.add(ExtendedMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgb(0.81, 0.62, 0.60),
+            perceptual_roughness: 1.0,
+            metallic: 0.0,
+            reflectance: 0.0,
+            ..default()
+        },
+        extension: TerrainMaterial { stone_texture },
+    });
+
+    commands.insert_resource(TerrainRenderAssets { material });
+
+    // Mark processed so this system never runs again for this entity.
+    commands.entity(entity).insert(TerrainProcessed);
+
+    info!(
+        "Terrain setup: {}x{} tile seed, CHUNK_SIZE={}, waiting for streaming to spawn chunks",
+        width, height, CHUNK_SIZE
+    );
 }
 
 fn make_fresh_metadata(

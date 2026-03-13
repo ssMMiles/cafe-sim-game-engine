@@ -26,7 +26,6 @@ use crate::settings::{
     EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
     MovementSpeedSetting,
 };
-use profiling::PerfMonitorPlugin;
 use animation::{
     init_animation_player, pause_animations, resume_animations, setup_character_animations,
     update_character_animation,
@@ -38,6 +37,7 @@ use pause_menu::{
     update_slider_label,
 };
 use physics::character_physics;
+use profiling::PerfMonitorPlugin;
 use simulation::{exit, setup};
 use ui_displays::{
     setup_fps_display, setup_interaction_info_display, setup_keybinds_display,

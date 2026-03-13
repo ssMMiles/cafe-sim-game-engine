@@ -30,11 +30,7 @@ pub struct PositionDisplay;
 
 // ── FPS Display ───────────────────────────────────────────────────────────────
 
-pub fn setup_fps_display(
-    mut commands: Commands,
-    anchors: Res<UiAnchors>,
-    theme: Res<UiTheme>,
-) {
+pub fn setup_fps_display(mut commands: Commands, anchors: Res<UiAnchors>, theme: Res<UiTheme>) {
     let entity = commands
         .spawn((
             GameEntity,
@@ -164,24 +160,24 @@ fn spawn_keybinds_children(
                     width: Val::Px(200.0),
                     ..default()
                 },))
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new(format!("{} [{}]:", setting.name, setting.keybind)),
-                        TextFont {
-                            font_size: theme.size_label,
-                            ..default()
-                        },
-                        TextColor(theme.text_dim),
-                    ));
-                    row.spawn((
-                        Text::new(setting.current_value.clone()),
-                        TextFont {
-                            font_size: theme.size_label,
-                            ..default()
-                        },
-                        TextColor(theme.text_accent),
-                    ));
-                });
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new(format!("{} [{}]:", setting.name, setting.keybind)),
+                            TextFont {
+                                font_size: theme.size_label,
+                                ..default()
+                            },
+                            TextColor(theme.text_dim),
+                        ));
+                        row.spawn((
+                            Text::new(setting.current_value.clone()),
+                            TextFont {
+                                font_size: theme.size_label,
+                                ..default()
+                            },
+                            TextColor(theme.text_accent),
+                        ));
+                    });
             }
         });
 }

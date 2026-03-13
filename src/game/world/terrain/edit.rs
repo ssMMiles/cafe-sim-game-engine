@@ -125,7 +125,9 @@ pub fn update_brush_preview(
         return;
     }
 
-    let Ok((mut transform, mut visibility)) = preview_query.single_mut() else { return };
+    let Ok((mut transform, mut visibility)) = preview_query.single_mut() else {
+        return;
+    };
 
     match brush_hit.hit.filter(|_| settings.terrain_edit_mode) {
         Some(hit) => {
@@ -154,7 +156,9 @@ pub fn apply_terrain_brush(
 ) {
     let raise = mouse_input.pressed(MouseButton::Left);
     let lower = mouse_input.pressed(MouseButton::Right);
-    let Some(hit_point) = brush_hit.hit else { return };
+    let Some(hit_point) = brush_hit.hit else {
+        return;
+    };
     if !settings.terrain_edit_mode || (!raise && !lower) {
         return;
     }
@@ -277,7 +281,8 @@ pub fn finalize_terrain_lod(
     chunk_query: Query<&TerrainChunk>,
     registry: Option<Res<TerrainChunkRegistry>>,
 ) {
-    let painting = mouse_input.pressed(MouseButton::Left) || mouse_input.pressed(MouseButton::Right);
+    let painting =
+        mouse_input.pressed(MouseButton::Left) || mouse_input.pressed(MouseButton::Right);
 
     // Only run the first frame after brush release.
     if painting || !brush_hit.was_painting || brush_hit.pending_full_lod.is_empty() {
@@ -298,8 +303,12 @@ pub fn finalize_terrain_lod(
         let start_x = cx * cs;
         let start_y = cy * cs;
 
-        let Some(&entity) = registry.loaded_chunks.get(&(cx, cy)) else { continue };
-        let Ok(chunk) = chunk_query.get(entity) else { continue };
+        let Some(&entity) = registry.loaded_chunks.get(&(cx, cy)) else {
+            continue;
+        };
+        let Ok(chunk) = chunk_query.get(entity) else {
+            continue;
+        };
 
         // Pre-extract heights to flat array for cache-friendly sequential access.
         let mut heights = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE);

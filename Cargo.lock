@@ -1969,11 +1969,14 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.1",
  "image",
+ "js-sys",
  "log",
  "rand 0.9.1",
  "rkyv",
  "tempfile",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "winit",
 ]
 

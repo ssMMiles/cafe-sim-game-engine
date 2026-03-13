@@ -100,8 +100,11 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
         theme: &UiTheme,
     ) -> Entity {
         let normalized_value = (value - min) / (max - min);
-        let handle_left =
-            handle_left_percent(normalized_value, theme.slider_track_width, theme.slider_handle_size);
+        let handle_left = handle_left_percent(
+            normalized_value,
+            theme.slider_track_width,
+            theme.slider_handle_size,
+        );
 
         self.spawn((Node {
             width: Val::Px(theme.slider_track_width),
@@ -110,56 +113,55 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
             margin: UiRect::bottom(Val::Px(theme.pad_lg)),
             ..default()
         },))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new(format!("{}: {:.3}", label, value)),
-                TextFont {
-                    font_size: theme.size_body,
-                    ..default()
-                },
-                TextColor(theme.text),
-                Node {
-                    margin: UiRect::bottom(Val::Px(theme.pad_sm)),
-                    ..default()
-                },
-                label_component,
-            ));
+            .with_children(|parent| {
+                parent.spawn((
+                    Text::new(format!("{}: {:.3}", label, value)),
+                    TextFont {
+                        font_size: theme.size_body,
+                        ..default()
+                    },
+                    TextColor(theme.text),
+                    Node {
+                        margin: UiRect::bottom(Val::Px(theme.pad_sm)),
+                        ..default()
+                    },
+                    label_component,
+                ));
 
-            parent
-                .spawn((Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(30.0),
-                    align_items: AlignItems::Center,
-                    ..default()
-                },))
-                .with_children(|slider_parent| {
-                    slider_parent.spawn((
-                        Button,
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Px(theme.slider_track_height),
-                            ..default()
-                        },
-                        BackgroundColor(theme.bg_surface),
-                        track_component,
-                    ));
+                parent
+                    .spawn((Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(30.0),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },))
+                    .with_children(|slider_parent| {
+                        slider_parent.spawn((
+                            Button,
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(theme.slider_track_height),
+                                ..default()
+                            },
+                            BackgroundColor(theme.bg_surface),
+                            track_component,
+                        ));
 
-                    slider_parent.spawn((
-                        Button,
-                        Node {
-                            width: Val::Px(theme.slider_handle_size),
-                            height: Val::Px(theme.slider_handle_size),
-                            position_type: PositionType::Absolute,
-                            left: Val::Percent(handle_left),
-                            border: UiRect::all(Val::Px(2.0)),
-                            ..default()
-                        },
-                        BackgroundColor(theme.primary),
-                        action,
-                    ));
-                });
-        })
-        .id()
+                        slider_parent.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(theme.slider_handle_size),
+                                height: Val::Px(theme.slider_handle_size),
+                                position_type: PositionType::Absolute,
+                                left: Val::Percent(handle_left),
+                                border: UiRect::all(Val::Px(2.0)),
+                                ..default()
+                            },
+                            BackgroundColor(theme.primary),
+                            action,
+                        ));
+                    });
+            })
+            .id()
     }
-
 }

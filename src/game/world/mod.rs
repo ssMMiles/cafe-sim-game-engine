@@ -79,7 +79,11 @@ impl Plugin for WorldPlugin {
         app.init_resource::<StreamingState>();
         app.add_systems(
             Update,
-            (update_streaming_ring, launch_chunk_tasks, finalize_computed_chunks)
+            (
+                update_streaming_ring,
+                launch_chunk_tasks,
+                finalize_computed_chunks,
+            )
                 .chain()
                 .in_set(terrain::TerrainSet::Update),
         );
