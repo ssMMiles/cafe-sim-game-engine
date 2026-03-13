@@ -26,6 +26,7 @@
 //! 3. `finalize_computed_chunks` uses `computing.objects_data` directly (no asset lookup).
 
 use bevy::{
+    pbr::ExtendedMaterial,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -45,6 +46,7 @@ use super::{
             ChunkComputeResult, TerrainRenderAssets, apply_chunk_to_heightmap,
             compute_chunk_meshes, spawn_chunk_from_result,
         },
+        material::TerrainMaterial,
         storage::{ChunkState, TerrainChunkRegistry, TerrainWorld},
     },
 };
@@ -500,6 +502,9 @@ pub fn finalize_computed_chunks(
     config: Res<ChunkStreamingConfig>,
     chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
     render_assets: Option<Res<TerrainRenderAssets>>,
+    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut images: ResMut<Assets<Image>>,
+    terrain_world: Option<Res<TerrainWorld>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     asset_server: Res<AssetServer>,
 ) {
@@ -520,6 +525,8 @@ pub fn finalize_computed_chunks(
         }
     }
 
+    let world_path = terrain_world.as_ref().map(|w| w.world_path.as_path());
+
     for chunk_coord in ready_chunks {
         let Some(mut computing) = state.computing.remove(&chunk_coord) else {
             continue;
@@ -537,6 +544,9 @@ pub fn finalize_computed_chunks(
             &mut meshes,
             &mut chunk_registry,
             &render_assets,
+            &mut terrain_materials,
+            &mut images,
+            world_path,
             result,
         );
 
