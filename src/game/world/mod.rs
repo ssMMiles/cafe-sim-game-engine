@@ -3,6 +3,7 @@ use bevy::{
     prelude::*,
 };
 
+pub mod baking;
 pub mod chunk_assets;
 pub mod edit_mode;
 pub mod mesh_selector;
@@ -65,6 +66,7 @@ impl Plugin for WorldPlugin {
         app.add_systems(Update, sync_sky_dome.in_set(WorldSet::InGame));
 
         app.add_plugins(terrain::TerrainPlugin);
+        app.add_plugins(baking::BakingPlugin);
 
         // Register chunk asset types and their loaders.
         app.init_asset::<ChunkDataAsset>();
@@ -172,20 +174,7 @@ pub fn setup(
 
     commands.spawn((
         GameEntity,
-        DirectionalLight {
-            color: Color::srgb(1.0, 1.0, 0.9), // Warm sunlight hue
-            illuminance: 2000.0,               // Bright sunlight
-            shadows_enabled: false,
-            ..default()
-        },
-        CascadeShadowConfigBuilder {
-            num_cascades: 1,
-            maximum_distance: 150.0,
-            first_cascade_far_bound: 30.0,
-            ..default()
-        }
-        .build(),
-        VolumetricLight, // Enables light-shaft scattering through cloud FogVolumes
+        baking::BakedSun,
         sun_transform,
     ));
 
