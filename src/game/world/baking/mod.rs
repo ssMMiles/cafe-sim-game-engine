@@ -54,7 +54,7 @@ pub struct BakeConfig {
 impl Default for BakeConfig {
     fn default() -> Self {
         Self {
-            terrain_resolution: 128,
+            terrain_resolution: 2048,
             mesh_resolution: 128,
             ao_rays: 16,
             ao_radius: 20.0,

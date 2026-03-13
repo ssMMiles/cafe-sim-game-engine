@@ -115,24 +115,14 @@ fn fragment(
         view_bindings::view.view_from_world[3].z
     ), pbr_input.world_position);
 
-    // Accumulate lighting in normalised [0, 1] space so toon bands span the full
-    // angular range of the sun rather than saturating immediately.
-    // Directional lights use pure NdotL (independent of physical lux units).
-    var lighting = 0.0;
-
-    // Directional lights
-    let n_directional_lights = view_bindings::lights.n_directional_lights;
-    for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
-        let light = &view_bindings::lights.directional_lights[i];
-        let NdotL = max(dot(N, (*light).direction_to_light), 0.0);
-
-        var shadow = 1.0;
-        if ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-            shadow = shadows::fetch_directional_shadow(i, pbr_input.world_position, pbr_input.world_normal, view_z);
-        }
-
-        lighting += NdotL * shadow;
-    }
+    // Start from baked directional lighting (NdotL * shadow * AO packed into R channel).
+    // A white (1.0) default lightmap is inserted at startup so this is a no-op before any bake.
+    // Guard with VERTEX_UVS_B in case UV2 is absent (prevents a hard shader error).
+#ifdef VERTEX_UVS_B
+    var lighting = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
+#else
+    var lighting = 0.5;
+#endif
 
     // Point lights — use smooth range falloff in [0, 1] instead of raw lux attenuation
     let cluster_index = clustering::fragment_cluster_index(pbr_input.frag_coord.xy, view_z, pbr_input.is_orthographic);
@@ -159,21 +149,8 @@ fn fragment(
         lighting += NdotL * smooth_attenuation * smooth_attenuation * shadow;
     }
 
-    // Sample the baked lightmap (shadow + AO packed into a single R channel).
-    // A white (1.0) texel is the default before any bake has been run, so
-    // this multiplication is a no-op until baked data is applied.
-    // Guard with VERTEX_UVS_B in case UV2 is absent (shouldn't happen for
-    // terrain, but prevents a hard shader error if it ever does).
-#ifdef VERTEX_UVS_B
-    let lm = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
-#else
-    let lm = 1.0;
-#endif
-
-    // Scale the accumulated real-time lighting by the baked factor before
-    // quantization. This maps baked shadow/AO naturally onto the toon bands
-    // without changing the band count or the ambient floor.
-    let toon_factor = toon_band(lighting * lm, 5.0);
+    // Quantize the combined lighting (baked directional + real-time point lights).
+    let toon_factor = toon_band(lighting, 5.0);
 
     // Ambient is a continuous floor so unlit areas aren't pitch black
     let ambient_floor = luminance(view_bindings::lights.ambient_color.rgb) * view_bindings::view.exposure;

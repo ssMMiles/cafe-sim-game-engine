@@ -11,6 +11,7 @@ use bevy::{
 use std::{collections::HashSet, fs, path::Path};
 
 use super::{BakeConfig, raycast};
+use super::raycast::BakeHeightCache;
 use crate::game::{
     gfx::toon_material::ToonMaterial,
     world::{
@@ -63,6 +64,38 @@ pub fn bake_object_lightmaps(
         // later (possibly worse-sampled) triangles.
         let mut written = vec![false; res * res];
 
+        // Compute the world-space bounding box across all sub-meshes so we can
+        // build a tight heightmap cache covering the entire object + ray reach.
+        let ray_reach = config.ao_radius * 4.0;
+        let mut bbox_min = Vec3::splat(f32::MAX);
+        let mut bbox_max = Vec3::splat(f32::MIN);
+        let mut have_bounds = false;
+
+        for (mesh_handle, _) in &mesh_entities {
+            if let Some(mesh) = meshes.get(mesh_handle.id()) {
+                let (mn, mx) = world_bounds(mesh, &world_mat);
+                bbox_min = bbox_min.min(mn);
+                bbox_max = bbox_max.max(mx);
+                have_bounds = true;
+            }
+        }
+
+        // Fall back to a generous region centred on the object's world position
+        // if we couldn't derive bounds from vertices.
+        if !have_bounds {
+            let centre = world_mat.w_axis.truncate();
+            bbox_min = centre - Vec3::splat(ray_reach * 2.0);
+            bbox_max = centre + Vec3::splat(ray_reach * 2.0);
+        }
+
+        let cache = BakeHeightCache::extract(
+            heightmap,
+            bbox_min.x - ray_reach,
+            bbox_min.z - ray_reach,
+            bbox_max.x + ray_reach,
+            bbox_max.z + ray_reach,
+        );
+
         for (mesh_handle, _mat_handle) in &mesh_entities {
             // Ensure the mesh has UV2; generate if absent.
             let mesh_id = mesh_handle.id();
@@ -85,7 +118,7 @@ pub fn bake_object_lightmaps(
             rasterize_mesh_lightmap(
                 mesh,
                 &world_mat,
-                heightmap,
+                &cache,
                 config,
                 sun_dir,
                 &mut pixels,
@@ -179,12 +212,32 @@ fn collect_recursive(
     }
 }
 
+/// Compute the world-space axis-aligned bounding box of a mesh's vertices
+/// transformed by `world_mat`. Returns `(min, max)`.
+fn world_bounds(mesh: &Mesh, world_mat: &Mat4) -> (Vec3, Vec3) {
+    let positions: &[[f32; 3]] = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(VertexAttributeValues::Float32x3(v)) => v,
+        _ => return (Vec3::ZERO, Vec3::ZERO),
+    };
+
+    let mut mn = Vec3::splat(f32::MAX);
+    let mut mx = Vec3::splat(f32::MIN);
+
+    for pos in positions {
+        let wp = (*world_mat * Vec3::from(*pos).extend(1.0)).xyz();
+        mn = mn.min(wp);
+        mx = mx.max(wp);
+    }
+
+    (mn, mx)
+}
+
 /// Rasterize a mesh's triangles in UV2 space and accumulate baked values.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_mesh_lightmap(
     mesh: &Mesh,
     world_mat: &Mat4,
-    heightmap: &HeightmapData,
+    cache: &BakeHeightCache,
     config: &BakeConfig,
     sun_dir: Vec3,
     pixels: &mut [u8],
@@ -211,6 +264,10 @@ fn rasterize_mesh_lightmap(
 
     let res_f = res as f32;
 
+    // Normal matrix is constant for this world transform — compute it once
+    // outside the triangle loop rather than once per triangle.
+    let norm_mat = world_mat.inverse().transpose();
+
     for tri in indices.chunks_exact(3) {
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
 
@@ -220,7 +277,6 @@ fn rasterize_mesh_lightmap(
         let wp2 = (*world_mat * Vec3::from(positions[i2]).extend(1.0)).xyz();
 
         // World-space normals (use the normal matrix = transpose(inverse(M))).
-        let norm_mat = world_mat.inverse().transpose();
         let wn0 = (norm_mat * Vec3::from(normals[i0]).extend(0.0))
             .xyz()
             .normalize();
@@ -269,14 +325,14 @@ fn rasterize_mesh_lightmap(
                 let shadow = raycast::cast_shadow_ray(
                     origin,
                     sun_dir,
-                    heightmap,
+                    cache,
                     config.ao_radius * 4.0,
                     config.shadow_steps,
                 );
                 let ao = raycast::compute_ao(
                     origin,
                     world_normal,
-                    heightmap,
+                    cache,
                     config.ao_radius,
                     config.ao_rays,
                     config.shadow_steps,

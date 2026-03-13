@@ -34,10 +34,23 @@ pub fn bake_terrain_lightmaps(
     let res = config.terrain_resolution as usize;
     let chunk_world_size = crate::game::world::terrain::constants::CHUNK_SIZE as f32
         * crate::game::world::terrain::TILE_SIZE.0;
+    // Maximum horizontal distance any ray can travel.
+    let ray_reach = config.ao_radius * 4.0;
 
     for (chunk, material_handle) in chunk_query.iter() {
         let chunk_origin_x = chunk.chunk_x as f32 * chunk_world_size;
         let chunk_origin_z = chunk.chunk_y as f32 * chunk_world_size;
+
+        // Extract a flat heightmap cache covering the chunk + full ray reach in
+        // every direction. This replaces per-step HashMap lookups with direct
+        // Vec indexing, giving a large speedup in the parallel hot loop.
+        let cache = raycast::BakeHeightCache::extract(
+            heightmap,
+            chunk_origin_x - ray_reach,
+            chunk_origin_z - ray_reach,
+            chunk_origin_x + chunk_world_size + ray_reach,
+            chunk_origin_z + chunk_world_size + ray_reach,
+        );
 
         // UV layout: U = x (column), V = y (row).
         // Image data is stored row-major: row ty, column tx.
@@ -52,28 +65,29 @@ pub fn bake_terrain_lightmaps(
 
                 let wx = chunk_origin_x + u * chunk_world_size;
                 let wz = chunk_origin_z + v * chunk_world_size;
-                let wy = heightmap.sample_height(wx, wz).unwrap_or(0.0) + 0.05;
+                let wy = cache.sample_height(wx, wz) + 0.05;
 
                 let origin = Vec3::new(wx, wy, wz);
-                let (normal, _slope) = heightmap.sample_normal(wx, wz).unwrap_or((Vec3::Y, 0.0));
+                let (normal, _slope) = cache.sample_normal(wx, wz);
 
                 let shadow = raycast::cast_shadow_ray(
                     origin,
                     sun_dir,
-                    heightmap,
+                    &cache,
                     config.ao_radius * 4.0,
                     config.shadow_steps,
                 );
                 let ao = raycast::compute_ao(
                     origin,
                     normal,
-                    heightmap,
+                    &cache,
                     config.ao_radius,
                     config.ao_rays,
                     config.shadow_steps,
                 );
 
-                let combined = (shadow * 0.5 + ao * 0.5).clamp(0.0, 1.0);
+                let ndotl = normal.dot(sun_dir).max(0.0);
+                let combined = (ndotl * shadow * (0.5 + ao * 0.5)).clamp(0.0, 1.0);
                 (combined * 255.0) as u8
             })
             .collect();
