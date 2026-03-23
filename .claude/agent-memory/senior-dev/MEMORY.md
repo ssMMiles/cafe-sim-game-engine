@@ -62,14 +62,23 @@
 - `.after()` cannot be called directly on free function items — use `.chain()` or configure in system sets
 
 ## Baking System (March 2026)
-- Module: `src/game/world/baking/` with `mod.rs`, `raycast.rs`, `terrain.rs`, `objects.rs`, `uv_unwrap.rs`
-- Trigger: Shift+B in edit mode → `BakeMessage` → `run_bake` system (`.chain()` after `trigger_bake`)
+- Module: `src/game/world/baking/` with `mod.rs`, `raycast.rs`, `terrain.rs`, `objects.rs`, `uv_unwrap.rs`, `gpu.rs`
+- Trigger: Shift+B in edit mode → `BakeMessage` → `run_bake` system
 - `BakeConfig` resource: `terrain_resolution`, `mesh_resolution`, `ao_rays`, `ao_radius`, `shadow_steps`
 - `LightmapUvCache(HashSet<AssetId<Mesh>>)` resource: tracks which meshes have had xatlas UV2 generated
 - Terrain lightmaps: R8Unorm PNG, per-chunk, `worlds/{id}/chunks/chunk_{cx}_{cy}_lightmap.png`
 - Object lightmaps: R8Unorm PNG, per placed-object id, `worlds/{id}/objects/obj_{id}_lightmap.png`
-- Combined value per texel: `shadow * 0.5 + ao * 0.5`
-- New direct dependencies: `xatlas-rs = "0.1.3"`, `bytemuck`
+- Object shadow casting: convex hull proxies via `parry3d::transformation::try_convex_hull`
+  - `collect_shadow_hulls` in `raycast.rs` — returns `Vec<[Vec3; 3]>` world-space triangles
+  - `cast_shadow_ray` and `compute_indirect_bounce` take `hull_tris: &[[Vec3; 3]]`
+  - GPU path: hulls packed as 9 f32s/tri into `hull_tri_bytes: Vec<f32>`, uploaded as binding 3
+  - GPU shader binding 3: `var<storage, read> hull_tris: array<f32>`, `num_hull_tris` in uniforms
+- Direct dependencies: `xatlas-rs = "0.1.3"`, `bytemuck`, `parry3d = { version = "0.25", default-features = false }`
+
+## Bevy SystemParam Limit
+- Bevy 0.18 systems support up to 16 system parameters (including cfg-gated ones when enabled)
+- `run_bake` had a `_world_config: Option<Res<WorldConfig>>` unused param — remove unused params before adding new ones to avoid hitting the limit
+- When a function exceeds 16 params, Bevy can no longer resolve `.in_set()` / `.after()` on it — the error presents as "no method named `in_set` found" rather than a clear arity error
 
 ## Lightmap Shader Bindings (March 2026)
 - `TerrainMaterial`: stone_texture at 100/101, lightmap at 102/103

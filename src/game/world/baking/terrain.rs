@@ -1,15 +1,20 @@
 //! Baked lightmap generation for terrain chunks.
 
 use bevy::{
-    asset::RenderAssetUsages, pbr::ExtendedMaterial, prelude::*,
+    asset::{Assets, RenderAssetUsages},
+    mesh::{Mesh, Mesh3d},
+    pbr::ExtendedMaterial,
+    prelude::*,
     render::render_resource::TextureFormat,
 };
 use rayon::prelude::*;
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::Arc};
 
+use super::raycast::collect_shadow_hulls;
 use super::{BakeConfig, raycast};
-use crate::game::world::terrain::{
-    HeightmapData, TerrainChunk, material::TerrainMaterial, storage::TerrainWorld,
+use crate::game::world::{
+    objects::PlacedObject,
+    terrain::{HeightmapData, TerrainChunk, material::TerrainMaterial, storage::TerrainWorld},
 };
 
 /// Bake lightmaps for all currently loaded terrain chunks.
@@ -30,6 +35,11 @@ pub fn bake_terrain_lightmaps(
     images: &mut Assets<Image>,
     // Sun direction used for shadow rays (points FROM surface TOWARD sun).
     sun_dir: Vec3,
+    // New: for placed object shadow casting.
+    placed_query: &Query<(Entity, &PlacedObject, &GlobalTransform)>,
+    children_query: &Query<&Children>,
+    mesh_gt_query: &Query<(&Mesh3d, &GlobalTransform)>,
+    meshes: &Assets<Mesh>,
 ) {
     let res = config.terrain_resolution as usize;
     let chunk_world_size = crate::game::world::terrain::constants::CHUNK_SIZE as f32
@@ -52,11 +62,26 @@ pub fn bake_terrain_lightmaps(
             chunk_origin_z + chunk_world_size + ray_reach,
         );
 
+        // Collect convex hull shadow proxies for all placed objects whose
+        // bounding box overlaps this chunk's ray reach region.
+        let hull_tris = Arc::new(collect_shadow_hulls(
+            placed_query,
+            children_query,
+            mesh_gt_query,
+            meshes,
+            chunk_origin_x - ray_reach,
+            chunk_origin_x + chunk_world_size + ray_reach,
+            chunk_origin_z - ray_reach,
+            chunk_origin_z + chunk_world_size + ray_reach,
+            None,
+        ));
+
         // UV layout: U = x (column), V = y (row).
         // Image data is stored row-major: row ty, column tx.
         let pixels: Vec<u8> = (0..res * res)
             .into_par_iter()
             .map(|i| {
+                let hull_tris = hull_tris.clone();
                 let tx = i % res;
                 let ty = i / res;
 
@@ -65,7 +90,9 @@ pub fn bake_terrain_lightmaps(
 
                 let wx = chunk_origin_x + u * chunk_world_size;
                 let wz = chunk_origin_z + v * chunk_world_size;
-                let wy = cache.sample_height(wx, wz) + 0.05;
+                // 0.5 unit offset clears the step size (~1.25 units at 64 steps over 80
+                // units) so the origin doesn't immediately re-hit the surface it came from.
+                let wy = cache.sample_height(wx, wz) + 0.5;
 
                 let origin = Vec3::new(wx, wy, wz);
                 let (normal, _slope) = cache.sample_normal(wx, wz);
@@ -74,6 +101,7 @@ pub fn bake_terrain_lightmaps(
                     origin,
                     sun_dir,
                     &cache,
+                    &hull_tris,
                     config.ao_radius * 4.0,
                     config.shadow_steps,
                 );
@@ -86,15 +114,46 @@ pub fn bake_terrain_lightmaps(
                     config.shadow_steps,
                 );
 
+                // Per-texel seed used to rotate hemisphere sample azimuths so adjacent
+                // texels don't share correlated ray directions → no stripe artifacts.
+                let seed_offset: u32 = (tx as u32)
+                    .wrapping_mul(1_000_003)
+                    .wrapping_add((ty as u32).wrapping_mul(2_654_435_761));
+
                 let ndotl = normal.dot(sun_dir).max(0.0);
-                let combined = (ndotl * shadow * (0.5 + ao * 0.5)).clamp(0.0, 1.0);
+                let bounce = raycast::compute_indirect_bounce(
+                    origin,
+                    normal,
+                    &cache,
+                    &hull_tris,
+                    sun_dir,
+                    config.ao_radius,
+                    config.ao_radius * 4.0,
+                    config.bounce_rays,
+                    config.shadow_steps,
+                    config.terrain_albedo,
+                    config.bounce_count,
+                    seed_offset,
+                );
+                let direct = ndotl * shadow * (0.5 + ao * 0.5);
+                let combined = (direct + config.bounce_strength * bounce).clamp(0.0, 1.0);
                 (combined * 255.0) as u8
             })
             .collect();
 
+        // Blur the raw lightmap to eliminate per-texel Monte Carlo variance before
+        // it reaches the toon shader's band quantizer, which would otherwise turn
+        // tiny radiometric differences into visible "lines of light" at band edges.
+        let pixels = blur_lightmap(&pixels, res, config.blur_radius);
+
         // Save PNG to disk.
-        let save_result =
-            save_lightmap_png(&pixels, res, terrain_world, chunk.chunk_x, chunk.chunk_y);
+        let save_result = save_lightmap_png(
+            &pixels,
+            res,
+            &terrain_world.world_path,
+            chunk.chunk_x,
+            chunk.chunk_y,
+        );
         if let Err(e) = save_result {
             error!(
                 "Failed to save terrain lightmap for chunk ({}, {}): {e}",
@@ -128,16 +187,16 @@ pub fn bake_terrain_lightmaps(
     }
 }
 
-fn save_lightmap_png(
+pub(crate) fn save_lightmap_png(
     pixels: &[u8],
     res: usize,
-    terrain_world: &TerrainWorld,
+    world_path: &Path,
     cx: i32,
     cy: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let chunks_dir = terrain_world.world_path.join("chunks");
+    let chunks_dir = world_path.join("chunks");
     fs::create_dir_all(&chunks_dir)?;
-    let path = lightmap_path(&terrain_world.world_path, cx, cy);
+    let path = lightmap_path(world_path, cx, cy);
 
     // Use the `image` crate (already a dependency) to encode as PNG.
     let img = image::GrayImage::from_raw(res as u32, res as u32, pixels.to_vec())
@@ -152,4 +211,44 @@ pub fn lightmap_path(world_path: &Path, cx: i32, cy: i32) -> std::path::PathBuf 
     world_path
         .join("chunks")
         .join(format!("chunk_{}_{}_lightmap.png", cx, cy))
+}
+
+/// Separable box blur on a square single-channel u8 image of side length `width`.
+///
+/// Eliminates per-texel Monte Carlo variance while preserving large-scale shadow
+/// features, so the toon shader's band quantizer sees smooth gradients rather
+/// than noisy per-texel values that would produce "lines of light" at band edges.
+///
+/// Returns early (no allocation) when `radius` is 0.
+pub(crate) fn blur_lightmap(pixels: &[u8], width: usize, radius: u32) -> Vec<u8> {
+    if radius == 0 {
+        return pixels.to_vec();
+    }
+
+    let r = radius as usize;
+    let n = width;
+
+    // Horizontal pass — accumulate in f32 to avoid rounding drift.
+    let mut temp = vec![0f32; n * n];
+    for row in 0..n {
+        for col in 0..n {
+            let lo = col.saturating_sub(r);
+            let hi = (col + r + 1).min(n);
+            let sum: f32 = (lo..hi).map(|c| pixels[row * n + c] as f32).sum();
+            temp[row * n + col] = sum / (hi - lo) as f32;
+        }
+    }
+
+    // Vertical pass — write final u8 result.
+    let mut out = vec![0u8; n * n];
+    for col in 0..n {
+        for row in 0..n {
+            let lo = row.saturating_sub(r);
+            let hi = (row + r + 1).min(n);
+            let sum: f32 = (lo..hi).map(|r2| temp[r2 * n + col]).sum();
+            out[row * n + col] = (sum / (hi - lo) as f32).round() as u8;
+        }
+    }
+
+    out
 }

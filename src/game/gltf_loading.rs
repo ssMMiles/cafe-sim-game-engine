@@ -1,10 +1,7 @@
 use crate::game::{
     GameEntity,
     gfx::toon_material::{DefaultToonLightmap, ToonMaterial},
-    world::{
-        objects::PlacedObject,
-        terrain::storage::TerrainWorld,
-    },
+    world::{objects::PlacedObject, terrain::storage::TerrainWorld},
 };
 
 use super::gfx::camera::PlayerCamera;
@@ -150,10 +147,17 @@ fn on_scene_ready(
         // Attempt to load a saved lightmap for this placed object. If found, generate
         // UV2 for all meshes in the subtree and use the loaded handle. Otherwise fall
         // back to the shared default (white 1×1) lightmap.
-        let lightmap_handle =
-            try_load_object_lightmap(maybe_placed_object, &terrain_world, children, &mesh3d_query, &children_query, &mut meshes, &mut images)
-                .or_else(|| default_lightmap.as_ref().map(|r| r.0.clone()))
-                .unwrap_or_default();
+        let lightmap_handle = try_load_object_lightmap(
+            maybe_placed_object,
+            &terrain_world,
+            children,
+            &mesh3d_query,
+            &children_query,
+            &mut meshes,
+            &mut images,
+        )
+        .or_else(|| default_lightmap.as_ref().map(|r| r.0.clone()))
+        .unwrap_or_default();
 
         convert_to_toon_recursive(
             &mut commands,

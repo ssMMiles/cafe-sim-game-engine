@@ -242,9 +242,10 @@ pub fn spawn_chunk_from_result(
         let mut mat = base.clone();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(wp) = world_path {
-            let lm_path = wp
-                .join("chunks")
-                .join(format!("chunk_{}_{}_lightmap.png", result.chunk_x, result.chunk_y));
+            let lm_path = wp.join("chunks").join(format!(
+                "chunk_{}_{}_lightmap.png",
+                result.chunk_x, result.chunk_y
+            ));
             if let Some(handle) = try_load_lightmap(&lm_path, images) {
                 mat.extension.lightmap = handle;
             }

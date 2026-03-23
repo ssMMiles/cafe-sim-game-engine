@@ -158,7 +158,7 @@ pub fn setup(
         ..default()
     });
 
-    let sun_position = Vec3::new(25.0, 50.0, -150.0);
+    let sun_position = Vec3::new(20.0, 120.0, -80.0);
 
     // Calculate rotation to point at origin
     let target = Vec3::new(0.0, 0.0, 0.0);
@@ -172,11 +172,7 @@ pub fn setup(
         ..default()
     };
 
-    commands.spawn((
-        GameEntity,
-        baking::BakedSun,
-        sun_transform,
-    ));
+    commands.spawn((GameEntity, baking::BakedSun, sun_transform));
 
     // Debug sun position with yellow cone
     commands.spawn((

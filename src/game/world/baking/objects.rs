@@ -10,8 +10,8 @@ use bevy::{
 };
 use std::{collections::HashSet, fs, path::Path};
 
+use super::raycast::{BakeHeightCache, collect_shadow_hulls};
 use super::{BakeConfig, raycast};
-use super::raycast::BakeHeightCache;
 use crate::game::{
     gfx::toon_material::ToonMaterial,
     world::{
@@ -38,6 +38,7 @@ pub fn bake_object_lightmaps(
         &Mesh3d,
         &MeshMaterial3d<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
     )>,
+    mesh_gt_query: &Query<(&Mesh3d, &GlobalTransform)>,
     children_query: &Query<&Children>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
@@ -96,6 +97,21 @@ pub fn bake_object_lightmaps(
             bbox_max.z + ray_reach,
         );
 
+        // Collect convex hull shadow proxies for all other placed objects
+        // overlapping this object's bake region. Exclude the current entity
+        // to prevent self-shadowing artifacts.
+        let hull_tris = collect_shadow_hulls(
+            placed_query,
+            children_query,
+            mesh_gt_query,
+            meshes,
+            bbox_min.x - ray_reach,
+            bbox_max.x + ray_reach,
+            bbox_min.z - ray_reach,
+            bbox_max.z + ray_reach,
+            Some(root_entity),
+        );
+
         for (mesh_handle, _mat_handle) in &mesh_entities {
             // Ensure the mesh has UV2; generate if absent.
             let mesh_id = mesh_handle.id();
@@ -119,6 +135,7 @@ pub fn bake_object_lightmaps(
                 mesh,
                 &world_mat,
                 &cache,
+                &hull_tris,
                 config,
                 sun_dir,
                 &mut pixels,
@@ -238,6 +255,7 @@ fn rasterize_mesh_lightmap(
     mesh: &Mesh,
     world_mat: &Mat4,
     cache: &BakeHeightCache,
+    hull_tris: &[[Vec3; 3]],
     config: &BakeConfig,
     sun_dir: Vec3,
     pixels: &mut [u8],
@@ -326,6 +344,7 @@ fn rasterize_mesh_lightmap(
                     origin,
                     sun_dir,
                     cache,
+                    hull_tris,
                     config.ao_radius * 4.0,
                     config.shadow_steps,
                 );
