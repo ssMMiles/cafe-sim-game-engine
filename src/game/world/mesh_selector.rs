@@ -2,6 +2,7 @@ use bevy::{
     asset::{AssetLoader, LoadContext, io::Reader},
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
+    window::PrimaryWindow,
 };
 
 use crate::{
@@ -161,6 +162,14 @@ pub fn toggle_mesh_selector(
     }
 }
 
+const CARD_W: f32 = 100.0;
+const CARD_H_NORMAL: f32 = 104.0;
+const CARD_H_SELECTED: f32 = 128.0;
+const CARD_MARGIN: f32 = 8.0;
+/// Horizontal distance from one card's left edge to the next.
+pub const CARD_STRIDE: f32 = CARD_W + CARD_MARGIN * 2.0;
+const PANEL_H: f32 = 152.0; // enough to contain the tallest card + margins
+
 /// Spawn the bottom strip when `MeshSelectorOpen` flips to `true`.
 pub fn setup_mesh_selector_panel(
     mut commands: Commands,
@@ -170,6 +179,7 @@ pub fn setup_mesh_selector_panel(
     mut selector_index: ResMut<MeshSelectorIndex>,
     anchors: Res<UiAnchors>,
     theme: Res<UiTheme>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     if !selector.is_changed() || !selector.0 {
         return;
@@ -184,14 +194,19 @@ pub fn setup_mesh_selector_panel(
         .unwrap_or(0);
     selector_index.0 = selected_index;
 
-    // Root strip — child of bottom anchor, spans full width
+    // Initial scroll offset so selected card is centred in the viewport.
+    let window_width = windows.single().map(|w| w.width()).unwrap_or(1280.0);
+    let initial_scroll =
+        (selected_index as f32 * CARD_STRIDE - (window_width / 2.0 - CARD_STRIDE / 2.0)).max(0.0);
+
+    // Root strip — child of bottom anchor, spans full width.
     let root = commands
         .spawn((
             GameEntity,
             MeshSelectorPanel,
             Node {
                 width: Val::Percent(100.0),
-                height: Val::Px(130.0),
+                height: Val::Px(PANEL_H),
                 overflow: Overflow::clip(),
                 ..default()
             },
@@ -202,7 +217,7 @@ pub fn setup_mesh_selector_panel(
 
     commands.entity(anchors.bottom).add_child(root);
 
-    // Inner scrollable row
+    // Inner scrollable row — cards are vertically centred inside the strip.
     let row = commands
         .spawn((
             GameEntity,
@@ -210,12 +225,12 @@ pub fn setup_mesh_selector_panel(
             Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                height: Val::Px(130.0),
+                height: Val::Px(PANEL_H),
                 overflow: Overflow::clip(),
-                padding: UiRect::axes(Val::Px(8.0), Val::Px(0.0)),
+                padding: UiRect::axes(Val::Px(CARD_MARGIN), Val::Px(0.0)),
                 ..default()
             },
-            ScrollPosition::DEFAULT,
+            ScrollPosition(Vec2::new(initial_scroll, 0.0)),
         ))
         .id();
 
@@ -228,7 +243,14 @@ pub fn setup_mesh_selector_panel(
         } else {
             theme.bg_surface
         };
+        let card_height = if is_selected {
+            CARD_H_SELECTED
+        } else {
+            CARD_H_NORMAL
+        };
 
+        // The label sits inside a fixed-size clipping container so long names
+        // never spill outside the card boundary.
         let card = commands
             .spawn((
                 GameEntity,
@@ -239,9 +261,10 @@ pub fn setup_mesh_selector_panel(
                     flex_direction: FlexDirection::Column,
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
-                    width: Val::Px(100.0),
-                    height: Val::Px(110.0),
-                    margin: UiRect::all(Val::Px(8.0)),
+                    width: Val::Px(CARD_W),
+                    height: Val::Px(card_height),
+                    margin: UiRect::all(Val::Px(CARD_MARGIN)),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
                 BackgroundColor(card_color),
@@ -254,6 +277,10 @@ pub fn setup_mesh_selector_panel(
                     ..default()
                 },
                 TextColor(theme.text_white),
+                Node {
+                    max_width: Val::Px(CARD_W - 8.0),
+                    ..default()
+                },
             ))
             .id();
 
@@ -277,17 +304,18 @@ pub fn cleanup_mesh_selector_panel(
 }
 
 /// Step through the catalog with the mouse wheel (no Shift held).
-/// Updates `MeshSelectorIndex`, `PlacementConfig`, card highlights, and auto-scrolls the panel.
+/// Updates `MeshSelectorIndex`, `PlacementConfig`, card highlights/sizes, and centres the panel.
 /// Shift+scroll is reserved for placement scale adjustment.
 pub fn scroll_mesh_selector(
     mut scroll_events: MessageReader<MouseWheel>,
     input: Res<ButtonInput<KeyCode>>,
     mut scroll_query: Query<&mut ScrollPosition, With<MeshSelectorScrollable>>,
-    mut card_query: Query<(&MeshButton, &mut BackgroundColor)>,
+    mut card_query: Query<(&MeshButton, &mut BackgroundColor, &mut Node)>,
     catalog: Res<MeshCatalog>,
     mut selector_index: ResMut<MeshSelectorIndex>,
     mut config: ResMut<PlacementConfig>,
     theme: Res<UiTheme>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     if catalog.entries.is_empty() {
         return;
@@ -325,18 +353,25 @@ pub fn scroll_mesh_selector(
     config.asset_path = catalog.entries[new_index].asset_path.clone();
     config.scale = Vec3::splat(1.0);
 
-    // Refresh card highlights
-    for (button, mut bg) in card_query.iter_mut() {
-        bg.0 = if button.asset_path == config.asset_path {
+    // Refresh card highlights and heights
+    for (button, mut bg, mut node) in card_query.iter_mut() {
+        let selected = button.asset_path == config.asset_path;
+        bg.0 = if selected {
             theme.highlight
         } else {
             theme.bg_surface
         };
+        node.height = Val::Px(if selected {
+            CARD_H_SELECTED
+        } else {
+            CARD_H_NORMAL
+        });
     }
 
-    // Auto-scroll the panel so the selected card is visible
-    const CARD_STRIDE: f32 = 116.0;
-    let target_scroll = new_index as f32 * CARD_STRIDE;
+    // Centre the selected card in the viewport
+    let window_width = windows.single().map(|w| w.width()).unwrap_or(1280.0);
+    let target_scroll =
+        (new_index as f32 * CARD_STRIDE - (window_width / 2.0 - CARD_STRIDE / 2.0)).max(0.0);
     for mut scroll_pos in scroll_query.iter_mut() {
         scroll_pos.0.x = target_scroll;
     }

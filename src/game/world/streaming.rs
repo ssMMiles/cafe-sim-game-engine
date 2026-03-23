@@ -105,8 +105,8 @@ pub struct PendingChunk {
     /// `None` → chunk has no terrain file (flat); terrain is already ready.
     pub terrain_handle: Option<Handle<ChunkDataAsset>>,
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
-    /// Always present. `Failed` (e.g. 404) is treated as empty objects.
-    pub objects_handle: Handle<ChunkObjectsAsset>,
+    /// `None` = no objects file exists; `Some(h)` = load in progress or done.
+    pub objects_handle: Option<Handle<ChunkObjectsAsset>>,
 
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     pub opfs_terrain: TerrainSlot,
@@ -119,7 +119,7 @@ pub struct ComputingChunk {
     pub task: Task<ChunkComputeResult>,
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     /// Retained so we can spawn objects once the task finishes.
-    pub objects_handle: Handle<ChunkObjectsAsset>,
+    pub objects_handle: Option<Handle<ChunkObjectsAsset>>,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     /// Pre-parsed at launch time; used directly in `finalize_computed_chunks`.
     pub objects_data: Option<ChunkObjectsFile>,
@@ -243,11 +243,18 @@ pub fn update_streaming_ring(
                 ))
             });
 
-            // Always issue the objects load. Failed (404) → treated as empty.
-            let objects_handle = asset_server.load::<ChunkObjectsAsset>(format!(
-                "world://worlds/{}/chunks/chunk_{}_{}.objects",
-                metadata.world_id, cx, cy
-            ));
+            // Only issue the objects load if the file exists on disk; avoids
+            // Bevy logging asset-not-found errors for unvisited chunks.
+            let objects_path = terrain_world
+                .world_path
+                .join("chunks")
+                .join(format!("chunk_{}_{}.objects", cx, cy));
+            let objects_handle = objects_path.exists().then(|| {
+                asset_server.load::<ChunkObjectsAsset>(format!(
+                    "world://worlds/{}/chunks/chunk_{}_{}.objects",
+                    metadata.world_id, cx, cy
+                ))
+            });
 
             state.pending.insert(
                 (cx, cy),
@@ -378,10 +385,13 @@ pub fn launch_chunk_tasks(
                 },
             };
 
-            let objects_done = matches!(
-                asset_server.load_state(pending.objects_handle.id()),
-                LoadState::Loaded | LoadState::Failed(_)
-            );
+            let objects_done = match &pending.objects_handle {
+                None => true,
+                Some(h) => matches!(
+                    asset_server.load_state(h.id()),
+                    LoadState::Loaded | LoadState::Failed(_)
+                ),
+            };
 
             if let Some(terrain_loaded) = terrain_state {
                 if objects_done {
@@ -551,8 +561,10 @@ pub fn finalize_computed_chunks(
         );
 
         #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
-        if let Some(asset) = chunk_objects_assets.get(&computing.objects_handle) {
-            spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, &asset.0);
+        if let Some(ref handle) = computing.objects_handle {
+            if let Some(asset) = chunk_objects_assets.get(handle) {
+                spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, &asset.0);
+            }
         }
 
         #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
