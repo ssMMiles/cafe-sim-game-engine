@@ -84,6 +84,7 @@ pub struct UserSettings {
     pub terrain_edit_mode: bool,
     pub brush_radius: f32,
     pub physics_debug: bool,
+    pub use_lightmap: bool,
 }
 
 impl Default for UserSettings {
@@ -103,6 +104,7 @@ impl Default for UserSettings {
             terrain_edit_mode: false,
             brush_radius: 5.0,
             physics_debug: false,
+            use_lightmap: true,
         }
     }
 }
@@ -172,6 +174,11 @@ impl UserSettings {
                 keybind: "Shift+P",
                 current_value: if self.physics_debug { "ON" } else { "OFF" }.to_string(),
             },
+            SettingInfo {
+                name: "Lightmap",
+                keybind: "Shift+L",
+                current_value: if self.use_lightmap { "ON" } else { "OFF" }.to_string(),
+            },
         ]
     }
 
@@ -214,6 +221,10 @@ impl UserSettings {
 
     pub fn toggle_physics_debug(&mut self) {
         self.physics_debug = !self.physics_debug;
+    }
+
+    pub fn toggle_use_lightmap(&mut self) {
+        self.use_lightmap = !self.use_lightmap;
     }
 }
 

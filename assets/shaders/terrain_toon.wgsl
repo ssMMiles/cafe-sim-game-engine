@@ -29,6 +29,12 @@ var lightmap_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103)
 var lightmap_sampler: sampler;
 
+struct TerrainFlags {
+    use_lightmap: u32,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var<uniform> terrain_flags: TerrainFlags;
+
 // Scale controlling how many world units span one texture repeat.
 // Larger = stones appear larger / more spread out.
 const STONE_UV_SCALE: f32 = 3.0;
@@ -115,14 +121,31 @@ fn fragment(
         view_bindings::view.view_from_world[3].z
     ), pbr_input.world_position);
 
-    // Start from baked directional lighting (NdotL * shadow * AO packed into R channel).
-    // A white (1.0) default lightmap is inserted at startup so this is a no-op before any bake.
-    // Guard with VERTEX_UVS_B in case UV2 is absent (prevents a hard shader error).
+    // Directional lighting: either baked lightmap or real-time directional lights.
+    var lighting = 0.0;
+
+    if (terrain_flags.use_lightmap == 1u) {
+        // Baked mode: lightmap contains pre-computed NdotL * shadow * AO.
 #ifdef VERTEX_UVS_B
-    var lighting = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
+        lighting = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
 #else
-    var lighting = 0.5;
+        lighting = 0.5;
 #endif
+    } else {
+        // Dynamic mode: accumulate real-time directional lights.
+        let n_directional_lights = view_bindings::lights.n_directional_lights;
+        for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
+            let light = &view_bindings::lights.directional_lights[i];
+            let NdotL = max(dot(N, (*light).direction_to_light), 0.0);
+
+            var shadow = 1.0;
+            if ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+                shadow = shadows::fetch_directional_shadow(i, pbr_input.world_position, pbr_input.world_normal, view_z);
+            }
+
+            lighting += NdotL * shadow;
+        }
+    }
 
     // Point lights — use smooth range falloff in [0, 1] instead of raw lux attenuation
     let cluster_index = clustering::fragment_cluster_index(pbr_input.frag_coord.xy, view_z, pbr_input.is_orthographic);

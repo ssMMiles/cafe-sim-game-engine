@@ -38,6 +38,10 @@ pub struct TerrainMaterial {
     #[texture(102)]
     #[sampler(103)]
     pub lightmap: Handle<Image>,
+
+    /// 1 = use baked lightmap, 0 = use dynamic directional lighting instead.
+    #[uniform(104)]
+    pub use_lightmap: u32,
 }
 
 impl MaterialExtension for TerrainMaterial {

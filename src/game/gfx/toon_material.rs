@@ -34,6 +34,10 @@ pub struct ToonMaterial {
     #[texture(100)]
     #[sampler(101)]
     pub lightmap: Handle<Image>,
+
+    /// 1 = use baked lightmap, 0 = use dynamic directional lighting instead.
+    #[uniform(102)]
+    pub use_lightmap: u32,
 }
 
 impl Default for ToonMaterial {
@@ -43,6 +47,7 @@ impl Default for ToonMaterial {
         // DefaultToonLightmap handle before this material is rendered.
         Self {
             lightmap: Handle::default(),
+            use_lightmap: 1,
         }
     }
 }

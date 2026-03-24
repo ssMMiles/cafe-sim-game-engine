@@ -24,6 +24,12 @@ var lightmap_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var lightmap_sampler: sampler;
 
+struct ToonFlags {
+    use_lightmap: u32,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+var<uniform> toon_flags: ToonFlags;
+
 // Perceptual luminance from a linear RGB color
 fn luminance(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -106,14 +112,13 @@ fn fragment(
         lighting += NdotL * smooth_attenuation * smooth_attenuation * shadow;
     }
 
-    // Sample the baked lightmap (shadow + AO packed into a single R channel).
-    // uv_b is only present when VERTEX_UVS_B is defined (i.e. mesh has ATTRIBUTE_UV_1).
-    // Before baking, meshes lack UV2 so we fall back to 1.0 (no-op).
+    // Sample the baked lightmap when enabled, otherwise skip (dynamic lighting only).
+    var lm = 1.0;
+    if (toon_flags.use_lightmap == 1u) {
 #ifdef VERTEX_UVS_B
-    let lm = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
-#else
-    let lm = 1.0;
+        lm = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).r;
 #endif
+    }
 
     // Scale accumulated real-time lighting by the baked factor before quantization.
     let toon_factor = toon_band(lighting * lm, 5.0);

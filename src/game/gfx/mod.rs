@@ -2,6 +2,7 @@ use bevy::{pbr::ExtendedMaterial, prelude::*};
 
 pub mod camera;
 mod crosshair;
+pub mod lightmap_toggle;
 pub mod outline;
 pub mod physics_debug;
 pub mod post_process;
@@ -13,6 +14,7 @@ use camera::{
 };
 use crosshair::{toggle_crosshair, update_crosshair_display};
 use outline::{toggle_outline, update_outline};
+use lightmap_toggle::{sync_lightmap_mode, toggle_lightmap_mode};
 use physics_debug::{sync_physics_debug, toggle_physics_debug};
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings, toggle_edge_detection};
 
@@ -61,5 +63,7 @@ impl Plugin for GfxPlugin {
         app.add_systems(Update, sync_edge_detection_settings.in_set(GfxSet::InGame));
         app.add_systems(Update, toggle_physics_debug.in_set(GfxSet::InGame));
         app.add_systems(Update, sync_physics_debug.in_set(GfxSet::InGame));
+        app.add_systems(Update, toggle_lightmap_mode.in_set(GfxSet::InGame));
+        app.add_systems(Update, sync_lightmap_mode.in_set(GfxSet::InGame));
     }
 }

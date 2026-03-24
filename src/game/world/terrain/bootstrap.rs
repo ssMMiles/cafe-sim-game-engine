@@ -510,6 +510,7 @@ fn finalize_terrain_setup(
         extension: TerrainMaterial {
             stone_texture,
             lightmap: default_lightmap,
+            use_lightmap: 1,
         },
     });
 

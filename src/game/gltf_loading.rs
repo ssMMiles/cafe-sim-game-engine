@@ -278,6 +278,7 @@ fn convert_to_toon_recursive(
                 base,
                 extension: ToonMaterial {
                     lightmap: lightmap.clone(),
+                    use_lightmap: 1,
                 },
             });
 
