@@ -87,6 +87,8 @@ pub struct BakeUniformsData {
     pub row_offset: u32,
     /// Number of hull triangles in the hull_tris storage buffer for this job.
     pub num_hull_tris: u32,
+    /// Number of DDA steps for AO rays (shorter range than shadow/bounce).
+    pub ao_steps: u32,
 }
 
 // ============================================================================
@@ -96,7 +98,7 @@ pub struct BakeUniformsData {
 /// Pending GPU bake jobs queued by the main world each bake trigger.
 #[derive(Resource, Default)]
 pub struct GpuBakePending {
-    pub jobs: Vec<GpuBakeJob>,
+    pub jobs: Vec<GpuBakeChunkJob>,
 }
 
 /// Tracks readback entities that have already been processed this bake session.
@@ -108,17 +110,21 @@ pub struct GpuBakePending {
 #[derive(Resource, Default)]
 pub struct GpuBakeProcessed(pub std::collections::HashSet<Entity>);
 
-/// One terrain chunk bake job (main world side).
-pub struct GpuBakeJob {
+/// One terrain chunk bake job containing all its strips (main world side).
+///
+/// The heightmap and hull triangle data are stored once per chunk rather than
+/// cloned per strip, eliminating ~(N-1) redundant copies of the ~3 MB heightmap.
+pub struct GpuBakeChunkJob {
     pub chunk_x: i32,
     pub chunk_y: i32,
     pub resolution: u32,
-    /// Number of rows this strip covers (used to size the Y workgroup dispatch).
+    /// Number of rows each strip covers (used to size the Y workgroup dispatch).
     pub strip_rows: u32,
-    pub uniforms_data: BakeUniformsData,
-    /// Flat heightmap tile values covering chunk + ray-reach border.
+    /// One uniform set per strip, differing only in `row_offset`.
+    pub strip_uniforms: Vec<BakeUniformsData>,
+    /// Flat heightmap tile values covering chunk + ray-reach border (shared across strips).
     pub heightmap_bytes: Vec<f32>,
-    /// Flat hull triangle data: 9 floats per triangle (v0.xyz, v1.xyz, v2.xyz).
+    /// Flat hull triangle data: 9 floats per triangle (shared across strips).
     pub hull_tri_bytes: Vec<f32>,
     /// Handle to the output `ShaderStorageBuffer` (pre-allocated, zeroed).
     pub out_handle: Handle<ShaderStorageBuffer>,
@@ -151,40 +157,12 @@ struct GpuBakeQueueEntry {
     world_path: PathBuf,
 }
 
-/// A chunk whose strip dispatches are being spread across multiple frames.
-///
-/// When a chunk is popped from the queue, an `InProgressBake` is created with
-/// the shared output buffer and strip metadata. One strip is dispatched per
-/// frame; when all strips are done a readback entity is spawned.
-struct InProgressBake {
-    chunk_x: i32,
-    chunk_y: i32,
-    resolution: u32,
-    /// Base uniforms — `row_offset` is set per strip before pushing to pending.
-    base_uniforms: BakeUniformsData,
-    heightmap_bytes: Vec<f32>,
-    /// Flat hull triangle data: 9 floats per triangle (v0.xyz, v1.xyz, v2.xyz).
-    hull_tri_bytes: Vec<f32>,
-    material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
-    world_path: PathBuf,
-    /// Shared output buffer for all strips of this chunk.
-    out_handle: Handle<ShaderStorageBuffer>,
-    /// Rows per strip.
-    strip_rows: u32,
-    /// How many strips have been dispatched so far.
-    strips_done: u32,
-    /// Total strips needed: `ceil(resolution / strip_rows)`.
-    total_strips: u32,
-}
-
 /// Serial dispatch queue — holds all remaining chunks that have not yet had a
 /// GPU buffer allocated. The front entry is dispatched when the previous
 /// readback completes, keeping peak VRAM usage to one chunk at a time.
 #[derive(Resource, Default)]
 pub struct GpuBakeQueue {
     pending: std::collections::VecDeque<GpuBakeQueueEntry>,
-    /// The chunk currently being strip-dispatched, if any.
-    in_progress: Option<InProgressBake>,
     /// How many chunks currently have a live output buffer + readback entity.
     /// Used by `top_up_gpu_bake` to stay at `gpu_parallel_chunks` in-flight.
     pub in_flight: u32,
@@ -197,25 +175,31 @@ pub struct GpuBakeQueue {
 /// Jobs extracted from `GpuBakePending` into the render world.
 #[derive(Resource, Default)]
 struct GpuBakeExtracted {
-    jobs: Vec<GpuBakeJob>,
+    jobs: Vec<GpuBakeChunkJob>,
 }
 
-/// A job that has had its bind group built and is ready to dispatch.
-struct BakeInFlightJob {
+/// A single strip dispatch that has had its bind group built and is ready to dispatch.
+struct BakeInFlightStrip {
     bind_group: BindGroup,
     resolution: u32,
     /// Number of rows this strip covers (drives the Y workgroup count).
     strip_rows: u32,
-    // Keep temp buffers alive until after dispatch.
-    _heightmap_buf: Buffer,
+    /// Per-strip uniform buffer (different `row_offset` per strip).
     _uniform_buf: Buffer,
+}
+
+/// Shared GPU buffers for a chunk, kept alive until all its strips have dispatched.
+struct ChunkSharedBuffers {
+    _heightmap_buf: Buffer,
     _obj_tris_buf: Buffer,
 }
 
 /// In-flight jobs awaiting dispatch via the render graph node.
 #[derive(Resource, Default)]
 pub struct GpuBakeInFlight {
-    jobs: Vec<BakeInFlightJob>,
+    strips: Vec<BakeInFlightStrip>,
+    /// Shared buffers kept alive until after dispatch + cleanup.
+    _shared: Vec<ChunkSharedBuffers>,
 }
 
 /// Cached pipeline + layout descriptor for the lightmap compute shader.
@@ -259,7 +243,7 @@ impl render_graph::Node for BakeComputeNode {
             return Ok(());
         };
 
-        for job in &in_flight.jobs {
+        for strip in &in_flight.strips {
             let mut pass =
                 render_context
                     .command_encoder()
@@ -269,10 +253,10 @@ impl render_graph::Node for BakeComputeNode {
                     });
 
             pass.set_pipeline(compute_pipeline);
-            pass.set_bind_group(0, &job.bind_group, &[]);
+            pass.set_bind_group(0, &strip.bind_group, &[]);
 
-            let wg_x = (job.resolution + 15) / 16;
-            let wg_y = (job.strip_rows + 15) / 16;
+            let wg_x = (strip.resolution + 15) / 16;
+            let wg_y = (strip.strip_rows + 15) / 16;
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
@@ -434,6 +418,7 @@ pub fn enqueue_terrain_bake_jobs(
             bounce_count: config.bounce_count,
             row_offset: 0,
             num_hull_tris,
+            ao_steps: config.ao_steps,
         };
 
         queue.pending.push_back(GpuBakeQueueEntry {
@@ -457,18 +442,20 @@ pub fn enqueue_terrain_bake_jobs(
 }
 
 // ============================================================================
-// Main-world: strip dispatch helpers
+// Main-world: chunk dispatch helper
 // ============================================================================
 
-/// Allocate the shared output SSB and build an `InProgressBake` for a queue entry.
+/// Allocate the output SSB, build all strip uniforms, and push a single
+/// `GpuBakeChunkJob` containing every strip for the chunk.
 ///
-/// Does not dispatch anything — the caller is responsible for calling
-/// `dispatch_strip` immediately after.
-fn start_chunk(
+/// This dispatches all strips in one frame, sharing the heightmap and hull
+/// triangle data across strips instead of cloning them per-strip.
+fn dispatch_chunk(
     entry: GpuBakeQueueEntry,
     strip_rows: u32,
     buffers: &mut Assets<ShaderStorageBuffer>,
-) -> InProgressBake {
+    pending: &mut GpuBakePending,
+) {
     let texel_count = (entry.resolution * entry.resolution) as usize;
     let byte_count = texel_count * std::mem::size_of::<u32>();
 
@@ -480,41 +467,25 @@ fn start_chunk(
 
     let total_strips = entry.resolution.div_ceil(strip_rows);
 
-    InProgressBake {
+    // Build one uniform set per strip, differing only in row_offset.
+    let mut strip_uniforms = Vec::with_capacity(total_strips as usize);
+    for s in 0..total_strips {
+        let mut uniforms = entry.uniforms_data;
+        uniforms.row_offset = s * strip_rows;
+        strip_uniforms.push(uniforms);
+    }
+
+    pending.jobs.push(GpuBakeChunkJob {
         chunk_x: entry.chunk_x,
         chunk_y: entry.chunk_y,
         resolution: entry.resolution,
-        base_uniforms: entry.uniforms_data,
+        strip_rows,
+        strip_uniforms,
         heightmap_bytes: entry.heightmap_bytes,
         hull_tri_bytes: entry.hull_tri_bytes,
+        out_handle,
         material_handle: entry.material_handle,
         world_path: entry.world_path,
-        out_handle,
-        strip_rows,
-        strips_done: 0,
-        total_strips,
-    }
-}
-
-/// Push the current strip of `prog` onto the pending queue.
-///
-/// Takes `&InProgressBake` (not `&mut`) so it can be called before updating
-/// `strips_done`. The `row_offset` is derived from the current `strips_done`.
-fn dispatch_strip(prog: &InProgressBake, pending: &mut GpuBakePending) {
-    let mut uniforms = prog.base_uniforms;
-    uniforms.row_offset = prog.strips_done * prog.strip_rows;
-
-    pending.jobs.push(GpuBakeJob {
-        chunk_x: prog.chunk_x,
-        chunk_y: prog.chunk_y,
-        resolution: prog.resolution,
-        strip_rows: prog.strip_rows,
-        uniforms_data: uniforms,
-        heightmap_bytes: prog.heightmap_bytes.clone(),
-        hull_tri_bytes: prog.hull_tri_bytes.clone(),
-        out_handle: prog.out_handle.clone(),
-        material_handle: prog.material_handle,
-        world_path: prog.world_path.clone(),
     });
 }
 
@@ -522,12 +493,13 @@ fn dispatch_strip(prog: &InProgressBake, pending: &mut GpuBakePending) {
 // Main-world: per-frame queue top-up
 // ============================================================================
 
-/// Each frame, advance the in-progress chunk by one strip or start the next
-/// queued chunk if no strip work is pending.
+/// Each frame, dispatch the next queued chunk if a slot is available.
 ///
-/// Dispatching one strip per frame ensures no single GPU command buffer
-/// processes the entire 4096×4096 lightmap in one submission, preventing TDR
-/// timeouts that would otherwise occur at high ray counts.
+/// All strips for a chunk are dispatched in a single frame. Each strip is a
+/// small compute dispatch (e.g. 64 rows of 4096 texels = ~1024 workgroups),
+/// so dispatching all ~64 strips back-to-back is well within TDR limits.
+/// The `dispatch_strip_rows` config still controls per-dispatch granularity
+/// if individual dispatches need to be smaller.
 pub fn top_up_gpu_bake(
     config: Res<BakeConfig>,
     mut queue: ResMut<GpuBakeQueue>,
@@ -535,71 +507,34 @@ pub fn top_up_gpu_bake(
     mut pending: ResMut<GpuBakePending>,
     mut commands: Commands,
 ) {
-    // --- Advance the in-progress chunk (one strip per frame) ---
-    if let Some(ref mut prog) = queue.in_progress {
-        dispatch_strip(prog, &mut pending);
-        prog.strips_done += 1;
-
-        if prog.strips_done >= prog.total_strips {
-            // All strips dispatched — spawn the readback entity.
-            let prog = queue.in_progress.take().unwrap();
-            info!(
-                "GPU terrain bake: all {} strips dispatched for chunk ({}, {}); awaiting readback",
-                prog.total_strips, prog.chunk_x, prog.chunk_y
-            );
-            commands.spawn((
-                Readback::buffer(prog.out_handle),
-                BakeReadbackTag {
-                    chunk_x: prog.chunk_x,
-                    chunk_y: prog.chunk_y,
-                    resolution: prog.resolution,
-                    material_handle: prog.material_handle,
-                    world_path: prog.world_path,
-                },
-                crate::game::GameEntity,
-            ));
-            queue.in_flight += 1;
-        }
-        return; // Only one strip per frame.
-    }
-
-    // --- Start the next queued chunk if a slot is available ---
-    if queue.in_flight >= config.gpu_parallel_chunks || queue.pending.is_empty() {
-        return;
-    }
-
-    if let Some(entry) = queue.pending.pop_front() {
+    while queue.in_flight < config.gpu_parallel_chunks && !queue.pending.is_empty() {
+        let entry = queue.pending.pop_front().unwrap();
         let remaining = queue.pending.len();
         let total_strips = entry.resolution.div_ceil(config.dispatch_strip_rows);
-        info!(
-            "GPU terrain bake: starting chunk ({}, {}) — {} strips of {} rows ({} remaining in queue)",
-            entry.chunk_x, entry.chunk_y, total_strips, config.dispatch_strip_rows, remaining,
-        );
-        let mut prog = start_chunk(entry, config.dispatch_strip_rows, &mut buffers);
-        dispatch_strip(&prog, &mut pending);
-        prog.strips_done += 1;
+        let chunk_x = entry.chunk_x;
+        let chunk_y = entry.chunk_y;
 
-        if prog.strips_done >= prog.total_strips {
-            // Degenerate case: the entire texture fits in one strip.
-            info!(
-                "GPU terrain bake: single-strip chunk ({}, {}); awaiting readback",
-                prog.chunk_x, prog.chunk_y
-            );
-            commands.spawn((
-                Readback::buffer(prog.out_handle),
-                BakeReadbackTag {
-                    chunk_x: prog.chunk_x,
-                    chunk_y: prog.chunk_y,
-                    resolution: prog.resolution,
-                    material_handle: prog.material_handle,
-                    world_path: prog.world_path,
-                },
-                crate::game::GameEntity,
-            ));
-            queue.in_flight += 1;
-        } else {
-            queue.in_progress = Some(prog);
-        }
+        info!(
+            "GPU terrain bake: dispatching chunk ({}, {}) — {} strips of {} rows ({} remaining in queue)",
+            chunk_x, chunk_y, total_strips, config.dispatch_strip_rows, remaining,
+        );
+
+        dispatch_chunk(entry, config.dispatch_strip_rows, &mut buffers, &mut pending);
+
+        // The chunk job we just pushed is the last one in the vec.
+        let chunk_job = pending.jobs.last().unwrap();
+        commands.spawn((
+            Readback::buffer(chunk_job.out_handle.clone()),
+            BakeReadbackTag {
+                chunk_x,
+                chunk_y,
+                resolution: chunk_job.resolution,
+                material_handle: chunk_job.material_handle,
+                world_path: chunk_job.world_path.clone(),
+            },
+            crate::game::GameEntity,
+        ));
+        queue.in_flight += 1;
     }
 }
 
@@ -681,59 +616,65 @@ fn prepare_gpu_bake_jobs(
 
     let bind_group_layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
 
-    for job in extracted.jobs.drain(..) {
-        // Upload heightmap as a temporary read-only storage buffer.
-        let heightmap_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("bake_heightmap"),
-            contents: bytemuck::cast_slice(&job.heightmap_bytes),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        });
-
-        // Upload uniforms as a temporary uniform buffer.
-        let uniform_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("bake_uniforms"),
-            contents: bytemuck::bytes_of(&job.uniforms_data),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
+    for chunk_job in extracted.jobs.drain(..) {
         // Retrieve the GPU-side output buffer prepared from the ShaderStorageBuffer asset.
-        let Some(gpu_out) = gpu_buffers.get(&job.out_handle) else {
+        let Some(gpu_out) = gpu_buffers.get(&chunk_job.out_handle) else {
             warn!(
                 "GPU bake: output ShaderStorageBuffer not ready for chunk ({}, {}), skipping",
-                job.chunk_x, job.chunk_y
+                chunk_job.chunk_x, chunk_job.chunk_y
             );
             continue;
         };
 
-        // Upload hull triangles (use a 1-float dummy if empty to satisfy the binding).
-        let hull_data: Vec<f32> = if job.hull_tri_bytes.is_empty() {
-            vec![0.0f32]
-        } else {
-            job.hull_tri_bytes.clone()
-        };
-        let obj_tris_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("bake_hull_tris"),
-            contents: bytemuck::cast_slice(&hull_data),
+        // Upload heightmap ONCE for all strips of this chunk.
+        let heightmap_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("bake_heightmap"),
+            contents: bytemuck::cast_slice(&chunk_job.heightmap_bytes),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
-        let bind_group = render_device.create_bind_group(
-            Some("lightmap_bake_bindgroup"),
-            &bind_group_layout,
-            &BindGroupEntries::sequential((
-                heightmap_buf.as_entire_buffer_binding(),
-                uniform_buf.as_entire_buffer_binding(),
-                gpu_out.buffer.as_entire_buffer_binding(),
-                obj_tris_buf.as_entire_buffer_binding(),
-            )),
-        );
+        // Upload hull triangles ONCE (use a 1-float dummy if empty to satisfy the binding).
+        let hull_data: &[f32] = if chunk_job.hull_tri_bytes.is_empty() {
+            &[0.0f32]
+        } else {
+            &chunk_job.hull_tri_bytes
+        };
+        let obj_tris_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("bake_hull_tris"),
+            contents: bytemuck::cast_slice(hull_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
 
-        in_flight.jobs.push(BakeInFlightJob {
-            bind_group,
-            resolution: job.resolution,
-            strip_rows: job.strip_rows,
+        // Build one bind group per strip, sharing the heightmap + hull + output buffers.
+        for strip_uniforms in &chunk_job.strip_uniforms {
+            let uniform_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("bake_uniforms"),
+                contents: bytemuck::bytes_of(strip_uniforms),
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            });
+
+            let bind_group = render_device.create_bind_group(
+                Some("lightmap_bake_bindgroup"),
+                &bind_group_layout,
+                &BindGroupEntries::sequential((
+                    heightmap_buf.as_entire_buffer_binding(),
+                    uniform_buf.as_entire_buffer_binding(),
+                    gpu_out.buffer.as_entire_buffer_binding(),
+                    obj_tris_buf.as_entire_buffer_binding(),
+                )),
+            );
+
+            in_flight.strips.push(BakeInFlightStrip {
+                bind_group,
+                resolution: chunk_job.resolution,
+                strip_rows: chunk_job.strip_rows,
+                _uniform_buf: uniform_buf,
+            });
+        }
+
+        // Keep shared buffers alive until after dispatch.
+        in_flight._shared.push(ChunkSharedBuffers {
             _heightmap_buf: heightmap_buf,
-            _uniform_buf: uniform_buf,
             _obj_tris_buf: obj_tris_buf,
         });
     }
@@ -741,7 +682,8 @@ fn prepare_gpu_bake_jobs(
 
 /// Clear in-flight jobs after the render pass has run.
 fn clear_in_flight_after_render(mut in_flight: ResMut<GpuBakeInFlight>) {
-    in_flight.jobs.clear();
+    in_flight.strips.clear();
+    in_flight._shared.clear();
 }
 
 // ============================================================================

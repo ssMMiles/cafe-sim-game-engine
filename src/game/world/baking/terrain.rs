@@ -111,7 +111,7 @@ pub fn bake_terrain_lightmaps(
                     &cache,
                     config.ao_radius,
                     config.ao_rays,
-                    config.shadow_steps,
+                    config.ao_steps,
                 );
 
                 // Per-texel seed used to rotate hemisphere sample azimuths so adjacent

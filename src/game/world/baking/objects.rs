@@ -354,7 +354,7 @@ fn rasterize_mesh_lightmap(
                     cache,
                     config.ao_radius,
                     config.ao_rays,
-                    config.shadow_steps,
+                    config.ao_steps,
                 );
 
                 let combined = (shadow * 0.5 + ao * 0.5).clamp(0.0, 1.0);

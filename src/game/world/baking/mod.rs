@@ -49,8 +49,11 @@ pub struct BakeConfig {
     pub ao_rays: u32,
     /// AO hemisphere radius in world units.
     pub ao_radius: f32,
-    /// Number of DDA steps for shadow and AO rays.
+    /// Number of DDA steps for shadow and bounce rays (marches `ao_radius × 4`).
     pub shadow_steps: u32,
+    /// Number of DDA steps for AO rays (marches `ao_radius`).
+    /// Defaults to half of `shadow_steps` because AO covers 4× less distance.
+    pub ao_steps: u32,
     /// Use the GPU compute path for terrain baking (non-wasm only).
     /// When `false` (or on wasm), falls back to the CPU rayon path.
     pub use_gpu: bool,
@@ -88,8 +91,9 @@ impl Default for BakeConfig {
             ao_rays: 16,
             ao_radius: 20.0,
             shadow_steps: 64,
+            ao_steps: 32,
             use_gpu: true,
-            gpu_parallel_chunks: 1,
+            gpu_parallel_chunks: 2,
             bounce_rays: 8,
             bounce_strength: 1.0,
             terrain_albedo: 0.5,
