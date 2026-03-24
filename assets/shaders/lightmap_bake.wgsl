@@ -55,6 +55,8 @@ struct BakeUniforms {
     row_offset: u32,
     // Number of hull triangles in the hull_tris binding.
     num_hull_tris: u32,
+    // Number of DDA steps for AO rays (shorter range than shadow/bounce).
+    ao_steps: u32,
 }
 
 // ----------------------------------------------------------------------------
@@ -225,7 +227,7 @@ fn compute_ao(origin: vec3<f32>, normal: vec3<f32>) -> f32 {
     }
 
     let tf        = make_tangent_frame(normal);
-    let step_size = u.ao_radius / f32(u.shadow_steps);
+    let step_size = u.ao_radius / f32(u.ao_steps);
     var unoccluded: f32 = 0.0;
 
     for (var i: u32 = 0u; i < u.ao_rays; i = i + 1u) {
@@ -235,7 +237,7 @@ fn compute_ao(origin: vec3<f32>, normal: vec3<f32>) -> f32 {
         }
 
         var occluded = false;
-        for (var s: u32 = 1u; s <= u.shadow_steps; s = s + 1u) {
+        for (var s: u32 = 1u; s <= u.ao_steps; s = s + 1u) {
             let p = origin + world_dir * (f32(s) * step_size);
             if world_height(p.x, p.z) > p.y {
                 occluded = true;
@@ -311,9 +313,9 @@ fn compute_bounce(origin: vec3<f32>, normal: vec3<f32>, texel_seed: u32) -> f32 
     let azimuth_offset = float01(hash_u32(texel_seed)) * TAU;
 
     var accum = 0.0;
+    let tf0    = make_tangent_frame(normal);
     for (var i = 0u; i < u.bounce_rays; i = i + 1u) {
         // Primary ray direction (cosine-weighted sample with per-texel azimuth offset).
-        let tf0    = make_tangent_frame(normal);
         let dir0   = hemisphere_dir(i, u.bounce_rays, normal, tf0, azimuth_offset);
         let cos_w0 = max(dot(dir0, normal), 0.0);
         if cos_w0 <= 0.0 {
