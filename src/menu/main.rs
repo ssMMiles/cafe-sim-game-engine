@@ -2,6 +2,7 @@ use bevy::{log, prelude::*};
 
 use crate::{
     AppState,
+    projects::{ActiveProject, ProjectRegistry},
     ui::{ButtonVariant, UiExt, UiTheme},
 };
 
@@ -12,11 +13,15 @@ pub struct MainMenuScreen;
 
 #[derive(Component, Debug)]
 pub enum MainMenuButton {
-    StartGame,
-    Settings,
+    SelectProject(String),
+    NewProject,
 }
 
-pub fn setup_main_menu(mut commands: Commands, theme: Res<UiTheme>) {
+pub fn setup_main_menu(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    registry: Res<ProjectRegistry>,
+) {
     log::info!("Setting up the main menu screen");
 
     commands
@@ -33,15 +38,35 @@ pub fn setup_main_menu(mut commands: Commands, theme: Res<UiTheme>) {
             BackgroundColor(theme.bg_dark),
         ))
         .with_children(|parent| {
+            parent.ui_title("Projects", &theme);
+
+            if registry.projects.is_empty() {
+                parent.spawn((
+                    Text::new("No projects found in `projects/`. Create a project.toml to get started."),
+                    TextFont {
+                        font_size: theme.size_body,
+                        ..default()
+                    },
+                    TextColor(theme.text_dim),
+                    Node {
+                        margin: UiRect::bottom(Val::Px(theme.pad_lg)),
+                        ..default()
+                    },
+                ));
+            } else {
+                for project in &registry.projects {
+                    parent.ui_button(
+                        &project.name,
+                        MainMenuButton::SelectProject(project.id.clone()),
+                        ButtonVariant::Primary,
+                        &theme,
+                    );
+                }
+            }
+
             parent.ui_button(
-                "Start Game",
-                MainMenuButton::StartGame,
-                ButtonVariant::Primary,
-                &theme,
-            );
-            parent.ui_button(
-                "Settings",
-                MainMenuButton::Settings,
+                "New Project",
+                MainMenuButton::NewProject,
                 ButtonVariant::Primary,
                 &theme,
             );
@@ -49,26 +74,38 @@ pub fn setup_main_menu(mut commands: Commands, theme: Res<UiTheme>) {
 }
 
 pub fn handle_main_menu_button_press(
+    mut commands: Commands,
     mut interaction_query: Query<
         (&Interaction, &MainMenuButton),
         (Changed<Interaction>, With<Button>),
     >,
+    registry: Res<ProjectRegistry>,
     mut next_app_state: ResMut<NextState<AppState>>,
     mut next_menu_screen: ResMut<NextState<MenuScreen>>,
 ) {
     for (interaction, action) in interaction_query.iter_mut() {
-        match *interaction {
-            Interaction::Pressed => match action {
-                MainMenuButton::StartGame => {
-                    log::info!("Starting game");
-                    next_app_state.set(AppState::InGame);
-                }
-                MainMenuButton::Settings => {
-                    log::info!("Opening settings");
-                    next_menu_screen.set(MenuScreen::Settings);
-                }
-            },
-            _ => {}
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            MainMenuButton::SelectProject(id) => {
+                let Some(manifest) = registry.find(id) else {
+                    log::warn!("Selected project '{id}' not found in registry");
+                    continue;
+                };
+                log::info!(
+                    "Starting project '{}' (start_world='{}', plugins={:?})",
+                    manifest.id,
+                    manifest.start_world,
+                    manifest.plugins
+                );
+                commands.insert_resource(ActiveProject(manifest.clone()));
+                next_app_state.set(AppState::InGame);
+            }
+            MainMenuButton::NewProject => {
+                log::info!("Opening new-project screen");
+                next_menu_screen.set(MenuScreen::CreateProject);
+            }
         }
     }
 }

@@ -1,5 +1,17 @@
 # cargo-features = ["codegen-backend"]
 
+[workspace]
+members = [".", "crates/engine-api", "plugins/*"]
+resolver = "3"
+
+[workspace.dependencies]
+bevy = { version = "0.18.0", default-features = true, features = [
+    "web", "webgpu",
+    "jpeg",
+    "debug",
+    "dynamic_linking",
+] }
+
 [[bin]]
 name = "game_engine"
 path = "src/main.rs"
@@ -33,7 +45,7 @@ lto = true
 codegen-units = 1
 
 [package]
-name = "cafe-sim"
+name = "engine"
 version = "0.1.0"
 edition = "2024"
 
@@ -59,6 +71,9 @@ avian3d = { version = "0.5" }
 parry3d = { version = "0.25", default-features = false }
 rayon = "1"
 bytemuck = { version = "1", features = ["derive"] }
+engine-api = { path = "crates/engine-api" }
+libloading = "0.8"
+toml = "0.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
@@ -75,11 +90,4 @@ js-sys = "0.3"
 tempfile = "3"
 
 [dependencies.bevy]
-version = "0.18.0"
-default-features = true
-features = [
-    "web", "webgpu",
-    "jpeg",
-    "debug"
-    # "trace_chrome",
-]
+workspace = true

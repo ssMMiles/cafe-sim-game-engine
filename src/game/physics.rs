@@ -1,15 +1,9 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::{
-    game::world::terrain::HeightmapData,
-    settings::{MovementMode, UserSettings},
-};
-
-use super::{
-    gfx::camera::PlayerCamera,
-    simulation::{Player, PlayerCollider},
-};
+pub use engine_api::CharacterState;
+use engine_api::{MovementMode, Player, PlayerCamera, PlayerCollider, UserSettings};
+use crate::game::world::terrain::HeightmapData;
 
 // Physics constants
 const GRAVITY: f32 = 19.6;
@@ -25,23 +19,6 @@ const AIR_ACCEL: f32 = 8.0;
 pub const CHAR_HEIGHT: f32 = 1.5;
 /// Radius of the player capsule.
 pub const CHAR_RADIUS: f32 = 0.3;
-
-#[derive(Component, Debug)]
-pub struct CharacterState {
-    pub velocity: Vec3,
-    pub grounded: bool,
-    pub ground_normal: Vec3,
-}
-
-impl Default for CharacterState {
-    fn default() -> Self {
-        Self {
-            velocity: Vec3::ZERO,
-            grounded: false,
-            ground_normal: Vec3::Y,
-        }
-    }
-}
 
 /// Main character physics system. Only runs when movement mode is FloorBased.
 pub fn character_physics(

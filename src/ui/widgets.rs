@@ -9,10 +9,92 @@ pub enum ButtonVariant {
 }
 
 impl ButtonVariant {
-    fn color(&self, theme: &UiTheme) -> Color {
+    fn colors(&self, theme: &UiTheme) -> (Color, Color, Color) {
         match self {
-            ButtonVariant::Primary => theme.primary,
-            ButtonVariant::Danger => theme.danger,
+            ButtonVariant::Primary => (
+                theme.primary,
+                theme.primary_hover,
+                theme.primary_pressed,
+            ),
+            ButtonVariant::Danger => (
+                theme.danger,
+                theme.danger_hover,
+                theme.danger_pressed,
+            ),
+        }
+    }
+}
+
+/// Per-state visuals for any interactive widget. Attach alongside `Button`
+/// (and optionally `BorderColor`) and the `update_interactive_visuals` system
+/// will swap colors as `Interaction` changes.
+#[derive(Component, Clone, Copy)]
+pub struct InteractiveStyle {
+    pub idle_bg: Color,
+    pub hover_bg: Color,
+    pub pressed_bg: Color,
+    pub idle_border: Color,
+    pub hover_border: Color,
+    pub pressed_border: Color,
+}
+
+impl InteractiveStyle {
+    pub fn button(theme: &UiTheme, variant: ButtonVariant) -> Self {
+        let (idle, hover, pressed) = variant.colors(theme);
+        Self {
+            idle_bg: idle,
+            hover_bg: hover,
+            pressed_bg: pressed,
+            idle_border: theme.border,
+            hover_border: theme.border_strong,
+            pressed_border: theme.border_strong,
+        }
+    }
+
+    /// Subtle hover lift for surface-level rows (checkbox row, list items).
+    pub fn surface(theme: &UiTheme) -> Self {
+        Self {
+            idle_bg: theme.bg_panel,
+            hover_bg: theme.bg_surface_hover,
+            pressed_bg: theme.bg_surface,
+            idle_border: Color::NONE,
+            hover_border: theme.border,
+            pressed_border: theme.border_strong,
+        }
+    }
+
+    pub fn slider_handle(theme: &UiTheme) -> Self {
+        Self {
+            idle_bg: theme.primary,
+            hover_bg: theme.primary_hover,
+            pressed_bg: theme.primary_pressed,
+            idle_border: theme.border_strong,
+            hover_border: theme.text_white,
+            pressed_border: theme.text_white,
+        }
+    }
+}
+
+pub fn update_interactive_visuals(
+    mut q: Query<
+        (
+            &Interaction,
+            &InteractiveStyle,
+            &mut BackgroundColor,
+            Option<&mut BorderColor>,
+        ),
+        Changed<Interaction>,
+    >,
+) {
+    for (interaction, style, mut bg, border) in &mut q {
+        let (target_bg, target_border) = match *interaction {
+            Interaction::None => (style.idle_bg, style.idle_border),
+            Interaction::Hovered => (style.hover_bg, style.hover_border),
+            Interaction::Pressed => (style.pressed_bg, style.pressed_border),
+        };
+        bg.0 = target_bg;
+        if let Some(mut border) = border {
+            *border = BorderColor::all(target_border);
         }
     }
 }
@@ -70,21 +152,32 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
         variant: ButtonVariant,
         theme: &UiTheme,
     ) -> Entity {
+        let style = InteractiveStyle::button(theme, variant);
         self.spawn((
             Button,
             Node {
                 width: Val::Px(theme.btn_width),
                 height: Val::Px(theme.btn_height),
                 border: UiRect::all(Val::Px(theme.btn_border)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                margin: UiRect::bottom(Val::Px(theme.pad_lg)),
+                margin: UiRect::all(Val::Px(theme.pad_sm)),
                 ..default()
             },
-            BackgroundColor(variant.color(theme)),
+            BackgroundColor(style.idle_bg),
+            BorderColor::all(style.idle_border),
+            style,
             action,
         ))
-        .with_child((Text::new(text), TextColor(theme.text)))
+        .with_child((
+            Text::new(text),
+            TextFont {
+                font_size: theme.size_body,
+                ..default()
+            },
+            TextColor(theme.text),
+        ))
         .id()
     }
 
@@ -105,22 +198,23 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
             theme.slider_track_width,
             theme.slider_handle_size,
         );
+        let handle_style = InteractiveStyle::slider_handle(theme);
 
         self.spawn((Node {
             width: Val::Px(theme.slider_track_width),
-            height: Val::Px(80.0),
+            height: Val::Px(60.0),
             flex_direction: FlexDirection::Column,
-            margin: UiRect::bottom(Val::Px(theme.pad_lg)),
+            margin: UiRect::bottom(Val::Px(theme.pad_md)),
             ..default()
         },))
             .with_children(|parent| {
                 parent.spawn((
                     Text::new(format!("{}: {:.3}", label, value)),
                     TextFont {
-                        font_size: theme.size_body,
+                        font_size: theme.size_label,
                         ..default()
                     },
-                    TextColor(theme.text),
+                    TextColor(theme.text_dim),
                     Node {
                         margin: UiRect::bottom(Val::Px(theme.pad_sm)),
                         ..default()
@@ -131,7 +225,7 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
                 parent
                     .spawn((Node {
                         width: Val::Percent(100.0),
-                        height: Val::Px(30.0),
+                        height: Val::Px(theme.slider_handle_size),
                         align_items: AlignItems::Center,
                         ..default()
                     },))
@@ -141,6 +235,9 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
                             Node {
                                 width: Val::Percent(100.0),
                                 height: Val::Px(theme.slider_track_height),
+                                border_radius: BorderRadius::all(Val::Px(
+                                    theme.slider_track_height * 0.5,
+                                )),
                                 ..default()
                             },
                             BackgroundColor(theme.bg_surface),
@@ -155,9 +252,14 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
                                 position_type: PositionType::Absolute,
                                 left: Val::Percent(handle_left),
                                 border: UiRect::all(Val::Px(2.0)),
+                                border_radius: BorderRadius::all(Val::Px(
+                                    theme.slider_handle_size * 0.5,
+                                )),
                                 ..default()
                             },
-                            BackgroundColor(theme.primary),
+                            BackgroundColor(handle_style.idle_bg),
+                            BorderColor::all(handle_style.idle_border),
+                            handle_style,
                             action,
                         ));
                     });

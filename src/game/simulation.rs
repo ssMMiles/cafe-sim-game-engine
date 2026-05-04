@@ -2,17 +2,12 @@ use avian3d::prelude::*;
 use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
-use super::physics::{CHAR_HEIGHT, CHAR_RADIUS, CharacterState};
-use super::{GameEntity, SimulationConfig};
+pub use engine_api::{Player, PlayerCollider};
+use engine_api::{CharacterState, GameEntity, SimulationConfig};
+use super::physics::{CHAR_HEIGHT, CHAR_RADIUS};
 use crate::game::gfx::camera::setup_camera;
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
-
-#[derive(Component)]
-pub struct Player;
-
-#[derive(Component)]
-pub struct PlayerCollider;
 
 pub fn setup(
     mut commands: Commands,
@@ -79,7 +74,7 @@ pub fn exit(
     cursor_options.grab_mode = bevy::window::CursorGrabMode::None;
     cursor_options.visible = true;
 
-    // Reset placement and streaming state so re-entering the game starts fresh.
-    *registry = PlacedObjectRegistry::default();
-    *streaming_state = StreamingState::default();
+    // Hand the world's own state off to the world module — keeps resource
+    // lifecycle owned by the systems that created it.
+    crate::game::world::destroy(&mut commands, &mut registry, &mut streaming_state);
 }

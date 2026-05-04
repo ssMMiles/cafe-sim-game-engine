@@ -10,6 +10,8 @@ use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 
 mod game;
 mod menu;
+mod projects;
+mod script_host;
 mod settings;
 mod storage;
 mod ui;
@@ -58,20 +60,16 @@ pub fn run() {
     .add_plugins(storage::StoragePlugin)
     .add_plugins(settings::SettingsPlugin)
     .add_plugins(ui::UiPlugin)
+    .add_plugins(projects::ProjectsPlugin)
     .add_plugins(menu::MenuPlugin)
     .add_plugins(game::SimulationPlugin)
+    .add_plugins(script_host::ScriptHostPlugin)
     .add_systems(Startup, initialize)
     .init_state::<AppState>()
     .run();
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
-pub enum AppState {
-    MainMenu,
-    InGame,
-    #[default]
-    Starting,
-}
+pub use engine_api::AppState;
 
 fn initialize(mut next_state: ResMut<NextState<AppState>>) {
     next_state.set(AppState::MainMenu);

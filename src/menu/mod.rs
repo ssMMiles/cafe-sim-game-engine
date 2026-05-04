@@ -1,7 +1,8 @@
 use bevy::{log, prelude::*};
 
-use crate::AppState;
+use crate::{AppState, ui::clear_focus};
 
+mod create_project;
 mod main;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
@@ -9,7 +10,7 @@ pub enum MenuScreen {
     #[default]
     None,
     Main,
-    Settings,
+    CreateProject,
 }
 
 pub struct MenuPlugin;
@@ -23,10 +24,22 @@ impl Plugin for MenuPlugin {
             OnExit(MenuScreen::Main),
             despawn_screen::<main::MainMenuScreen>,
         );
-
         app.add_systems(
             Update,
             main::handle_main_menu_button_press.run_if(in_state(MenuScreen::Main)),
+        );
+
+        app.add_systems(OnEnter(MenuScreen::CreateProject), create_project::setup);
+        app.add_systems(
+            OnExit(MenuScreen::CreateProject),
+            (
+                despawn_screen::<create_project::CreateProjectScreen>,
+                clear_focus,
+            ),
+        );
+        app.add_systems(
+            Update,
+            create_project::handle_actions.run_if(in_state(MenuScreen::CreateProject)),
         );
 
         app.init_state::<MenuScreen>();

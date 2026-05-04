@@ -1,4 +1,5 @@
 use bevy::{
+    log,
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
@@ -6,18 +7,32 @@ use bevy::{
 use super::SimulationState;
 use crate::{
     AppState,
+    game::world::{
+        self,
+        objects::{PlacedObject, PlacedObjectRegistry},
+        streaming::StreamingState,
+        terrain::{
+            TerrainChunk,
+            bootstrap::TerrainSetupMarker,
+            storage::WorldConfig,
+        },
+    },
+    projects::{self, ActiveProject, ProjectRegistry},
     settings::{
         EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
         MovementSpeedSetting, SliderSetting, UserSettings, slider_constants,
     },
-    ui::{ButtonVariant, UiExt, UiTheme},
+    ui::{ButtonVariant, TextInput, UiExt, UiTheme, spawn_text_input},
 };
+use engine_api::Player;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
 pub enum PauseMenuState {
     #[default]
     Main,
     Settings,
+    AddWorld,
+    AddPlugin,
 }
 
 #[derive(Component)]
@@ -27,16 +42,44 @@ pub struct PauseMenu;
 pub struct PauseSettings;
 
 #[derive(Component)]
+pub struct PauseAddWorld;
+
+#[derive(Component)]
+pub struct PauseAddPlugin;
+
+#[derive(Component)]
 pub enum PauseMenuButton {
     Resume,
     Settings,
     ExitGame,
+    SwitchWorld(String),
+    AddWorld,
+    RemovePlugin(String),
+    OpenAddPlugin,
+}
+
+#[derive(Component, Debug)]
+pub enum AddPluginButton {
+    Add(String),
+    Cancel,
 }
 
 #[derive(Component)]
 pub enum SettingsButton {
     Back,
 }
+
+#[derive(Component, Debug)]
+pub struct AddWorldIdInput;
+
+#[derive(Component, Debug)]
+pub enum AddWorldButton {
+    Create,
+    Cancel,
+}
+
+#[derive(Component, Debug)]
+pub struct AddWorldStatusLine;
 
 // Generic slider components
 #[derive(Component)]
@@ -107,7 +150,9 @@ pub fn handle_pause_input(
                 sim_next_state.set(SimulationState::Paused);
             }
             SimulationState::Paused => match current_menu_state.get() {
-                PauseMenuState::Settings => {
+                PauseMenuState::Settings
+                | PauseMenuState::AddWorld
+                | PauseMenuState::AddPlugin => {
                     menu_next_state.set(PauseMenuState::Main);
                 }
                 PauseMenuState::Main => {
@@ -118,7 +163,12 @@ pub fn handle_pause_input(
     }
 }
 
-pub fn setup_pause_menu(mut commands: Commands, theme: Res<UiTheme>) {
+pub fn setup_pause_menu(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    active: Option<Res<ActiveProject>>,
+    world_config: Option<Res<WorldConfig>>,
+) {
     commands
         .spawn((
             PauseMenu,
@@ -146,6 +196,105 @@ pub fn setup_pause_menu(mut commands: Commands, theme: Res<UiTheme>) {
                 ButtonVariant::Primary,
                 &theme,
             );
+
+            // Worlds section — only shown when an ActiveProject is set.
+            if let Some(active) = active.as_deref() {
+                let current_world = world_config
+                    .as_deref()
+                    .map(|c| c.world_id.as_str())
+                    .unwrap_or("");
+
+                parent.spawn((
+                    Text::new("Worlds"),
+                    TextFont {
+                        font_size: theme.size_label,
+                        ..default()
+                    },
+                    TextColor(theme.text_dim),
+                    Node {
+                        margin: UiRect::new(
+                            Val::Px(0.0),
+                            Val::Px(0.0),
+                            Val::Px(theme.pad_md),
+                            Val::Px(theme.pad_sm),
+                        ),
+                        ..default()
+                    },
+                ));
+
+                for world_id in &active.0.worlds {
+                    let is_current = world_id == current_world;
+                    let label = if is_current {
+                        format!("> {world_id}")
+                    } else {
+                        world_id.clone()
+                    };
+                    parent.ui_button(
+                        &label,
+                        PauseMenuButton::SwitchWorld(world_id.clone()),
+                        ButtonVariant::Primary,
+                        &theme,
+                    );
+                }
+
+                parent.ui_button(
+                    "+ Add World",
+                    PauseMenuButton::AddWorld,
+                    ButtonVariant::Primary,
+                    &theme,
+                );
+
+                // ── Plugins section ──────────────────────────────────────
+                parent.spawn((
+                    Text::new("Plugins"),
+                    TextFont {
+                        font_size: theme.size_label,
+                        ..default()
+                    },
+                    TextColor(theme.text_dim),
+                    Node {
+                        margin: UiRect::new(
+                            Val::Px(0.0),
+                            Val::Px(0.0),
+                            Val::Px(theme.pad_md),
+                            Val::Px(theme.pad_sm),
+                        ),
+                        ..default()
+                    },
+                ));
+
+                if active.0.plugins.is_empty() {
+                    parent.spawn((
+                        Text::new("(none — add one to enable scripted behavior)"),
+                        TextFont {
+                            font_size: theme.size_caption,
+                            ..default()
+                        },
+                        TextColor(theme.text_dim),
+                        Node {
+                            margin: UiRect::bottom(Val::Px(theme.pad_sm)),
+                            ..default()
+                        },
+                    ));
+                } else {
+                    for plugin_id in &active.0.plugins {
+                        parent.ui_button(
+                            &format!("- {plugin_id}"),
+                            PauseMenuButton::RemovePlugin(plugin_id.clone()),
+                            ButtonVariant::Primary,
+                            &theme,
+                        );
+                    }
+                }
+
+                parent.ui_button(
+                    "+ Add Plugin",
+                    PauseMenuButton::OpenAddPlugin,
+                    ButtonVariant::Primary,
+                    &theme,
+                );
+            }
+
             parent.ui_button(
                 "Exit Game",
                 PauseMenuButton::ExitGame,
@@ -231,7 +380,153 @@ pub fn cleanup_pause_settings(mut commands: Commands, query: Query<Entity, With<
     }
 }
 
+pub fn setup_pause_add_world(mut commands: Commands, theme: Res<UiTheme>) {
+    commands
+        .spawn((
+            PauseAddWorld,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(theme.bg_overlay),
+        ))
+        .with_children(|parent| {
+            parent.ui_title("ADD WORLD", &theme);
+            spawn_text_input(
+                parent,
+                "World ID",
+                "",
+                "my-world",
+                AddWorldIdInput,
+                &theme,
+            );
+
+            parent
+                .spawn((Node {
+                    flex_direction: FlexDirection::Row,
+                    margin: UiRect::top(Val::Px(theme.pad_lg)),
+                    ..default()
+                },))
+                .with_children(|row| {
+                    row.ui_button(
+                        "Create",
+                        AddWorldButton::Create,
+                        ButtonVariant::Primary,
+                        &theme,
+                    );
+                    row.ui_button(
+                        "Cancel",
+                        AddWorldButton::Cancel,
+                        ButtonVariant::Danger,
+                        &theme,
+                    );
+                });
+
+            parent.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: theme.size_caption,
+                    ..default()
+                },
+                TextColor(theme.danger),
+                Node {
+                    margin: UiRect::top(Val::Px(theme.pad_md)),
+                    ..default()
+                },
+                AddWorldStatusLine,
+            ));
+        });
+}
+
+pub fn cleanup_pause_add_world(mut commands: Commands, query: Query<Entity, With<PauseAddWorld>>) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
+pub fn setup_pause_add_plugin(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    active: Option<Res<ActiveProject>>,
+) {
+    let on_disk = projects::discover_plugin_ids();
+    let already: Vec<&str> = active
+        .as_deref()
+        .map(|a| a.0.plugins.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let candidates: Vec<String> = on_disk
+        .into_iter()
+        .filter(|id| !already.contains(&id.as_str()))
+        .collect();
+
+    commands
+        .spawn((
+            PauseAddPlugin,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(theme.bg_overlay),
+        ))
+        .with_children(|parent| {
+            parent.ui_title("ADD PLUGIN", &theme);
+
+            if candidates.is_empty() {
+                parent.spawn((
+                    Text::new(
+                        "All discoverable plugins are already in this project. Build a new \
+                         crate under `plugins/<id>/` to add more.",
+                    ),
+                    TextFont {
+                        font_size: theme.size_body,
+                        ..default()
+                    },
+                    TextColor(theme.text_dim),
+                    Node {
+                        max_width: Val::Px(theme.btn_width * 2.0),
+                        margin: UiRect::bottom(Val::Px(theme.pad_lg)),
+                        ..default()
+                    },
+                ));
+            } else {
+                for id in candidates {
+                    parent.ui_button(
+                        &id,
+                        AddPluginButton::Add(id.clone()),
+                        ButtonVariant::Primary,
+                        &theme,
+                    );
+                }
+            }
+
+            parent.ui_button(
+                "Cancel",
+                AddPluginButton::Cancel,
+                ButtonVariant::Danger,
+                &theme,
+            );
+        });
+}
+
+pub fn cleanup_pause_add_plugin(
+    mut commands: Commands,
+    query: Query<Entity, With<PauseAddPlugin>>,
+) {
+    for entity in query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
 pub fn handle_pause_menu(
+    mut commands: Commands,
     interaction_query: Query<
         (&Interaction, &PauseMenuButton),
         (Changed<Interaction>, With<Button>),
@@ -240,24 +535,103 @@ pub fn handle_pause_menu(
     mut pause_menu_state: ResMut<NextState<PauseMenuState>>,
     mut app_state: ResMut<NextState<AppState>>,
     mut cursor_options: Single<&mut CursorOptions>,
+    mut world_config: ResMut<WorldConfig>,
+    chunk_query: Query<Entity, With<TerrainChunk>>,
+    marker_query: Query<Entity, With<TerrainSetupMarker>>,
+    object_query: Query<Entity, With<PlacedObject>>,
+    mut placed_registry: ResMut<PlacedObjectRegistry>,
+    mut streaming_state: ResMut<StreamingState>,
+    mut player: Query<&mut Transform, With<Player>>,
+    mut active: Option<ResMut<ActiveProject>>,
+    mut registry: ResMut<ProjectRegistry>,
 ) {
     for (interaction, action) in interaction_query.iter() {
-        if *interaction == Interaction::Pressed {
-            match action {
-                PauseMenuButton::Resume => {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            PauseMenuButton::Resume => {
+                simulation_state.set(SimulationState::Running);
+                cursor_options.grab_mode = CursorGrabMode::Locked;
+                cursor_options.visible = false;
+            }
+            PauseMenuButton::Settings => {
+                pause_menu_state.set(PauseMenuState::Settings);
+            }
+            PauseMenuButton::ExitGame => {
+                app_state.set(AppState::MainMenu);
+                simulation_state.set(SimulationState::Running);
+                cursor_options.grab_mode = CursorGrabMode::None;
+                cursor_options.visible = true;
+            }
+            PauseMenuButton::SwitchWorld(target) => {
+                if world_config.world_id == *target {
+                    // Already in this world — just resume.
                     simulation_state.set(SimulationState::Running);
                     cursor_options.grab_mode = CursorGrabMode::Locked;
                     cursor_options.visible = false;
+                    continue;
                 }
-                PauseMenuButton::Settings => {
-                    pause_menu_state.set(PauseMenuState::Settings);
+                let Ok(mut player_transform) = player.single_mut() else {
+                    log::warn!("SwitchWorld: no player entity found");
+                    continue;
+                };
+                world::switch_world(
+                    target,
+                    &mut commands,
+                    &mut world_config,
+                    &chunk_query,
+                    &marker_query,
+                    &object_query,
+                    &mut placed_registry,
+                    &mut streaming_state,
+                    &mut player_transform,
+                );
+                simulation_state.set(SimulationState::Running);
+                cursor_options.grab_mode = CursorGrabMode::Locked;
+                cursor_options.visible = false;
+            }
+            PauseMenuButton::AddWorld => {
+                pause_menu_state.set(PauseMenuState::AddWorld);
+            }
+            PauseMenuButton::OpenAddPlugin => {
+                pause_menu_state.set(PauseMenuState::AddPlugin);
+            }
+            PauseMenuButton::RemovePlugin(plugin_id) => {
+                let Some(active) = active.as_deref_mut() else {
+                    log::warn!("RemovePlugin: no ActiveProject");
+                    continue;
+                };
+                if !active.0.plugins.iter().any(|p| p == plugin_id) {
+                    continue;
                 }
-                PauseMenuButton::ExitGame => {
-                    app_state.set(AppState::MainMenu);
-                    simulation_state.set(SimulationState::Running);
-                    cursor_options.grab_mode = CursorGrabMode::None;
-                    cursor_options.visible = true;
+
+                active.0.plugins.retain(|p| p != plugin_id);
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Err(e) = projects::write_manifest(&active.0) {
+                        log::error!("Failed to update manifest: {e}");
+                        // Roll back the in-memory mutation.
+                        active.0.plugins.push(plugin_id.clone());
+                        active.0.plugins.sort();
+                        continue;
+                    }
                 }
+
+                if let Some(slot) = registry
+                    .projects
+                    .iter_mut()
+                    .find(|m| m.id == active.0.id)
+                {
+                    slot.plugins = active.0.plugins.clone();
+                }
+
+                let id_for_unload = plugin_id.clone();
+                commands.queue(move |world: &mut World| {
+                    crate::script_host::unload_plugin(world, &id_for_unload);
+                });
+                log::info!("Removed plugin '{plugin_id}' from project '{}'", active.0.id);
             }
         }
     }
@@ -275,6 +649,148 @@ pub fn handle_settings_menu(
                 }
             }
         }
+    }
+}
+
+pub fn handle_add_world(
+    interactions: Query<(&Interaction, &AddWorldButton), (Changed<Interaction>, With<Button>)>,
+    id_q: Query<&TextInput, With<AddWorldIdInput>>,
+    mut active: ResMut<ActiveProject>,
+    mut registry: ResMut<ProjectRegistry>,
+    mut pause_menu_state: ResMut<NextState<PauseMenuState>>,
+    mut status_q: Query<(&mut Text, &mut TextColor), With<AddWorldStatusLine>>,
+    theme: Res<UiTheme>,
+) {
+    for (interaction, action) in interactions.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            AddWorldButton::Cancel => {
+                pause_menu_state.set(PauseMenuState::Main);
+                return;
+            }
+            AddWorldButton::Create => {
+                let world_id = id_q
+                    .single()
+                    .map(|t| t.value.trim().to_owned())
+                    .unwrap_or_default();
+
+                if let Err(msg) = validate_world_id(&world_id, &active.0.worlds) {
+                    set_status(&mut status_q, &msg, theme.danger);
+                    continue;
+                }
+
+                active.0.worlds.push(world_id.clone());
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Err(e) = projects::write_manifest(&active.0) {
+                        let msg = format!("Failed to update manifest: {e}");
+                        log::error!("{msg}");
+                        // Roll back the in-memory mutation so we stay consistent.
+                        active.0.worlds.retain(|w| w != &world_id);
+                        set_status(&mut status_q, &msg, theme.danger);
+                        continue;
+                    }
+                }
+
+                // Mirror the change into ProjectRegistry so the main menu also
+                // sees the new world if the user heads back.
+                if let Some(slot) = registry
+                    .projects
+                    .iter_mut()
+                    .find(|m| m.id == active.0.id)
+                {
+                    slot.worlds = active.0.worlds.clone();
+                }
+
+                log::info!("Added world '{world_id}' to project '{}'", active.0.id);
+                pause_menu_state.set(PauseMenuState::Main);
+                return;
+            }
+        }
+    }
+}
+
+pub fn handle_add_plugin(
+    mut commands: Commands,
+    interactions: Query<(&Interaction, &AddPluginButton), (Changed<Interaction>, With<Button>)>,
+    mut active: ResMut<ActiveProject>,
+    mut registry: ResMut<ProjectRegistry>,
+    mut pause_menu_state: ResMut<NextState<PauseMenuState>>,
+) {
+    for (interaction, action) in interactions.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            AddPluginButton::Cancel => {
+                pause_menu_state.set(PauseMenuState::Main);
+                return;
+            }
+            AddPluginButton::Add(plugin_id) => {
+                if active.0.plugins.iter().any(|p| p == plugin_id) {
+                    pause_menu_state.set(PauseMenuState::Main);
+                    return;
+                }
+                active.0.plugins.push(plugin_id.clone());
+                active.0.plugins.sort();
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Err(e) = projects::write_manifest(&active.0) {
+                        log::error!("Failed to update manifest: {e}");
+                        active.0.plugins.retain(|p| p != plugin_id);
+                        continue;
+                    }
+                }
+
+                if let Some(slot) = registry
+                    .projects
+                    .iter_mut()
+                    .find(|m| m.id == active.0.id)
+                {
+                    slot.plugins = active.0.plugins.clone();
+                }
+
+                let id_for_load = plugin_id.clone();
+                commands.queue(move |world: &mut World| {
+                    crate::script_host::load_plugin(world, &id_for_load);
+                });
+                log::info!("Added plugin '{plugin_id}' to project '{}'", active.0.id);
+
+                pause_menu_state.set(PauseMenuState::Main);
+                return;
+            }
+        }
+    }
+}
+
+fn validate_world_id(id: &str, existing: &[String]) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("World ID is required.".into());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("World ID may only contain letters, digits, '-', and '_'.".into());
+    }
+    if existing.iter().any(|w| w == id) {
+        return Err(format!("World '{id}' already exists in this project."));
+    }
+    Ok(())
+}
+
+fn set_status(
+    status_q: &mut Query<(&mut Text, &mut TextColor), With<AddWorldStatusLine>>,
+    msg: &str,
+    color: Color,
+) {
+    if let Ok((mut text, mut color_)) = status_q.single_mut() {
+        *text = Text::new(msg.to_owned());
+        color_.0 = color;
     }
 }
 

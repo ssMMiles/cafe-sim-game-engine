@@ -15,10 +15,7 @@ pub mod terrain;
 use crate::{
     game::{
         GameEntity,
-        world::{
-            sky::{SkyDomeMaterial, sync_sky_dome},
-            terrain::bootstrap::TerrainSetupMarker,
-        },
+        world::sky::{SkyDomeMaterial, sync_sky_dome},
     },
     settings::UserSettings,
 };
@@ -149,7 +146,7 @@ pub fn setup(
 ) {
     log::info!("Setting up the game world");
 
-    commands.spawn((GameEntity, TerrainSetupMarker));
+    terrain::setup(commands);
 
     // Add ambient light for diffusion
     commands.insert_resource(GlobalAmbientLight {
@@ -191,4 +188,52 @@ pub fn setup(
             scale: Vec3::splat(3.0), // Make it bigger
         },
     ));
+}
+
+/// Tear down world-scoped resources so the next session can load a fresh
+/// world. Entity despawn (terrain chunks, sun, sky, placed objects, etc.) is
+/// driven by the `GameEntity` cleanup elsewhere; this only clears the
+/// resource-shaped state that would otherwise carry over between projects.
+pub fn destroy(commands: &mut Commands, registry: &mut PlacedObjectRegistry, streaming_state: &mut StreamingState) {
+    log::info!("Tearing down the game world");
+    terrain::destroy(commands);
+    *registry = PlacedObjectRegistry::default();
+    *streaming_state = StreamingState::default();
+}
+
+/// Swap to `new_world_id` without leaving `AppState::InGame`. Despawns
+/// world-owned entities (terrain chunks, terrain setup marker, placed
+/// objects), clears world-scoped resources, points `WorldConfig` at the new
+/// world id, and re-arms the terrain bootstrap. Player is teleported to
+/// origin so they spawn somewhere sane in the new world.
+pub fn switch_world(
+    new_world_id: &str,
+    commands: &mut Commands,
+    world_config: &mut terrain::storage::WorldConfig,
+    chunk_query: &Query<Entity, With<terrain::TerrainChunk>>,
+    marker_query: &Query<Entity, With<terrain::bootstrap::TerrainSetupMarker>>,
+    object_query: &Query<Entity, With<objects::PlacedObject>>,
+    placed_registry: &mut PlacedObjectRegistry,
+    streaming_state: &mut StreamingState,
+    player_transform: &mut Transform,
+) {
+    log::info!("Switching world to '{new_world_id}'");
+    for e in chunk_query.iter() {
+        commands.entity(e).despawn();
+    }
+    for e in marker_query.iter() {
+        commands.entity(e).despawn();
+    }
+    for e in object_query.iter() {
+        commands.entity(e).despawn();
+    }
+
+    *placed_registry = PlacedObjectRegistry::default();
+    *streaming_state = StreamingState::default();
+    terrain::destroy(commands);
+
+    world_config.world_id = new_world_id.to_owned();
+    terrain::setup(commands);
+
+    *player_transform = Transform::default();
 }

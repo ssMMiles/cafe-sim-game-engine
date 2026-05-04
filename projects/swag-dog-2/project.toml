@@ -1,0 +1,4 @@
+name = "Swag Dog 2 Test"
+plugins = []
+worlds = ["default2", "swag-world", "abcd"]
+start_world = "default2"

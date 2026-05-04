@@ -14,10 +14,11 @@ pub use types::{HeightmapData, TerrainChunk};
 
 pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
 
+use crate::game::GameEntity;
+use bootstrap::{TerrainRenderAssets, TerrainSetupMarker, create_terrain};
 use lod::{TerrainLodState, update_terrain_lod};
 use material::TerrainMaterial;
-
-use bootstrap::create_terrain;
+use storage::{TerrainChunkRegistry, TerrainWorld};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TerrainSet {
@@ -63,4 +64,22 @@ impl Plugin for TerrainPlugin {
                 .in_set(TerrainSet::Edit),
         );
     }
+}
+
+/// Kick off async terrain bootstrap. Spawning a [`TerrainSetupMarker`] is the
+/// hand-off into the bootstrap state machine — it issues the world-meta load,
+/// then inserts [`TerrainWorld`], [`TerrainChunkRegistry`], [`HeightmapData`],
+/// and the shared render assets when the load completes.
+pub fn setup(commands: &mut Commands) {
+    commands.spawn((GameEntity, TerrainSetupMarker));
+}
+
+/// Drop terrain-owned resources so they don't leak between game sessions /
+/// projects. The streaming, save, and bake systems all use `Option<Res<…>>`
+/// for these, so they no-op until the next [`setup`] re-inserts them.
+pub fn destroy(commands: &mut Commands) {
+    commands.remove_resource::<TerrainWorld>();
+    commands.remove_resource::<TerrainChunkRegistry>();
+    commands.remove_resource::<HeightmapData>();
+    commands.remove_resource::<TerrainRenderAssets>();
 }

@@ -498,6 +498,7 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec689b5a79452b6f777b889bbff22d3216b82a8d2ab7814d4a0eb571e9938d97"
 dependencies = [
+ "bevy_dylib",
  "bevy_internal",
  "tracing",
 ]
@@ -814,6 +815,15 @@ dependencies = [
  "log",
  "serde",
  "sysinfo",
+]
+
+[[package]]
+name = "bevy_dylib"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f142f72bbbc1a61338bf6da5dc7cf6dcf223683b9d53bcd635ebff4bfeb5308f"
+dependencies = [
+ "bevy_internal",
 ]
 
 [[package]]
@@ -1956,34 +1966,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
-name = "cafe-sim"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argh",
- "avian3d",
- "bevy",
- "bytemuck",
- "crc32fast",
- "env_logger",
- "getrandom 0.2.15",
- "getrandom 0.3.4",
- "getrandom 0.4.1",
- "image",
- "js-sys",
- "log",
- "parry3d",
- "rand 0.9.1",
- "rayon",
- "rkyv",
- "tempfile",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "winit",
-]
-
-[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2515,6 +2497,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argh",
+ "avian3d",
+ "bevy",
+ "bytemuck",
+ "crc32fast",
+ "engine-api",
+ "env_logger",
+ "getrandom 0.2.15",
+ "getrandom 0.3.4",
+ "getrandom 0.4.1",
+ "image",
+ "js-sys",
+ "libloading",
+ "log",
+ "parry3d",
+ "rand 0.9.1",
+ "rayon",
+ "rkyv",
+ "tempfile",
+ "toml",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "winit",
+]
+
+[[package]]
+name = "engine-api"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "env_filter"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2592,6 +2612,22 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "example"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "engine-api",
+]
+
+[[package]]
+name = "example2"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "engine-api",
 ]
 
 [[package]]

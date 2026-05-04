@@ -1,0 +1,4 @@
+name = "Swag Dog Game"
+plugins = ["example2"]
+worlds = ["default"]
+start_world = "default"

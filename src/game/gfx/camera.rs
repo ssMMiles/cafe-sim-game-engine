@@ -37,11 +37,7 @@ const EYE_HEIGHT: f32 = 1.7; // Camera offset above player origin in first-perso
 const FOV_FIRST_PERSON: f32 = PI / 2.5; // ~72 degrees
 const FOV_THIRD_PERSON: f32 = PI / 5.0; // ~36 degrees (original)
 
-#[derive(Component, Debug, Default)]
-pub struct PlayerCamera {
-    pub yaw: f32,
-    pub pitch: f32,
-}
+pub use engine_api::PlayerCamera;
 
 #[derive(Component)]
 pub struct RenderTextureSprite;
@@ -111,7 +107,7 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
                 color: Color::srgba(0.85, 0.80, 0.72, 1.0),
                 directional_light_color: Color::srgba(1.0, 0.85, 0.65, 0.5),
                 directional_light_exponent: 6.0,
-                falloff: FogFalloff::Exponential { density: 0.003 },
+                falloff: FogFalloff::Exponential { density: 0.0003 },
             },
             // Volumetric fog enables light-shaft rendering through cloud FogVolumes
             VolumetricFog {

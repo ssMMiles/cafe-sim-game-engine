@@ -5,8 +5,12 @@ use crate::{
     game::{
         gfx::{GfxPlugin, GfxSet},
         gltf_loading::{handle_interactable_clicks, show_interaction_text},
-        world::{WorldPlugin, WorldSet, setup_sky, terrain::TerrainSet},
+        world::{
+            WorldPlugin, WorldSet, setup_sky,
+            terrain::{TerrainSet, storage::WorldConfig},
+        },
     },
+    projects::ActiveProject,
 };
 
 mod animation;
@@ -28,9 +32,10 @@ use animation::{
 };
 use gltf_loading::{InteractableClicked, check_interactions, detect_interactable_clicks};
 use pause_menu::{
-    PauseMenuState, cleanup_pause_menu, cleanup_pause_settings, handle_pause_input,
-    handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_menu, setup_pause_settings,
-    update_slider_label,
+    PauseMenuState, cleanup_pause_add_plugin, cleanup_pause_add_world, cleanup_pause_menu,
+    cleanup_pause_settings, handle_add_plugin, handle_add_world, handle_pause_input,
+    handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_add_plugin,
+    setup_pause_add_world, setup_pause_menu, setup_pause_settings, update_slider_label,
 };
 use physics::character_physics;
 use simulation::{exit, setup};
@@ -42,27 +47,7 @@ use ui_displays::{
 
 pub struct SimulationPlugin;
 
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, States)]
-pub enum SimulationState {
-    #[default]
-    Running,
-    Paused,
-}
-
-#[derive(Resource, Debug)]
-pub struct SimulationConfig {
-    #[allow(dead_code)]
-    pub speed: f32,
-}
-
-impl Default for SimulationConfig {
-    fn default() -> Self {
-        SimulationConfig { speed: 1.0 }
-    }
-}
-
-#[derive(Component)]
-pub struct GameEntity;
+pub use engine_api::{GameEntity, SimulationConfig, SimulationState};
 
 /// System sets for the simulation, configured by [`SimulationPlugin`].
 ///
@@ -139,6 +124,7 @@ impl Plugin for SimulationPlugin {
         app.add_systems(
             OnEnter(AppState::InGame),
             (
+                apply_active_project_world_config.before(setup),
                 setup,
                 setup_sky,
                 setup_keybinds_display,
@@ -163,9 +149,34 @@ impl Plugin for SimulationPlugin {
             (cleanup_pause_menu, setup_pause_settings),
         );
         app.add_systems(OnExit(PauseMenuState::Settings), cleanup_pause_settings);
+
+        app.add_systems(
+            OnEnter(PauseMenuState::AddWorld),
+            (cleanup_pause_menu, setup_pause_add_world),
+        );
+        app.add_systems(
+            OnExit(PauseMenuState::AddWorld),
+            (cleanup_pause_add_world, crate::ui::clear_focus),
+        );
+
+        app.add_systems(
+            OnEnter(PauseMenuState::AddPlugin),
+            (cleanup_pause_menu, setup_pause_add_plugin),
+        );
+        app.add_systems(
+            OnExit(PauseMenuState::AddPlugin),
+            cleanup_pause_add_plugin,
+        );
+
         app.add_systems(
             OnEnter(PauseMenuState::Main),
-            (cleanup_pause_settings, setup_pause_menu).run_if(in_state(SimulationState::Paused)),
+            (
+                cleanup_pause_settings,
+                cleanup_pause_add_world,
+                cleanup_pause_add_plugin,
+                setup_pause_menu,
+            )
+                .run_if(in_state(SimulationState::Paused)),
         );
 
         // ── Update ────────────────────────────────────────────────────────
@@ -210,6 +221,18 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(
             Update,
+            handle_add_world
+                .in_set(SimSet::Paused)
+                .run_if(in_state(PauseMenuState::AddWorld)),
+        );
+        app.add_systems(
+            Update,
+            handle_add_plugin
+                .in_set(SimSet::Paused)
+                .run_if(in_state(PauseMenuState::AddPlugin)),
+        );
+        app.add_systems(
+            Update,
             (
                 handle_slider::<MouseSensitivitySetting>,
                 handle_slider::<MovementSpeedSetting>,
@@ -229,4 +252,18 @@ impl Plugin for SimulationPlugin {
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
     }
+}
+
+/// Copy the active project's `start_world` into the terrain `WorldConfig` so
+/// the right save dir under `worlds/` is loaded. Runs `.before(setup)` on
+/// `OnEnter(AppState::InGame)`.
+fn apply_active_project_world_config(
+    active: Option<Res<ActiveProject>>,
+    mut world_config: ResMut<WorldConfig>,
+) {
+    let Some(active) = active else {
+        warn!("Entered InGame without an ActiveProject — falling back to default world");
+        return;
+    };
+    world_config.world_id = active.0.start_world.clone();
 }
