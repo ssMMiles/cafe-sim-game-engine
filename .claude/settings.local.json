@@ -89,7 +89,10 @@
       "Bash(git *)",
       "Bash(mv \"C:/Users/Miles/Documents/projects/engine/crates/cafe-api\" \"C:/Users/Miles/Documents/projects/engine/crates/engine-api\")",
       "Bash(mv \"C:/Users/Miles/Documents/projects/engine/crates/cafe-scripts\" \"C:/Users/Miles/Documents/projects/engine/crates/engine-scripts\")",
-      "Bash(cargo build-plugins *)"
+      "Bash(cargo build-plugins *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Miles\\\\Documents\\\\projects\\\\engine\\\\src\\\\ui\" -Filter \"*.rs\")",
+      "Bash(Select-Object -ExpandProperty Name)",
+      "PowerShell($f = \"target\\\\debug\\\\example.loaded.0.dll\"; try { $s = [System.IO.File]::Open\\($f, 'Open', 'ReadWrite', 'None'\\); $s.Close\\(\\); \"OK: $f is writable\" } catch { \"LOCKED: $f -- $_\" }; $f = \"target\\\\debug\\\\example.dll\"; try { $s = [System.IO.File]::Open\\($f, 'Open', 'ReadWrite', 'None'\\); $s.Close\\(\\); \"OK: $f is writable\" } catch { \"LOCKED: $f -- $_\" })"
     ],
     "deny": [],
     "ask": [],

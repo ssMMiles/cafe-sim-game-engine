@@ -1,0 +1,4 @@
+name = "Cafe Sim"
+plugins = ["cafe-sim"]
+worlds = ["cafe"]
+start_world = "cafe"

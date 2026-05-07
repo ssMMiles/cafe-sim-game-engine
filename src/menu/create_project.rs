@@ -3,7 +3,8 @@ use bevy::{log, prelude::*};
 use crate::{
     projects::{self, ProjectRegistry},
     ui::{
-        ButtonVariant, Checkbox, TextInput, UiExt, UiTheme, spawn_checkbox, spawn_text_input,
+        ButtonVariant, Checkbox, TextInput, UiExt, UiTheme, spawn_checkbox, spawn_dropdown,
+        spawn_text_input,
     },
 };
 
@@ -23,6 +24,9 @@ pub struct WorldInput;
 
 #[derive(Component, Debug)]
 pub struct PluginCheckbox(pub String);
+
+#[derive(Component, Debug)]
+pub struct PluginsDropdown;
 
 #[derive(Component, Debug)]
 pub enum CreateAction {
@@ -79,34 +83,23 @@ pub fn setup(mut commands: Commands, theme: Res<UiTheme>) {
                 &theme,
             );
 
-            root.spawn((
-                Text::new("Plugins"),
-                TextFont {
-                    font_size: theme.size_label,
-                    ..default()
-                },
-                TextColor(theme.text_dim),
-                Node {
-                    margin: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(theme.pad_md), Val::Px(theme.pad_sm)),
-                    ..default()
-                },
-            ));
-
-            if plugin_ids.is_empty() {
-                root.spawn((
-                    Text::new("(no plugins discovered under `plugins/`)"),
-                    TextFont {
-                        font_size: theme.size_caption,
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
-                ));
-            } else {
-                for id in plugin_ids {
-                    let label = id.clone();
-                    spawn_checkbox(root, &label, false, PluginCheckbox(id), &theme);
+            spawn_dropdown(root, "Plugins", false, PluginsDropdown, &theme, |body| {
+                if plugin_ids.is_empty() {
+                    body.spawn((
+                        Text::new("(no plugins discovered under `plugins/`)"),
+                        TextFont {
+                            font_size: theme.size_caption,
+                            ..default()
+                        },
+                        TextColor(theme.text_dim),
+                    ));
+                } else {
+                    for id in plugin_ids {
+                        let label = id.clone();
+                        spawn_checkbox(body, &label, false, PluginCheckbox(id), &theme);
+                    }
                 }
-            }
+            });
 
             root.spawn((
                 Node {

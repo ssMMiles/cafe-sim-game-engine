@@ -1,5 +1,5 @@
 name = "Example Game"
 description = "Demo with the orbiting cube and counter."
-plugins = ["example", "example2"]
+plugins = ["cafe-sim"]
 worlds = ["default"]
 start_world = "default"

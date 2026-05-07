@@ -22,7 +22,7 @@ use crate::{
         EdgeDepthSensitivitySetting, EdgeNormalSensitivitySetting, MouseSensitivitySetting,
         MovementSpeedSetting, SliderSetting, UserSettings, slider_constants,
     },
-    ui::{ButtonVariant, TextInput, UiExt, UiTheme, spawn_text_input},
+    ui::{ButtonVariant, TextInput, UiExt, UiTheme, spawn_dropdown, spawn_text_input},
 };
 use engine_api::Player;
 
@@ -80,6 +80,12 @@ pub enum AddWorldButton {
 
 #[derive(Component, Debug)]
 pub struct AddWorldStatusLine;
+
+#[derive(Component, Debug)]
+pub struct WorldsDropdown;
+
+#[derive(Component, Debug)]
+pub struct PluginsDropdown;
 
 // Generic slider components
 #[derive(Component)]
@@ -204,94 +210,80 @@ pub fn setup_pause_menu(
                     .map(|c| c.world_id.as_str())
                     .unwrap_or("");
 
-                parent.spawn((
-                    Text::new("Worlds"),
-                    TextFont {
-                        font_size: theme.size_label,
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
-                    Node {
-                        margin: UiRect::new(
-                            Val::Px(0.0),
-                            Val::Px(0.0),
-                            Val::Px(theme.pad_md),
-                            Val::Px(theme.pad_sm),
-                        ),
-                        ..default()
-                    },
-                ));
-
-                for world_id in &active.0.worlds {
-                    let is_current = world_id == current_world;
-                    let label = if is_current {
-                        format!("> {world_id}")
-                    } else {
-                        world_id.clone()
-                    };
-                    parent.ui_button(
-                        &label,
-                        PauseMenuButton::SwitchWorld(world_id.clone()),
-                        ButtonVariant::Primary,
-                        &theme,
-                    );
-                }
-
-                parent.ui_button(
-                    "+ Add World",
-                    PauseMenuButton::AddWorld,
-                    ButtonVariant::Primary,
-                    &theme,
-                );
-
-                // ── Plugins section ──────────────────────────────────────
-                parent.spawn((
-                    Text::new("Plugins"),
-                    TextFont {
-                        font_size: theme.size_label,
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
-                    Node {
-                        margin: UiRect::new(
-                            Val::Px(0.0),
-                            Val::Px(0.0),
-                            Val::Px(theme.pad_md),
-                            Val::Px(theme.pad_sm),
-                        ),
-                        ..default()
-                    },
-                ));
-
-                if active.0.plugins.is_empty() {
-                    parent.spawn((
-                        Text::new("(none — add one to enable scripted behavior)"),
-                        TextFont {
-                            font_size: theme.size_caption,
-                            ..default()
-                        },
-                        TextColor(theme.text_dim),
-                        Node {
-                            margin: UiRect::bottom(Val::Px(theme.pad_sm)),
-                            ..default()
-                        },
-                    ));
+                let worlds_label = if current_world.is_empty() {
+                    "Worlds".to_string()
                 } else {
-                    for plugin_id in &active.0.plugins {
-                        parent.ui_button(
-                            &format!("- {plugin_id}"),
-                            PauseMenuButton::RemovePlugin(plugin_id.clone()),
+                    format!("Worlds: {current_world}")
+                };
+                spawn_dropdown(
+                    parent,
+                    &worlds_label,
+                    false,
+                    WorldsDropdown,
+                    &theme,
+                    |body| {
+                        for world_id in &active.0.worlds {
+                            let is_current = world_id == current_world;
+                            let label = if is_current {
+                                format!("> {world_id}")
+                            } else {
+                                world_id.clone()
+                            };
+                            body.ui_button(
+                                &label,
+                                PauseMenuButton::SwitchWorld(world_id.clone()),
+                                ButtonVariant::Primary,
+                                &theme,
+                            );
+                        }
+
+                        body.ui_button(
+                            "+ Add World",
+                            PauseMenuButton::AddWorld,
                             ButtonVariant::Primary,
                             &theme,
                         );
-                    }
-                }
+                    },
+                );
 
-                parent.ui_button(
-                    "+ Add Plugin",
-                    PauseMenuButton::OpenAddPlugin,
-                    ButtonVariant::Primary,
+                spawn_dropdown(
+                    parent,
+                    "Plugins",
+                    false,
+                    PluginsDropdown,
                     &theme,
+                    |body| {
+                        if active.0.plugins.is_empty() {
+                            body.spawn((
+                                Text::new("(none — add one to enable scripted behavior)"),
+                                TextFont {
+                                    font_size: theme.size_caption,
+                                    ..default()
+                                },
+                                TextColor(theme.text_dim),
+                                Node {
+                                    margin: UiRect::bottom(Val::Px(theme.pad_sm)),
+                                    ..default()
+                                },
+                            ));
+                        } else {
+                            for plugin_id in &active.0.plugins {
+                                body.ui_button(
+                                    &format!("- {plugin_id}"),
+                                    PauseMenuButton::RemovePlugin(plugin_id.clone()),
+                                    ButtonVariant::Primary,
+                                    &theme,
+                                );
+                            }
+                        }
+
+                        body.ui_button(
+                            "+ Add Plugin",
+                            PauseMenuButton::OpenAddPlugin,
+                            ButtonVariant::Primary,
+                            &theme,
+                        );
+                    },
                 );
             }
 
@@ -630,6 +622,17 @@ pub fn handle_pause_menu(
                 let id_for_unload = plugin_id.clone();
                 commands.queue(move |world: &mut World| {
                     crate::script_host::unload_plugin(world, &id_for_unload);
+                    // Rebuild the pause menu so the removed entry disappears.
+                    let entities: Vec<Entity> = world
+                        .query_filtered::<Entity, With<PauseMenu>>()
+                        .iter(world)
+                        .collect();
+                    for e in entities {
+                        if let Ok(em) = world.get_entity_mut(e) {
+                            em.despawn();
+                        }
+                    }
+                    let _ = world.try_run_schedule(OnEnter(PauseMenuState::Main));
                 });
                 log::info!("Removed plugin '{plugin_id}' from project '{}'", active.0.id);
             }

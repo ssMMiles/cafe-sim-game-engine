@@ -103,13 +103,30 @@ struct LoadedPlugins {
     /// mtime of last *failed* load attempt per plugin id. Used to skip
     /// retrying a busted DLL until its mtime changes.
     failed_mtimes: HashMap<String, Option<SystemTime>>,
+    /// Next unused copy index per plugin id. Persists across unload/reload
+    /// cycles within a process — unloaded libraries are `mem::forget`'d,
+    /// so their copy files stay locked, and reusing index 0 would collide.
+    next_copy_index: HashMap<String, u32>,
 }
 
-/// Returns `<exe-dir>/<id>.dll`, or `None` if the exe path can't be resolved.
+/// Returns the path to a plugin's dylib next to the running exe, or `None` if
+/// the exe path can't be resolved.
+///
+/// Mirrors cargo's artifact-naming rules: dashes in the crate name become
+/// underscores, and the platform-appropriate dylib prefix/suffix are applied.
+/// So plugin id `cafe-sim` resolves to `cafe_sim.dll` on Windows,
+/// `libcafe_sim.so` on Linux, and `libcafe_sim.dylib` on macOS.
 #[cfg(not(target_family = "wasm"))]
 fn plugin_dll_path(id: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join(format!("{id}.dll")))
+    let artifact = id.replace('-', "_");
+    let filename = format!(
+        "{}{}{}",
+        std::env::consts::DLL_PREFIX,
+        artifact,
+        std::env::consts::DLL_SUFFIX,
+    );
+    Some(exe.parent()?.join(filename))
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -478,7 +495,15 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
 
     let mtime = file_mtime(&source_path);
 
-    let Some(prepared) = prepare_library(plugin_id, &source_path, 0) else {
+    let copy_index = {
+        let mut state = world.resource_mut::<LoadedPlugins>();
+        let slot = state.next_copy_index.entry(plugin_id.to_owned()).or_insert(0);
+        let n = *slot;
+        *slot = n.wrapping_add(1);
+        n
+    };
+
+    let Some(prepared) = prepare_library(plugin_id, &source_path, copy_index) else {
         let mut state = world.resource_mut::<LoadedPlugins>();
         state.failed_mtimes.insert(plugin_id.to_owned(), mtime);
         return;
@@ -498,7 +523,7 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
             plugin_name: loaded.plugin_name,
             source_path,
             loaded_mtime: mtime,
-            reload_count: 0,
+            reload_count: copy_index,
         },
     );
 }
@@ -605,7 +630,13 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
         return;
     }
 
-    let new_count = prev.reload_count + 1;
+    let new_count = {
+        let mut state = world.resource_mut::<LoadedPlugins>();
+        let slot = state.next_copy_index.entry(plugin_id.to_owned()).or_insert(0);
+        let n = *slot;
+        *slot = n.wrapping_add(1);
+        n
+    };
     let new_mtime = file_mtime(&prev.source_path);
 
     bevy::log::info!("[scripts] '{plugin_id}' reloading (#{new_count})...");
