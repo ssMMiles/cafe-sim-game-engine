@@ -1,11 +1,12 @@
 use std::f32::consts::PI;
 
 use crate::{
+    editor::MeshSelectorOpen,
     game::{
         GameEntity,
         gfx::post_process::EdgeDetectionSettings,
         simulation::Player,
-        world::{MeshSelectorOpen, terrain::HeightmapData},
+        world::terrain::HeightmapData,
     },
     settings::{CameraView, MovementMode, UserSettings, setting_ranges},
 };

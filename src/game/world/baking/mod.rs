@@ -159,7 +159,6 @@ impl Plugin for BakingPlugin {
         }
 
         use crate::game::world::WorldSet;
-        app.add_systems(Update, trigger_bake.in_set(WorldSet::InGame));
         app.add_systems(Update, run_bake.in_set(WorldSet::InGame));
 
         // GPU dispatch runs after run_bake has written GpuBakeTrigger.
@@ -176,16 +175,6 @@ impl Plugin for BakingPlugin {
 // ============================================================================
 // Systems
 // ============================================================================
-
-/// Watch for Shift+B and send `BakeMessage`.
-fn trigger_bake(input: Res<ButtonInput<KeyCode>>, mut bake_messages: MessageWriter<BakeMessage>) {
-    if input.just_pressed(KeyCode::KeyB)
-        && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight))
-    {
-        info!("Bake triggered (Shift+B)");
-        bake_messages.write(BakeMessage);
-    }
-}
 
 /// Respond to `BakeMessage` and run CPU bake passes.
 ///

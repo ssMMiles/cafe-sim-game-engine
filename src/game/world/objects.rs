@@ -106,7 +106,7 @@ pub fn world_pos_to_chunk(world_x: f32, world_z: f32) -> (i32, i32) {
 // Spawn / Despawn Helpers
 // ============================================================================
 
-pub(super) fn spawn_placed_object(
+pub fn spawn_placed_object(
     commands: &mut Commands,
     asset_server: &AssetServer,
     registry: &mut PlacedObjectRegistry,
@@ -219,17 +219,16 @@ pub fn despawn_chunk_objects(
 // Systems
 // ============================================================================
 
-/// Saves all dirty object chunks on Shift+S, alongside terrain saving.
+/// Saves all dirty object chunks alongside terrain saving — runs whenever the
+/// editor sends a `SaveTerrainMessage`.
 pub fn save_placed_objects(
-    input: Res<ButtonInput<KeyCode>>,
+    mut messages: MessageReader<crate::game::world::terrain::save::SaveTerrainMessage>,
     terrain_world: Option<Res<TerrainWorld>>,
     mut registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(&PlacedObject, &Transform)>,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
-    if !(input.just_pressed(KeyCode::KeyS)
-        && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight)))
-    {
+    if messages.read().count() == 0 {
         return;
     }
 
@@ -314,50 +313,6 @@ pub fn save_placed_objects(
                 }
             }
         });
-    }
-}
-
-/// Delete key while looking at a PlacedObject in edit mode.
-pub fn delete_hovered_object(
-    mut commands: Commands,
-    settings: Res<crate::settings::UserSettings>,
-    input: Res<ButtonInput<KeyCode>>,
-    mut registry: ResMut<PlacedObjectRegistry>,
-    mut raycast: bevy::picking::mesh_picking::ray_cast::MeshRayCast,
-    camera_query: Query<&Transform, With<crate::game::gfx::camera::PlayerCamera>>,
-    interactable_parent_query: Query<&crate::game::gltf_loading::InteractableParent>,
-    placed_query: Query<&PlacedObject>,
-) {
-    if !settings.edit_mode || !input.just_pressed(KeyCode::Delete) {
-        return;
-    }
-
-    let Ok(cam) = camera_query.single() else {
-        return;
-    };
-    let Ok(forward) = Dir3::new(cam.forward().as_vec3()) else {
-        return;
-    };
-    let ray = Ray3d::new(cam.translation, forward);
-    let hits = raycast.cast_ray(ray, &Default::default());
-
-    for (entity, _) in hits.iter() {
-        // Resolve child mesh → root entity
-        let root = interactable_parent_query
-            .get(*entity)
-            .map(|p| p.0)
-            .unwrap_or(*entity);
-
-        if let Ok(obj) = placed_query.get(root) {
-            registry.by_id.remove(&obj.id);
-            registry.dirty_chunks.insert(obj.chunk);
-            commands.entity(root).despawn();
-            info!(
-                "Deleted placed object id={} from chunk {:?}",
-                obj.id, obj.chunk
-            );
-            return; // delete only the nearest hit
-        }
     }
 }
 

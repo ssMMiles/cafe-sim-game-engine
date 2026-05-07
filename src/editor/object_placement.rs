@@ -1,14 +1,21 @@
-use super::objects::{
-    PlacedObjectRegistry, PlacementConfig, spawn_placed_object, world_pos_to_chunk,
-};
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
+use bevy::{log, prelude::*};
+
 use crate::game::GameEntity;
 use crate::game::gfx::camera::PlayerCamera;
-use crate::game::gltf_loading::{PendingMaterial, spawn_interactable_scene};
+use crate::game::gltf_loading::{InteractableParent, PendingMaterial, spawn_interactable_scene};
+use crate::game::world::objects::{
+    PlacedObject, PlacedObjectRegistry, PlacementConfig, spawn_placed_object, world_pos_to_chunk,
+};
 use crate::game::world::terrain::TerrainChunk;
 use crate::settings::UserSettings;
-use bevy::input::mouse::MouseScrollUnit;
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
-use bevy::{input::mouse::MouseWheel, log, prelude::*};
+
+#[derive(Component)]
+pub struct PlacementPreview;
+
+#[derive(Resource, Default)]
+pub struct PlacementPreviewEntity(pub Option<Entity>);
 
 pub fn toggle_edit_mode(mut settings: ResMut<UserSettings>, input: Res<ButtonInput<KeyCode>>) {
     if input.just_pressed(KeyCode::KeyE)
@@ -35,7 +42,6 @@ pub fn handle_edit_mode_click(
         return;
     }
 
-    // Use the preview position if available (already correctly snapped to terrain)
     let mut position = None;
     if let Some(entity) = preview_entity.0 {
         if let Ok(preview_transform) = preview_query.get(entity) {
@@ -43,7 +49,6 @@ pub fn handle_edit_mode_click(
         }
     }
 
-    // Fall back to a fresh terrain raycast if no preview position
     if position.is_none() {
         if let Ok(camera_transform) = camera_query.single() {
             let camera_pos = camera_transform.translation;
@@ -76,12 +81,6 @@ pub fn handle_edit_mode_click(
     );
 }
 
-#[derive(Component)]
-pub struct PlacementPreview;
-
-#[derive(Resource, Default)]
-pub struct PlacementPreviewEntity(pub Option<Entity>);
-
 pub fn setup_placement_preview(
     mut commands: Commands,
     mut preview_entity: ResMut<PlacementPreviewEntity>,
@@ -89,7 +88,6 @@ pub fn setup_placement_preview(
     settings: Res<UserSettings>,
     config: Res<PlacementConfig>,
 ) {
-    // Spawn preview whenever edit mode is active and no preview exists yet
     if !settings.edit_mode || preview_entity.0.is_some() {
         return;
     }
@@ -160,7 +158,6 @@ pub fn cleanup_placement_preview(
     mut preview_entity: ResMut<PlacementPreviewEntity>,
     settings: Res<UserSettings>,
 ) {
-    // Only cleanup if edit mode just turned off and we have a preview
     if !settings.is_changed() || settings.edit_mode || preview_entity.0.is_none() {
         return;
     }
@@ -168,6 +165,17 @@ pub fn cleanup_placement_preview(
     if let Some(entity) = preview_entity.0.take() {
         commands.entity(entity).despawn();
         log::info!("Placement preview entity removed");
+    }
+}
+
+/// Despawn the preview entity unconditionally — used by `OnExit(EditorMode::Editor)`
+/// so the gameplay screen has no leftover ghost mesh.
+pub fn teardown_placement_preview(
+    mut commands: Commands,
+    mut preview_entity: ResMut<PlacementPreviewEntity>,
+) {
+    if let Some(entity) = preview_entity.0.take() {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -202,7 +210,7 @@ pub fn adjust_placement_scale(
     for event in scroll_events.read() {
         let y = match event.unit {
             MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / 53.0, // normalise pixels to ~lines
+            MouseScrollUnit::Pixel => event.y / 53.0,
         };
         delta += y;
     }
@@ -217,6 +225,49 @@ pub fn adjust_placement_scale(
     if let Some(entity) = preview_entity.0 {
         if let Ok(mut transform) = preview_query.get_mut(entity) {
             transform.scale = config.scale;
+        }
+    }
+}
+
+/// Delete key while looking at a `PlacedObject` in edit mode.
+pub fn delete_hovered_object(
+    mut commands: Commands,
+    settings: Res<UserSettings>,
+    input: Res<ButtonInput<KeyCode>>,
+    mut registry: ResMut<PlacedObjectRegistry>,
+    mut raycast: MeshRayCast,
+    camera_query: Query<&Transform, With<PlayerCamera>>,
+    interactable_parent_query: Query<&InteractableParent>,
+    placed_query: Query<&PlacedObject>,
+) {
+    if !settings.edit_mode || !input.just_pressed(KeyCode::Delete) {
+        return;
+    }
+
+    let Ok(cam) = camera_query.single() else {
+        return;
+    };
+    let Ok(forward) = Dir3::new(cam.forward().as_vec3()) else {
+        return;
+    };
+    let ray = Ray3d::new(cam.translation, forward);
+    let hits = raycast.cast_ray(ray, &Default::default());
+
+    for (entity, _) in hits.iter() {
+        let root = interactable_parent_query
+            .get(*entity)
+            .map(|p| p.0)
+            .unwrap_or(*entity);
+
+        if let Ok(obj) = placed_query.get(root) {
+            registry.by_id.remove(&obj.id);
+            registry.dirty_chunks.insert(obj.chunk);
+            commands.entity(root).despawn();
+            info!(
+                "Deleted placed object id={} from chunk {:?}",
+                obj.id, obj.chunk
+            );
+            return;
         }
     }
 }

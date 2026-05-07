@@ -1,6 +1,5 @@
 pub mod bootstrap;
 pub mod constants;
-pub mod edit;
 pub mod lod;
 pub mod material;
 pub mod mesh;
@@ -24,8 +23,6 @@ use storage::{TerrainChunkRegistry, TerrainWorld};
 pub enum TerrainSet {
     /// Core terrain update systems: creation, LOD, save.
     Update,
-    /// Terrain editing systems: mode toggle, brush, raycasting.
-    Edit,
 }
 
 pub struct TerrainPlugin;
@@ -39,6 +36,7 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();
         app.init_resource::<save::PendingTerrainSave>();
+        app.add_message::<save::SaveTerrainMessage>();
 
         app.add_systems(
             Update,
@@ -47,21 +45,6 @@ impl Plugin for TerrainPlugin {
         app.add_systems(
             Update,
             (save::save_terrain, save::poll_terrain_save).in_set(TerrainSet::Update),
-        );
-
-        app.init_resource::<edit::TerrainBrushHit>();
-        app.add_systems(
-            Update,
-            (
-                edit::toggle_terrain_edit_mode,
-                edit::adjust_brush_size,
-                edit::raycast_terrain_hit,
-                edit::apply_terrain_brush,
-                edit::finalize_terrain_lod,
-                edit::update_brush_preview,
-            )
-                .chain()
-                .in_set(TerrainSet::Edit),
         );
     }
 }

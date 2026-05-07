@@ -1,10 +1,9 @@
 use bevy::{pbr::ExtendedMaterial, prelude::*};
 
+use crate::game::gfx::toon_material::ToonMaterial;
 use crate::game::world::baking::BakedSun;
 use crate::game::world::terrain::material::TerrainMaterial;
 use crate::settings::UserSettings;
-
-use super::toon_material::ToonMaterial;
 
 pub fn toggle_lightmap_mode(
     input: Res<ButtonInput<KeyCode>>,

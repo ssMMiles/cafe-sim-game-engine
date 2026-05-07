@@ -12,9 +12,12 @@ pub fn toggle_physics_debug(input: Res<ButtonInput<KeyCode>>, mut settings: ResM
     }
 }
 
+#[cfg(feature = "physics_debug")]
 pub fn sync_physics_debug(settings: Res<UserSettings>, mut store: ResMut<GizmoConfigStore>) {
-    #[cfg(feature = "physics_debug")]
     if settings.is_changed() {
         store.config_mut::<PhysicsGizmos>().0.enabled = settings.physics_debug;
     }
 }
+
+#[cfg(not(feature = "physics_debug"))]
+pub fn sync_physics_debug(_settings: Res<UserSettings>, _store: ResMut<GizmoConfigStore>) {}

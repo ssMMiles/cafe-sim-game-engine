@@ -8,6 +8,10 @@ use super::storage::{
 };
 use super::{CHUNK_SIZE, HeightmapData};
 
+/// Sent by the editor (Shift+S) to request a terrain save.
+#[derive(Message)]
+pub struct SaveTerrainMessage;
+
 // ============================================================================
 // Resources
 // ============================================================================
@@ -35,20 +39,18 @@ pub struct PendingTerrainSave(Option<std::sync::Arc<std::sync::Mutex<Option<Save
 // Systems
 // ============================================================================
 
-/// On Shift+S: drain dirty chunks, clone all data, and hand off to a background
-/// task (native) or a `spawn_local` future (wasm+opfs).
+/// On `SaveTerrainMessage`: drain dirty chunks, clone all data, and hand off to
+/// a background task (native) or a `spawn_local` future (wasm+opfs).
 /// The main thread is not blocked waiting for any I/O.
 pub fn save_terrain(
-    input: Res<ButtonInput<KeyCode>>,
+    mut messages: MessageReader<SaveTerrainMessage>,
     terrain_world: Option<Res<TerrainWorld>>,
     registry: Option<ResMut<TerrainChunkRegistry>>,
     heightmap: Option<Res<HeightmapData>>,
     mut pending: ResMut<PendingTerrainSave>,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
-    if !(input.just_pressed(KeyCode::KeyS)
-        && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight)))
-    {
+    if messages.read().count() == 0 {
         return;
     }
 

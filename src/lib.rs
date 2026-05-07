@@ -8,6 +8,7 @@ use bevy::{
 #[cfg(feature = "physics_debug")]
 use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 
+mod editor;
 mod game;
 mod menu;
 mod projects;
@@ -63,6 +64,7 @@ pub fn run() {
     .add_plugins(projects::ProjectsPlugin)
     .add_plugins(menu::MenuPlugin)
     .add_plugins(game::SimulationPlugin)
+    .add_plugins(editor::EditorPlugin)
     .add_plugins(script_host::ScriptHostPlugin)
     .add_systems(Startup, initialize)
     .init_state::<AppState>()

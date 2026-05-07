@@ -1,41 +1,22 @@
-use bevy::{
-    light::{CascadeShadowConfigBuilder, NotShadowCaster, VolumetricLight},
-    prelude::*,
-};
+use bevy::{light::NotShadowCaster, prelude::*};
 
 pub mod baking;
 pub mod chunk_assets;
-pub mod edit_mode;
-pub mod mesh_selector;
 pub mod objects;
 mod sky;
 pub mod streaming;
 pub mod terrain;
 
-use crate::{
-    game::{
-        GameEntity,
-        world::sky::{SkyDomeMaterial, sync_sky_dome},
-    },
-    settings::UserSettings,
-};
-use edit_mode::{
-    PlacementPreviewEntity, adjust_placement_scale, cleanup_placement_preview,
-    handle_edit_mode_click, rebuild_preview_on_config_change, setup_placement_preview,
-    toggle_edit_mode, update_placement_preview,
-};
-use mesh_selector::{
-    MeshCatalog, MeshManifestAsset, MeshManifestLoader, MeshSelectorIndex,
-    cleanup_mesh_selector_panel, mesh_selector_open, populate_mesh_catalog, request_mesh_manifest,
-    scroll_mesh_selector, setup_mesh_selector_panel, toggle_mesh_selector,
+use crate::game::{
+    GameEntity,
+    world::sky::{SkyDomeMaterial, sync_sky_dome},
 };
 
 use chunk_assets::{
     ChunkDataAsset, ChunkDataLoader, ChunkObjectsAsset, ChunkObjectsLoader, WorldMetaAsset,
     WorldMetaLoader,
 };
-pub use mesh_selector::MeshSelectorOpen;
-use objects::{PlacedObjectRegistry, PlacementConfig, delete_hovered_object, save_placed_objects};
+use objects::{PlacedObjectRegistry, PlacementConfig, save_placed_objects};
 use streaming::{
     ChunkStreamingConfig, StreamingState, finalize_computed_chunks, launch_chunk_tasks,
     update_streaming_ring,
@@ -49,10 +30,6 @@ pub enum WorldSet {
     InGame,
     /// Runs only while the simulation is running (not paused).
     Running,
-}
-
-fn edit_mode_active(settings: Res<UserSettings>) -> bool {
-    settings.edit_mode
 }
 
 pub struct WorldPlugin;
@@ -87,55 +64,10 @@ impl Plugin for WorldPlugin {
                 .in_set(terrain::TerrainSet::Update),
         );
 
-        app.add_systems(Update, toggle_edit_mode.in_set(WorldSet::InGame));
-        app.add_systems(
-            Update,
-            handle_edit_mode_click
-                .in_set(WorldSet::Running)
-                .run_if(edit_mode_active),
-        );
-
         app.add_systems(Update, save_placed_objects.in_set(WorldSet::InGame));
-        app.add_systems(
-            Update,
-            delete_hovered_object
-                .in_set(WorldSet::Running)
-                .run_if(edit_mode_active),
-        );
 
-        app.add_systems(Update, setup_placement_preview.in_set(WorldSet::InGame));
-        app.add_systems(Update, cleanup_placement_preview.in_set(WorldSet::InGame));
-        app.add_systems(Update, update_placement_preview.in_set(WorldSet::Running));
-        app.add_systems(Update, adjust_placement_scale.in_set(WorldSet::Running));
-
-        app.init_resource::<PlacementPreviewEntity>();
         app.init_resource::<PlacedObjectRegistry>();
         app.init_resource::<PlacementConfig>();
-
-        app.init_asset::<MeshManifestAsset>();
-        app.init_asset_loader::<MeshManifestLoader>();
-
-        app.init_resource::<MeshCatalog>();
-        app.init_resource::<MeshSelectorOpen>();
-        app.init_resource::<MeshSelectorIndex>();
-        app.add_systems(Startup, request_mesh_manifest);
-        app.add_systems(Update, populate_mesh_catalog.in_set(WorldSet::InGame));
-        app.add_systems(Update, toggle_mesh_selector.in_set(WorldSet::InGame));
-        app.add_systems(Update, setup_mesh_selector_panel.in_set(WorldSet::InGame));
-        app.add_systems(Update, cleanup_mesh_selector_panel.in_set(WorldSet::InGame));
-        app.add_systems(
-            Update,
-            scroll_mesh_selector
-                .in_set(WorldSet::Running)
-                .run_if(mesh_selector_open),
-        );
-        app.add_systems(
-            Update,
-            rebuild_preview_on_config_change
-                .in_set(WorldSet::InGame)
-                .run_if(edit_mode_active)
-                .run_if(resource_changed::<PlacementConfig>),
-        );
     }
 }
 

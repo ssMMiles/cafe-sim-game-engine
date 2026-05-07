@@ -14,12 +14,11 @@ use crate::{
 };
 
 mod animation;
-mod gfx;
-mod gltf_loading;
+pub mod gfx;
+pub mod gltf_loading;
 pub mod pause_menu;
 pub mod physics;
 mod simulation;
-mod ui_displays;
 pub mod world;
 
 use crate::settings::{
@@ -39,11 +38,6 @@ use pause_menu::{
 };
 use physics::character_physics;
 use simulation::{exit, setup};
-use ui_displays::{
-    setup_fps_display, setup_interaction_info_display, setup_keybinds_display,
-    setup_position_display, update_fps_display, update_interaction_info_display,
-    update_keybinds_display, update_position_display,
-};
 
 pub struct SimulationPlugin;
 
@@ -114,11 +108,6 @@ impl Plugin for SimulationPlugin {
             Update,
             TerrainSet::Update.run_if(in_state(AppState::InGame)),
         );
-        app.configure_sets(
-            Update,
-            TerrainSet::Edit
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
-        );
 
         // ── OnEnter / OnExit ──────────────────────────────────────────────
         app.add_systems(
@@ -127,10 +116,6 @@ impl Plugin for SimulationPlugin {
                 apply_active_project_world_config.before(setup),
                 setup,
                 setup_sky,
-                setup_keybinds_display,
-                setup_fps_display,
-                setup_interaction_info_display,
-                setup_position_display,
                 setup_character_animations.after(setup),
             ),
         );
@@ -197,13 +182,6 @@ impl Plugin for SimulationPlugin {
                 .in_set(SimSet::Running),
         );
         app.add_systems(Update, handle_interactable_clicks.in_set(SimSet::Running));
-        app.add_systems(Update, update_keybinds_display.in_set(SimSet::InGame));
-        app.add_systems(Update, update_fps_display.in_set(SimSet::InGame));
-        app.add_systems(
-            Update,
-            update_interaction_info_display.in_set(SimSet::InGame),
-        );
-        app.add_systems(Update, update_position_display.in_set(SimSet::InGame));
         app.add_systems(Update, handle_pause_input.in_set(SimSet::InGame));
 
         // Pause menu systems — also implicitly gated to AppState::InGame via SimSet::Paused

@@ -28,21 +28,17 @@ pub struct MeshCatalog {
 #[derive(Resource, Default)]
 pub struct MeshSelectorOpen(pub bool);
 
-/// Index of the currently selected entry in `MeshCatalog`.
 #[derive(Resource, Default)]
 pub struct MeshSelectorIndex(pub usize);
 
 // ── Manifest asset ────────────────────────────────────────────────────────────
 
-/// Parsed contents of `meshes/manifest.manifest`.
 #[derive(Asset, TypePath)]
 pub struct MeshManifestAsset(pub Vec<MeshEntry>);
 
-/// Handle kept alive until the manifest has been consumed.
 #[derive(Resource)]
 pub struct MeshManifestHandle(pub Handle<MeshManifestAsset>);
 
-/// Asset loader for `.manifest` files — expects pipe-delimited `name|asset_path` lines.
 #[derive(Default, TypePath)]
 pub struct MeshManifestLoader;
 
@@ -83,15 +79,12 @@ impl AssetLoader for MeshManifestLoader {
 
 // ── Components ────────────────────────────────────────────────────────────────
 
-/// Marker on the root UI node of the panel.
 #[derive(Component)]
 pub struct MeshSelectorPanel;
 
-/// Marker on the inner scrollable row so the scroll system can find it.
 #[derive(Component)]
 pub struct MeshSelectorScrollable;
 
-/// Attached to each card button; stores the asset path it represents.
 #[derive(Component)]
 pub struct MeshButton {
     pub asset_path: String,
@@ -105,13 +98,11 @@ pub fn mesh_selector_open(selector: Res<MeshSelectorOpen>) -> bool {
 
 // ── Systems ───────────────────────────────────────────────────────────────────
 
-/// Kicks off loading of `meshes/manifest.manifest` via the asset server.
 pub fn request_mesh_manifest(mut commands: Commands, asset_server: Res<AssetServer>) {
     let handle = asset_server.load::<MeshManifestAsset>("meshes/manifest.manifest");
     commands.insert_resource(MeshManifestHandle(handle));
 }
 
-/// Polls each frame until the manifest asset is loaded, then populates `MeshCatalog`.
 pub fn populate_mesh_catalog(
     mut commands: Commands,
     handle: Option<Res<MeshManifestHandle>>,
@@ -122,7 +113,7 @@ pub fn populate_mesh_catalog(
     let Some(handle) = handle else { return };
 
     if !catalog.entries.is_empty() {
-        return; // already populated
+        return;
     }
 
     match asset_server.load_state(&handle.0) {
@@ -141,13 +132,11 @@ pub fn populate_mesh_catalog(
     }
 }
 
-/// Tab toggles the panel while in edit mode. Leaving edit mode force-closes it.
 pub fn toggle_mesh_selector(
     mut selector: ResMut<MeshSelectorOpen>,
     settings: Res<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
 ) {
-    // Force close whenever edit mode turns off
     if settings.is_changed() && !settings.edit_mode {
         selector.0 = false;
         return;
@@ -166,11 +155,9 @@ const CARD_W: f32 = 100.0;
 const CARD_H_NORMAL: f32 = 104.0;
 const CARD_H_SELECTED: f32 = 128.0;
 const CARD_MARGIN: f32 = 8.0;
-/// Horizontal distance from one card's left edge to the next.
 pub const CARD_STRIDE: f32 = CARD_W + CARD_MARGIN * 2.0;
-const PANEL_H: f32 = 152.0; // enough to contain the tallest card + margins
+const PANEL_H: f32 = 152.0;
 
-/// Spawn the bottom strip when `MeshSelectorOpen` flips to `true`.
 pub fn setup_mesh_selector_panel(
     mut commands: Commands,
     selector: Res<MeshSelectorOpen>,
@@ -194,12 +181,10 @@ pub fn setup_mesh_selector_panel(
         .unwrap_or(0);
     selector_index.0 = selected_index;
 
-    // Initial scroll offset so selected card is centred in the viewport.
     let window_width = windows.single().map(|w| w.width()).unwrap_or(1280.0);
     let initial_scroll =
         (selected_index as f32 * CARD_STRIDE - (window_width / 2.0 - CARD_STRIDE / 2.0)).max(0.0);
 
-    // Root strip — child of bottom anchor, spans full width.
     let root = commands
         .spawn((
             GameEntity,
@@ -217,7 +202,6 @@ pub fn setup_mesh_selector_panel(
 
     commands.entity(anchors.bottom).add_child(root);
 
-    // Inner scrollable row — cards are vertically centred inside the strip.
     let row = commands
         .spawn((
             GameEntity,
@@ -249,8 +233,6 @@ pub fn setup_mesh_selector_panel(
             CARD_H_NORMAL
         };
 
-        // The label sits inside a fixed-size clipping container so long names
-        // never spill outside the card boundary.
         let card = commands
             .spawn((
                 GameEntity,
@@ -288,7 +270,6 @@ pub fn setup_mesh_selector_panel(
     }
 }
 
-/// Despawn the panel when `MeshSelectorOpen` flips to `false`.
 pub fn cleanup_mesh_selector_panel(
     mut commands: Commands,
     selector: Res<MeshSelectorOpen>,
@@ -303,9 +284,19 @@ pub fn cleanup_mesh_selector_panel(
     }
 }
 
-/// Step through the catalog with the mouse wheel (no Shift held).
-/// Updates `MeshSelectorIndex`, `PlacementConfig`, card highlights/sizes, and centres the panel.
-/// Shift+scroll is reserved for placement scale adjustment.
+/// Hard teardown for `OnExit(EditorMode::Editor)` — closes the panel and
+/// despawns its UI regardless of `is_changed` state.
+pub fn teardown_mesh_selector(
+    mut commands: Commands,
+    mut selector: ResMut<MeshSelectorOpen>,
+    panel_query: Query<Entity, With<MeshSelectorPanel>>,
+) {
+    selector.0 = false;
+    for entity in panel_query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
 pub fn scroll_mesh_selector(
     mut scroll_events: MessageReader<MouseWheel>,
     input: Res<ButtonInput<KeyCode>>,
@@ -335,25 +326,22 @@ pub fn scroll_mesh_selector(
         delta += y;
     }
 
-    // Threshold: at least half a line notch
     if delta.abs() < 0.5 {
         return;
     }
 
-    // Scroll up (positive y) = previous entry; scroll down = next entry
     let step: i32 = if delta > 0.0 { -1 } else { 1 };
     let current = selector_index.0 as i32;
     let new_index = (current + step).clamp(0, catalog.entries.len() as i32 - 1) as usize;
 
     if new_index == selector_index.0 {
-        return; // already at boundary
+        return;
     }
 
     selector_index.0 = new_index;
     config.asset_path = catalog.entries[new_index].asset_path.clone();
     config.scale = Vec3::splat(1.0);
 
-    // Refresh card highlights and heights
     for (button, mut bg, mut node) in card_query.iter_mut() {
         let selected = button.asset_path == config.asset_path;
         bg.0 = if selected {
@@ -368,7 +356,6 @@ pub fn scroll_mesh_selector(
         });
     }
 
-    // Centre the selected card in the viewport
     let window_width = windows.single().map(|w| w.width()).unwrap_or(1280.0);
     let target_scroll =
         (new_index as f32 * CARD_STRIDE - (window_width / 2.0 - CARD_STRIDE / 2.0)).max(0.0);
