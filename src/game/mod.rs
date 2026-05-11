@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::{
     AppState,
+    editor::EditorMode,
     game::{
         gfx::{GfxPlugin, GfxSet},
         gltf_loading::{handle_interactable_clicks, show_interaction_text},
@@ -33,8 +34,8 @@ use gltf_loading::{InteractableClicked, check_interactions, detect_interactable_
 use pause_menu::{
     PauseMenuState, cleanup_pause_add_plugin, cleanup_pause_add_world, cleanup_pause_menu,
     cleanup_pause_settings, handle_add_plugin, handle_add_world, handle_pause_input,
-    handle_pause_menu, handle_settings_menu, handle_slider, setup_pause_add_plugin,
-    setup_pause_add_world, setup_pause_menu, setup_pause_settings, update_slider_label,
+    handle_pause_menu, handle_settings_menu, handle_slider, setup_editor_pause_menu,
+    setup_pause_add_plugin, setup_pause_add_world, setup_pause_settings, update_slider_label,
 };
 use physics::character_physics;
 use simulation::{exit, setup};
@@ -121,9 +122,15 @@ impl Plugin for SimulationPlugin {
         );
         app.add_systems(OnExit(AppState::InGame), exit);
 
+        // The engine's pause menu is the *editor* pause menu — it only spawns
+        // in `EditorMode::Editor`. In `EditorMode::Gameplay` the active plugin
+        // owns the pause UX entirely (see `engine_api::GamePaused`).
         app.add_systems(
             OnEnter(SimulationState::Paused),
-            (setup_pause_menu, pause_animations),
+            (
+                setup_editor_pause_menu.run_if(in_state(EditorMode::Editor)),
+                pause_animations,
+            ),
         );
         app.add_systems(
             OnExit(SimulationState::Paused),
@@ -159,9 +166,9 @@ impl Plugin for SimulationPlugin {
                 cleanup_pause_settings,
                 cleanup_pause_add_world,
                 cleanup_pause_add_plugin,
-                setup_pause_menu,
+                setup_editor_pause_menu,
             )
-                .run_if(in_state(SimulationState::Paused)),
+                .run_if(in_state(SimulationState::Paused).and(in_state(EditorMode::Editor))),
         );
 
         // ── Update ────────────────────────────────────────────────────────
@@ -182,7 +189,12 @@ impl Plugin for SimulationPlugin {
                 .in_set(SimSet::Running),
         );
         app.add_systems(Update, handle_interactable_clicks.in_set(SimSet::Running));
-        app.add_systems(Update, handle_pause_input.in_set(SimSet::InGame));
+        app.add_systems(
+            Update,
+            handle_pause_input
+                .in_set(SimSet::InGame)
+                .run_if(in_state(EditorMode::Editor)),
+        );
 
         // Pause menu systems — also implicitly gated to AppState::InGame via SimSet::Paused
         app.add_systems(
@@ -229,6 +241,7 @@ impl Plugin for SimulationPlugin {
         app.init_state::<SimulationState>();
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
+        app.init_resource::<engine_api::GamePaused>();
     }
 }
 

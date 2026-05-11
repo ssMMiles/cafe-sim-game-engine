@@ -169,7 +169,9 @@ pub fn handle_pause_input(
     }
 }
 
-pub fn setup_pause_menu(
+/// Editor pause menu — includes worlds/plugins management. Used while in
+/// `EditorMode::Editor`. The slimmer gameplay variant is [`setup_game_pause_menu`].
+pub fn setup_editor_pause_menu(
     mut commands: Commands,
     theme: Res<UiTheme>,
     active: Option<Res<ActiveProject>>,
