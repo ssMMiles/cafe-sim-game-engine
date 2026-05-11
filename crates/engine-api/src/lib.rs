@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use std::collections::HashSet;
 
 /// Re-export so the `add!` macro can reference bevy via `$crate::bevy`.
 pub use bevy;
@@ -51,6 +52,12 @@ impl ScriptOwned {
         Self { plugin }
     }
 }
+
+/// Tag a `SceneRoot` (or any entity that will have a mesh hierarchy) to have
+/// the host attach a static trimesh collider once. The host removes the marker
+/// after fulfilling it, so the component is a one-shot request.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct AutoCollider;
 
 /// Exports a type implementing [`DynamicPlugin`] from a script dylib.
 ///
@@ -251,6 +258,31 @@ pub struct SimulationConfig {
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self { speed: 1.0 }
+    }
+}
+
+/// Stackable freeze on the player's input. While at least one holder is
+/// registered, the engine suppresses mouse-look and movement input. Cursor
+/// visibility/grab is a separate concern — manipulate `CursorOptions` directly.
+///
+/// Plugins should lock with their own `PLUGIN_NAME` and unlock with the same
+/// key, so multiple holders compose cleanly (e.g. shop UI + cutscene).
+#[derive(Resource, Default, Debug)]
+pub struct InputLock {
+    holders: HashSet<&'static str>,
+}
+
+impl InputLock {
+    pub fn lock(&mut self, holder: &'static str) {
+        self.holders.insert(holder);
+    }
+
+    pub fn unlock(&mut self, holder: &'static str) {
+        self.holders.remove(holder);
+    }
+
+    pub fn is_locked(&self) -> bool {
+        !self.holders.is_empty()
     }
 }
 
