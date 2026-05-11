@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-pub use engine_api::{CameraView, MovementMode, SettingInfo, UserSettings};
+pub use engine_api::{CameraView, InputLock, MovementMode, SettingInfo, UserSettings};
 
 // UI constants for slider system
 pub mod slider_constants {
@@ -33,6 +33,7 @@ pub struct SettingsPlugin;
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UserSettings>();
+        app.init_resource::<InputLock>();
     }
 }
 

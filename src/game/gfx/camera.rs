@@ -8,7 +8,7 @@ use crate::{
         simulation::Player,
         world::terrain::HeightmapData,
     },
-    settings::{CameraView, MovementMode, UserSettings, setting_ranges},
+    settings::{CameraView, InputLock, MovementMode, UserSettings, setting_ranges},
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -149,6 +149,7 @@ pub fn handle_camera_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut mouse_motion: MessageReader<MouseMotion>,
     mut settings: ResMut<UserSettings>,
+    input_lock: Res<InputLock>,
     mut camera_query: Query<(&mut Transform, &mut PlayerCamera), Without<Player>>,
     mut player_query: Query<&mut Transform, With<Player>>,
     heightmap: Option<Res<HeightmapData>>,
@@ -187,10 +188,14 @@ pub fn handle_camera_input(
         settings.toggle_camera_view();
     }
 
-    // Mouse look — apply yaw/pitch to camera transform
+    // Drain motion events even when locked so input doesn't pile up and
+    // snap the camera the moment the lock is released.
     let mut mouse_delta = Vec2::ZERO;
     for motion in mouse_motion.read() {
         mouse_delta += motion.delta;
+    }
+    if input_lock.is_locked() {
+        return;
     }
 
     if mouse_delta != Vec2::ZERO {
@@ -207,10 +212,11 @@ pub fn handle_camera_input(
 pub fn apply_freecam_movement(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     settings: Res<UserSettings>,
+    input_lock: Res<InputLock>,
     camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>)>,
     mut player_query: Query<&mut Transform, With<Player>>,
 ) {
-    if settings.movement_mode != MovementMode::FreeCam {
+    if settings.movement_mode != MovementMode::FreeCam || input_lock.is_locked() {
         return;
     }
 

@@ -2,7 +2,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 pub use engine_api::CharacterState;
-use engine_api::{MovementMode, Player, PlayerCamera, PlayerCollider, UserSettings};
+use engine_api::{InputLock, MovementMode, Player, PlayerCamera, PlayerCollider, UserSettings};
 use crate::game::world::terrain::HeightmapData;
 
 // Physics constants
@@ -24,6 +24,7 @@ pub const CHAR_RADIUS: f32 = 0.3;
 pub fn character_physics(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     settings: Res<UserSettings>,
+    input_lock: Res<InputLock>,
     time: Res<Time>,
     heightmap: Option<Res<HeightmapData>>,
     mut player_query: Query<(Entity, &mut Transform, &mut CharacterState), With<Player>>,
@@ -56,28 +57,36 @@ pub fn character_physics(
         [player_entity].into_iter().chain(collider_entity),
     );
 
-    // 1. Read input — WASD wish direction on XZ, oriented by camera yaw
+    // 1. Read input — WASD wish direction on XZ, oriented by camera yaw.
+    // Input is suppressed while a plugin holds the input lock; gravity and
+    // ground resolution still run so the character settles naturally.
     let mut wish_dir = Vec3::ZERO;
-    if keyboard_input.pressed(KeyCode::KeyW) {
-        wish_dir += camera_tf.forward().as_vec3();
-    }
-    if keyboard_input.pressed(KeyCode::KeyS) {
-        wish_dir -= camera_tf.forward().as_vec3();
-    }
-    if keyboard_input.pressed(KeyCode::KeyA) {
-        wish_dir -= camera_tf.right().as_vec3();
-    }
-    if keyboard_input.pressed(KeyCode::KeyD) {
-        wish_dir += camera_tf.right().as_vec3();
-    }
-    // Project onto XZ plane
-    wish_dir.y = 0.0;
-    if wish_dir.length_squared() > 0.0 {
-        wish_dir = wish_dir.normalize();
-    }
+    let jump_pressed;
+    let sprint;
+    if input_lock.is_locked() {
+        jump_pressed = false;
+        sprint = false;
+    } else {
+        if keyboard_input.pressed(KeyCode::KeyW) {
+            wish_dir += camera_tf.forward().as_vec3();
+        }
+        if keyboard_input.pressed(KeyCode::KeyS) {
+            wish_dir -= camera_tf.forward().as_vec3();
+        }
+        if keyboard_input.pressed(KeyCode::KeyA) {
+            wish_dir -= camera_tf.right().as_vec3();
+        }
+        if keyboard_input.pressed(KeyCode::KeyD) {
+            wish_dir += camera_tf.right().as_vec3();
+        }
+        wish_dir.y = 0.0;
+        if wish_dir.length_squared() > 0.0 {
+            wish_dir = wish_dir.normalize();
+        }
 
-    let jump_pressed = keyboard_input.pressed(KeyCode::Space);
-    let sprint = keyboard_input.pressed(KeyCode::ShiftLeft);
+        jump_pressed = keyboard_input.pressed(KeyCode::Space);
+        sprint = keyboard_input.pressed(KeyCode::ShiftLeft);
+    }
     let max_speed = if sprint {
         settings.movement_speed * 80.0
     } else {
