@@ -16,7 +16,7 @@ use chunk_assets::{
     ChunkDataAsset, ChunkDataLoader, ChunkObjectsAsset, ChunkObjectsLoader, WorldMetaAsset,
     WorldMetaLoader,
 };
-use objects::{PlacedObjectRegistry, PlacementConfig, save_placed_objects};
+use objects::{PlacedObjectRegistry, PlacementConfig, apply_auto_colliders, save_placed_objects};
 use streaming::{
     ChunkStreamingConfig, StreamingState, finalize_computed_chunks, launch_chunk_tasks,
     update_streaming_ring,
@@ -64,7 +64,10 @@ impl Plugin for WorldPlugin {
                 .in_set(terrain::TerrainSet::Update),
         );
 
-        app.add_systems(Update, save_placed_objects.in_set(WorldSet::InGame));
+        app.add_systems(
+            Update,
+            (save_placed_objects, apply_auto_colliders).in_set(WorldSet::InGame),
+        );
 
         app.init_resource::<PlacedObjectRegistry>();
         app.init_resource::<PlacementConfig>();

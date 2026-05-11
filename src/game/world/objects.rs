@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
 use std::fs;
 
+use engine_api::AutoCollider;
+
 use crate::game::{
     GameEntity,
     gltf_loading::{ConvertToToon, Interactable, spawn_interactable_scene},
@@ -218,6 +220,24 @@ pub fn despawn_chunk_objects(
 // ============================================================================
 // Systems
 // ============================================================================
+
+/// Fulfills `AutoCollider` markers from dynamic plugins by attaching a static
+/// trimesh collider hierarchy. The marker is removed after insertion so this
+/// runs at most once per tagged entity.
+pub fn apply_auto_colliders(
+    mut commands: Commands,
+    q: Query<Entity, Added<AutoCollider>>,
+) {
+    for entity in q.iter() {
+        commands
+            .entity(entity)
+            .insert((
+                RigidBody::Static,
+                ColliderConstructorHierarchy::new(ColliderConstructor::TrimeshFromMesh),
+            ))
+            .remove::<AutoCollider>();
+    }
+}
 
 /// Saves all dirty object chunks alongside terrain saving — runs whenever the
 /// editor sends a `SaveTerrainMessage`.
