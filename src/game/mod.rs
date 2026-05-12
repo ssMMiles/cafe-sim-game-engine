@@ -124,7 +124,7 @@ impl Plugin for SimulationPlugin {
 
         // The engine's pause menu is the *editor* pause menu — it only spawns
         // in `EditorMode::Editor`. In `EditorMode::Gameplay` the active plugin
-        // owns the pause UX entirely (see `engine_api::GamePaused`).
+        // owns the pause UX entirely.
         app.add_systems(
             OnEnter(SimulationState::Paused),
             (
@@ -241,7 +241,6 @@ impl Plugin for SimulationPlugin {
         app.init_state::<SimulationState>();
         app.init_state::<PauseMenuState>();
         app.init_resource::<SimulationConfig>();
-        app.init_resource::<engine_api::GamePaused>();
     }
 }
 

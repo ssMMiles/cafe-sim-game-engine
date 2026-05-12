@@ -1971,6 +1971,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "engine-api",
+ "rand 0.8.5",
 ]
 
 [[package]]

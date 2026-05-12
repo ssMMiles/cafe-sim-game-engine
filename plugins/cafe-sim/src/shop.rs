@@ -1,9 +1,9 @@
 use bevy::prelude::*;
-use engine_api::ScriptOwned;
 
-use crate::PLUGIN_NAME;
 use crate::catalog::CATALOG;
 use crate::placement::PlacementSelection;
+use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
+use crate::thumbnails::PieceThumbnails;
 
 const CARD_W: f32 = 140.0;
 const CARD_H: f32 = 140.0;
@@ -27,7 +27,8 @@ pub fn toggle_shop(
     mut shop: ResMut<ShopOpen>,
     mut selection: ResMut<PlacementSelection>,
 ) {
-    if input.just_pressed(KeyCode::Tab) {
+    let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+    if !shift && input.just_pressed(KeyCode::KeyB) {
         shop.0 = !shop.0;
         if shop.0 {
             selection.0 = None;
@@ -39,6 +40,7 @@ pub fn build_shop_ui(
     mut commands: Commands,
     shop: Res<ShopOpen>,
     existing: Query<(), With<ShopRoot>>,
+    thumbnails: Res<PieceThumbnails>,
 ) {
     if !shop.is_changed() || !shop.0 || !existing.is_empty() {
         return;
@@ -50,9 +52,8 @@ pub fn build_shop_ui(
     let text_color = Color::srgb(0.95, 0.95, 0.95);
 
     let root = commands
-        .spawn((
+        .spawn_owned((
             ShopRoot,
-            ScriptOwned::new(PLUGIN_NAME),
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(10.0),
@@ -70,8 +71,7 @@ pub fn build_shop_ui(
         .id();
 
     let title = commands
-        .spawn((
-            ScriptOwned::new(PLUGIN_NAME),
+        .spawn_owned((
             Text::new("Shop"),
             TextFont {
                 font_size: 28.0,
@@ -87,8 +87,7 @@ pub fn build_shop_ui(
     commands.entity(root).add_child(title);
 
     let scroll = commands
-        .spawn((
-            ScriptOwned::new(PLUGIN_NAME),
+        .spawn_owned((
             Node {
                 flex_direction: FlexDirection::Column,
                 width: Val::Percent(100.0),
@@ -103,20 +102,16 @@ pub fn build_shop_ui(
 
     for (cat_idx, category) in CATALOG.iter().enumerate() {
         let section = commands
-            .spawn((
-                ScriptOwned::new(PLUGIN_NAME),
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    margin: UiRect::bottom(Val::Px(CATEGORY_GAP)),
-                    ..default()
-                },
-            ))
+            .spawn_owned((Node {
+                flex_direction: FlexDirection::Column,
+                margin: UiRect::bottom(Val::Px(CATEGORY_GAP)),
+                ..default()
+            },))
             .id();
         commands.entity(scroll).add_child(section);
 
         let header = commands
-            .spawn((
-                ScriptOwned::new(PLUGIN_NAME),
+            .spawn_owned((
                 Node {
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                     margin: UiRect::bottom(Val::Px(4.0)),
@@ -124,8 +119,7 @@ pub fn build_shop_ui(
                 },
                 BackgroundColor(header_bg),
             ))
-            .with_child((
-                ScriptOwned::new(PLUGIN_NAME),
+            .with_child_owned((
                 Text::new(category.name),
                 TextFont {
                     font_size: 18.0,
@@ -137,8 +131,7 @@ pub fn build_shop_ui(
         commands.entity(section).add_child(header);
 
         let row = commands
-            .spawn((
-                ScriptOwned::new(PLUGIN_NAME),
+            .spawn_owned((
                 Node {
                     flex_direction: FlexDirection::Row,
                     height: Val::Px(CARD_H),
@@ -154,8 +147,7 @@ pub fn build_shop_ui(
 
         for (piece_idx, piece) in category.pieces.iter().enumerate() {
             let card = commands
-                .spawn((
-                    ScriptOwned::new(PLUGIN_NAME),
+                .spawn_owned((
                     PieceCard {
                         cat: cat_idx,
                         piece: piece_idx,
@@ -166,15 +158,44 @@ pub fn build_shop_ui(
                         height: Val::Px(CARD_H),
                         flex_shrink: 0.0,
                         flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::FlexEnd,
-                        padding: UiRect::all(Val::Px(8.0)),
+                        overflow: Overflow::clip(),
                         ..default()
                     },
                     BackgroundColor(card_bg),
                 ))
-                .with_child((
-                    ScriptOwned::new(PLUGIN_NAME),
+                .id();
+            commands.entity(row).add_child(card);
+
+            let mut swatch_cmd = commands.spawn_owned((Node {
+                width: Val::Percent(100.0),
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_height: Val::Px(0.0),
+                overflow: Overflow::clip(),
+                ..default()
+            },));
+            if let Some(thumb) = thumbnails.0.get(piece.name) {
+                swatch_cmd.insert(ImageNode {
+                    image: thumb.clone(),
+                    image_mode: NodeImageMode::Stretch,
+                    ..default()
+                });
+            } else {
+                swatch_cmd.insert(BackgroundColor(piece.color()));
+            }
+            let swatch = swatch_cmd.id();
+            commands.entity(card).add_child(swatch);
+
+            let label = commands
+                .spawn_owned((Node {
+                    width: Val::Percent(100.0),
+                    flex_shrink: 0.0,
+                    padding: UiRect::all(Val::Px(8.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },))
+                .with_child_owned((
                     Text::new(piece.name),
                     TextFont {
                         font_size: 14.0,
@@ -183,7 +204,7 @@ pub fn build_shop_ui(
                     TextColor(text_color),
                 ))
                 .id();
-            commands.entity(row).add_child(card);
+            commands.entity(card).add_child(label);
         }
     }
 }

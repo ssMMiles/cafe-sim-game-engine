@@ -1,7 +1,6 @@
 use bevy::prelude::*;
-use engine_api::ScriptOwned;
 
-use crate::PLUGIN_NAME;
+use crate::spawn::SpawnOwnedWorld;
 
 const STARTING_BALANCE: i64 = 100;
 
@@ -22,8 +21,7 @@ pub fn spawn_balance_hud(world: &mut World) {
     let text_color = Color::srgb(0.98, 0.92, 0.55);
 
     let root = world
-        .spawn((
-            ScriptOwned::new(PLUGIN_NAME),
+        .spawn_owned((
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(16.0),
@@ -39,8 +37,7 @@ pub fn spawn_balance_hud(world: &mut World) {
         .id();
 
     let text = world
-        .spawn((
-            ScriptOwned::new(PLUGIN_NAME),
+        .spawn_owned((
             BalanceText,
             Text::new(format_balance(STARTING_BALANCE)),
             TextFont {

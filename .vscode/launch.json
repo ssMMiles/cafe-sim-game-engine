@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Run Engine (cargo run)",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=game_engine"
+                ]
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "node-terminal",
+            "request": "launch",
+            "name": "Build Workspace (plugins)",
+            "command": "cargo build --workspace",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

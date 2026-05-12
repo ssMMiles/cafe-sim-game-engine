@@ -1,11 +1,12 @@
 use bevy::prelude::*;
-use engine_api::{AutoCollider, PlayerCamera, ScriptOwned};
+use engine_api::{AutoCollider, PlayerCamera};
 use std::collections::HashMap;
 
-use crate::PLUGIN_NAME;
-use crate::catalog::PieceDef;
+use crate::catalog::{PieceDef, PieceKind};
 use crate::grid::{FLOOR_Y, PIECE_SCALE, camera_floor_hit, cell_center, world_to_cell};
 use crate::shop::ShopOpen;
+use crate::shop_overview::ShopOverviewOpen;
+use crate::spawn::SpawnOwnedCommands;
 
 #[derive(Resource, Default)]
 pub struct PlacementSelection(pub Option<&'static PieceDef>);
@@ -19,11 +20,29 @@ pub struct PreviewEntity(pub Option<Entity>);
 #[derive(Component)]
 pub struct PlacementPreview;
 
+/// Queues a one-shot material override on every mesh descendant of this entity
+/// once the scene has finished spawning. Used to tint pieces by their catalog
+/// color for both the translucent placement preview and the placed instance.
 #[derive(Component)]
-pub struct NeedsTranslucent;
+pub struct PaintMaterial {
+    pub color: Color,
+    pub alpha: f32,
+    pub unlit: bool,
+}
 
 #[derive(Component)]
 pub struct PlacementHint;
+
+#[derive(Component)]
+pub struct Countertop;
+
+#[derive(Component)]
+pub struct CoffeeMachine;
+
+/// Cell coordinates of a placed piece, for systems that need to walk to or
+/// reason about a specific tile (e.g. customers heading to a counter).
+#[derive(Component, Clone, Copy)]
+pub struct PlacedCell(pub i32, pub i32);
 
 pub fn sync_preview(
     mut commands: Commands,
@@ -42,10 +61,13 @@ pub fn sync_preview(
     if let Some(piece) = selection.0 {
         let scene: Handle<Scene> = asset_server.load(piece.asset_path);
         let entity = commands
-            .spawn((
-                ScriptOwned::new(PLUGIN_NAME),
+            .spawn_owned((
                 PlacementPreview,
-                NeedsTranslucent,
+                PaintMaterial {
+                    color: piece.color(),
+                    alpha: 0.55,
+                    unlit: false,
+                },
                 SceneRoot(scene),
                 Transform::from_xyz(0.0, FLOOR_Y, 0.0).with_scale(Vec3::splat(PIECE_SCALE)),
                 Visibility::Hidden,
@@ -55,16 +77,16 @@ pub fn sync_preview(
     }
 }
 
-/// Polls each frame: as soon as a NeedsTranslucent root has spawned its mesh
-/// descendants, replace their materials with a translucent override.
-pub fn apply_translucent_when_loaded(
+/// Polls each frame: as soon as a `PaintMaterial` root has spawned its mesh
+/// descendants, replace their materials with the requested tint.
+pub fn apply_paint_when_loaded(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    needs_q: Query<Entity, With<NeedsTranslucent>>,
+    needs_q: Query<(Entity, &PaintMaterial)>,
     children_q: Query<&Children>,
     mesh_q: Query<(), With<Mesh3d>>,
 ) {
-    for root in needs_q.iter() {
+    for (root, paint) in needs_q.iter() {
         let mut stack = vec![root];
         let mut descendants: Vec<Entity> = Vec::new();
         while let Some(e) = stack.pop() {
@@ -81,22 +103,26 @@ pub fn apply_translucent_when_loaded(
             continue;
         }
 
-        let translucent = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.7, 0.85, 1.0, 0.15),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
+        let srgba = paint.color.to_srgba();
+        let alpha_mode = if paint.alpha < 1.0 {
+            AlphaMode::Blend
+        } else {
+            AlphaMode::Opaque
+        };
+        let tinted = materials.add(StandardMaterial {
+            base_color: Color::srgba(srgba.red, srgba.green, srgba.blue, paint.alpha),
+            alpha_mode,
+            unlit: paint.unlit,
             ..default()
         });
 
         for &e in &descendants {
             if mesh_q.contains(e) {
-                commands
-                    .entity(e)
-                    .insert(MeshMaterial3d(translucent.clone()));
+                commands.entity(e).insert(MeshMaterial3d(tinted.clone()));
             }
         }
 
-        commands.entity(root).remove::<NeedsTranslucent>();
+        commands.entity(root).remove::<PaintMaterial>();
     }
 }
 
@@ -106,6 +132,7 @@ pub fn update_preview_transform(
     cam_q: Query<&Transform, (With<PlayerCamera>, Without<PlacementPreview>)>,
     occupancy: Res<GridOccupancy>,
     shop: Res<ShopOpen>,
+    overview: Res<ShopOverviewOpen>,
 ) {
     let Some(e) = preview_entity.0 else {
         return;
@@ -114,7 +141,7 @@ pub fn update_preview_transform(
         return;
     };
 
-    if shop.0 {
+    if shop.0 || overview.0 {
         *vis = Visibility::Hidden;
         return;
     }
@@ -145,12 +172,13 @@ pub fn handle_place_click(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     shop: Res<ShopOpen>,
+    overview: Res<ShopOverviewOpen>,
     selection: Res<PlacementSelection>,
     mouse: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&Transform, With<PlayerCamera>>,
     mut occupancy: ResMut<GridOccupancy>,
 ) {
-    if shop.0 || !mouse.just_pressed(MouseButton::Left) {
+    if shop.0 || overview.0 || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Some(piece) = selection.0 else {
@@ -170,14 +198,27 @@ pub fn handle_place_click(
     }
 
     let scene: Handle<Scene> = asset_server.load(piece.asset_path);
-    let entity = commands
-        .spawn((
-            ScriptOwned::new(PLUGIN_NAME),
-            SceneRoot(scene),
-            Transform::from_translation(cell_center(i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
-            AutoCollider,
-        ))
-        .id();
+    let mut placed = commands.spawn_owned((
+        SceneRoot(scene),
+        Transform::from_translation(cell_center(i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
+        AutoCollider,
+        PlacedCell(i, j),
+        PaintMaterial {
+            color: piece.color(),
+            alpha: 1.0,
+            unlit: false,
+        },
+    ));
+    match piece.kind {
+        PieceKind::Countertop => {
+            placed.insert(Countertop);
+        }
+        PieceKind::CoffeeMachine => {
+            placed.insert(CoffeeMachine);
+        }
+        PieceKind::Decoration => {}
+    }
+    let entity = placed.id();
     occupancy.0.insert((i, j), entity);
 }
 
@@ -198,18 +239,18 @@ pub fn manage_placement_hint(
     mut commands: Commands,
     selection: Res<PlacementSelection>,
     shop: Res<ShopOpen>,
+    overview: Res<ShopOverviewOpen>,
     existing: Query<Entity, With<PlacementHint>>,
 ) {
-    let should_show = selection.0.is_some() && !shop.0;
+    let should_show = selection.0.is_some() && !shop.0 && !overview.0;
 
     if should_show && existing.is_empty() {
         let bg = Color::srgba(0.0, 0.0, 0.0, 0.55);
         let text_color = Color::srgb(0.95, 0.95, 0.95);
 
         let root = commands
-            .spawn((
+            .spawn_owned((
                 PlacementHint,
-                ScriptOwned::new(PLUGIN_NAME),
                 Node {
                     position_type: PositionType::Absolute,
                     bottom: Val::Px(48.0),
@@ -227,8 +268,7 @@ pub fn manage_placement_hint(
             .id();
 
         let label = commands
-            .spawn((
-                ScriptOwned::new(PLUGIN_NAME),
+            .spawn_owned((
                 Text::new("Press C to cancel"),
                 TextFont {
                     font_size: 16.0,
