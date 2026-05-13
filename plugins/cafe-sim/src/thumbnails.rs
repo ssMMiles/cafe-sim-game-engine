@@ -8,9 +8,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{ClearColorConfig, RenderTarget, visibility::RenderLayers};
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureUsages,
-};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use std::collections::HashMap;
 
 use crate::catalog::CATALOG;
@@ -92,9 +90,7 @@ pub fn init_thumbnails(world: &mut World) {
         ));
 
         // The piece itself, painted with the catalog color.
-        let scene: Handle<Scene> = world
-            .resource::<AssetServer>()
-            .load(piece.asset_path);
+        let scene: Handle<Scene> = world.resource::<AssetServer>().load(piece.asset_path);
         world.spawn_owned((
             SceneRoot(scene),
             Transform::from_translation(origin).with_scale(Vec3::splat(PIECE_SCALE)),

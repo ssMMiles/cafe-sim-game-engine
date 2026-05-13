@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 use engine_api::AppState;
 
+use crate::menus::ActiveMenu;
 use crate::spawn::SpawnOwnedCommands;
 use crate::ui::{ButtonVariant, UiExt, UiTheme};
 
@@ -28,10 +29,20 @@ pub enum PauseMenuButton {
     Exit,
 }
 
-/// Esc flips `GamePaused`. Always-on while the plugin is loaded — the engine
-/// no longer listens to Escape in gameplay mode (`EditorMode::Gameplay`).
-pub fn toggle_pause_on_escape(input: Res<ButtonInput<KeyCode>>, mut paused: ResMut<GamePaused>) {
-    if input.just_pressed(KeyCode::Escape) {
+/// Escape closes the active gameplay menu first; only flips `GamePaused` if
+/// nothing else is open. Always-on while the plugin is loaded — the engine no
+/// longer listens to Escape in gameplay mode (`EditorMode::Gameplay`).
+pub fn toggle_pause_on_escape(
+    input: Res<ButtonInput<KeyCode>>,
+    mut paused: ResMut<GamePaused>,
+    mut active: ResMut<ActiveMenu>,
+) {
+    if !input.just_pressed(KeyCode::Escape) {
+        return;
+    }
+    if active.is_open() {
+        active.close();
+    } else {
         paused.0 = !paused.0;
     }
 }

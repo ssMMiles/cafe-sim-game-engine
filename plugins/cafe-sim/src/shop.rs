@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
 use crate::catalog::CATALOG;
+use crate::menus::ActiveMenu;
+use crate::pause_menu::GamePaused;
 use crate::placement::PlacementSelection;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 use crate::thumbnails::PieceThumbnails;
@@ -9,9 +11,6 @@ const CARD_W: f32 = 140.0;
 const CARD_H: f32 = 140.0;
 const CARD_GAP: f32 = 8.0;
 const CATEGORY_GAP: f32 = 16.0;
-
-#[derive(Resource, Default)]
-pub struct ShopOpen(pub bool);
 
 #[derive(Component)]
 pub struct ShopRoot;
@@ -24,25 +23,37 @@ pub struct PieceCard {
 
 pub fn toggle_shop(
     input: Res<ButtonInput<KeyCode>>,
-    mut shop: ResMut<ShopOpen>,
+    paused: Res<GamePaused>,
+    mut active: ResMut<ActiveMenu>,
     mut selection: ResMut<PlacementSelection>,
 ) {
+    if paused.0 {
+        return;
+    }
     let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
     if !shift && input.just_pressed(KeyCode::KeyB) {
-        shop.0 = !shop.0;
-        if shop.0 {
+        active.toggle(ActiveMenu::Shop);
+        if active.is(ActiveMenu::Shop) {
             selection.0 = None;
         }
     }
 }
 
-pub fn build_shop_ui(
+pub fn sync_shop_ui(
     mut commands: Commands,
-    shop: Res<ShopOpen>,
-    existing: Query<(), With<ShopRoot>>,
+    active: Res<ActiveMenu>,
+    existing: Query<Entity, With<ShopRoot>>,
     thumbnails: Res<PieceThumbnails>,
 ) {
-    if !shop.is_changed() || !shop.0 || !existing.is_empty() {
+    if !active.is_changed() {
+        return;
+    }
+
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+
+    if !active.is(ActiveMenu::Shop) {
         return;
     }
 
@@ -209,22 +220,9 @@ pub fn build_shop_ui(
     }
 }
 
-pub fn teardown_shop_ui(
-    mut commands: Commands,
-    shop: Res<ShopOpen>,
-    panel_q: Query<Entity, With<ShopRoot>>,
-) {
-    if !shop.is_changed() || shop.0 {
-        return;
-    }
-    for e in panel_q.iter() {
-        commands.entity(e).despawn();
-    }
-}
-
 pub fn handle_card_click(
     interaction_q: Query<(&Interaction, &PieceCard), (Changed<Interaction>, With<Button>)>,
-    mut shop: ResMut<ShopOpen>,
+    mut active: ResMut<ActiveMenu>,
     mut selection: ResMut<PlacementSelection>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
@@ -232,7 +230,7 @@ pub fn handle_card_click(
         if *interaction == Interaction::Pressed {
             let piece = &CATALOG[card.cat].pieces[card.piece];
             selection.0 = Some(piece);
-            shop.0 = false;
+            active.close();
             mouse.clear_just_pressed(MouseButton::Left);
         }
     }

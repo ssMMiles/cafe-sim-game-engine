@@ -1,30 +1,36 @@
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::{CursorGrabMode, CursorOptions, WindowFocused};
 use engine_api::InputLock;
 
 use crate::PLUGIN_NAME;
+use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
-use crate::shop::ShopOpen;
-use crate::shop_overview::ShopOverviewOpen;
 
 pub fn manage_cursor(
-    shop: Res<ShopOpen>,
-    overview: Res<ShopOverviewOpen>,
+    active: Res<ActiveMenu>,
     paused: Res<GamePaused>,
-    cursor_options: Option<Single<&mut CursorOptions>>,
+    mut focus_events: MessageReader<WindowFocused>,
+    window: Option<Single<(&mut Window, &mut CursorOptions)>>,
     input_lock: Option<ResMut<InputLock>>,
 ) {
-    if !shop.is_changed() && !overview.is_changed() && !paused.is_changed() {
+    let focus_regained = focus_events.read().any(|e| e.focused);
+    if !active.is_changed() && !paused.is_changed() && !focus_regained {
         return;
     }
 
-    let any_open = shop.0 || overview.0 || paused.0;
+    let any_open = active.is_open() || paused.0;
 
-    if let Some(co) = cursor_options {
-        let mut co = co.into_inner();
+    if let Some(w) = window {
+        let (mut win, mut co) = w.into_inner();
         if any_open {
             co.grab_mode = CursorGrabMode::None;
             co.visible = true;
+            // macOS doesn't support Confined, so if focus came back with the
+            // cursor outside the window, warp it to the center.
+            if focus_regained && win.cursor_position().is_none() {
+                let center = Vec2::new(win.width() / 2.0, win.height() / 2.0);
+                win.set_cursor_position(Some(center));
+            }
         } else {
             co.grab_mode = CursorGrabMode::Locked;
             co.visible = false;

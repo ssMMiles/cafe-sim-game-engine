@@ -92,9 +92,7 @@ pub enum ButtonVariant {
 impl ButtonVariant {
     fn colors(&self, theme: &UiTheme) -> (Color, Color, Color) {
         match self {
-            ButtonVariant::Primary => {
-                (theme.primary, theme.primary_hover, theme.primary_pressed)
-            }
+            ButtonVariant::Primary => (theme.primary, theme.primary_hover, theme.primary_pressed),
             ButtonVariant::Danger => (theme.danger, theme.danger_hover, theme.danger_pressed),
         }
     }

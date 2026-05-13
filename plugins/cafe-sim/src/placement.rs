@@ -4,8 +4,7 @@ use std::collections::HashMap;
 
 use crate::catalog::{PieceDef, PieceKind};
 use crate::grid::{FLOOR_Y, PIECE_SCALE, camera_floor_hit, cell_center, world_to_cell};
-use crate::shop::ShopOpen;
-use crate::shop_overview::ShopOverviewOpen;
+use crate::menus::ActiveMenu;
 use crate::spawn::SpawnOwnedCommands;
 
 #[derive(Resource, Default)]
@@ -38,6 +37,9 @@ pub struct Countertop;
 
 #[derive(Component)]
 pub struct CoffeeMachine;
+
+#[derive(Component)]
+pub struct GarbageCan;
 
 /// Cell coordinates of a placed piece, for systems that need to walk to or
 /// reason about a specific tile (e.g. customers heading to a counter).
@@ -131,8 +133,7 @@ pub fn update_preview_transform(
     mut preview_q: Query<(&mut Transform, &mut Visibility), With<PlacementPreview>>,
     cam_q: Query<&Transform, (With<PlayerCamera>, Without<PlacementPreview>)>,
     occupancy: Res<GridOccupancy>,
-    shop: Res<ShopOpen>,
-    overview: Res<ShopOverviewOpen>,
+    active: Res<ActiveMenu>,
 ) {
     let Some(e) = preview_entity.0 else {
         return;
@@ -141,7 +142,7 @@ pub fn update_preview_transform(
         return;
     };
 
-    if shop.0 || overview.0 {
+    if active.is_open() {
         *vis = Visibility::Hidden;
         return;
     }
@@ -171,14 +172,13 @@ pub fn update_preview_transform(
 pub fn handle_place_click(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    shop: Res<ShopOpen>,
-    overview: Res<ShopOverviewOpen>,
+    active: Res<ActiveMenu>,
     selection: Res<PlacementSelection>,
     mouse: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&Transform, With<PlayerCamera>>,
     mut occupancy: ResMut<GridOccupancy>,
 ) {
-    if shop.0 || overview.0 || !mouse.just_pressed(MouseButton::Left) {
+    if active.is_open() || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Some(piece) = selection.0 else {
@@ -216,6 +216,9 @@ pub fn handle_place_click(
         PieceKind::CoffeeMachine => {
             placed.insert(CoffeeMachine);
         }
+        PieceKind::GarbageCan => {
+            placed.insert(GarbageCan);
+        }
         PieceKind::Decoration => {}
     }
     let entity = placed.id();
@@ -224,10 +227,10 @@ pub fn handle_place_click(
 
 pub fn cancel_placement(
     input: Res<ButtonInput<KeyCode>>,
-    shop: Res<ShopOpen>,
+    active: Res<ActiveMenu>,
     mut selection: ResMut<PlacementSelection>,
 ) {
-    if shop.0 || selection.0.is_none() {
+    if active.is_open() || selection.0.is_none() {
         return;
     }
     if input.just_pressed(KeyCode::KeyC) {
@@ -238,11 +241,10 @@ pub fn cancel_placement(
 pub fn manage_placement_hint(
     mut commands: Commands,
     selection: Res<PlacementSelection>,
-    shop: Res<ShopOpen>,
-    overview: Res<ShopOverviewOpen>,
+    active: Res<ActiveMenu>,
     existing: Query<Entity, With<PlacementHint>>,
 ) {
-    let should_show = selection.0.is_some() && !shop.0 && !overview.0;
+    let should_show = selection.0.is_some() && !active.is_open();
 
     if should_show && existing.is_empty() {
         let bg = Color::srgba(0.0, 0.0, 0.0, 0.55);

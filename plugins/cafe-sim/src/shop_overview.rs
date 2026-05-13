@@ -9,6 +9,8 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
 use crate::cafe::CafeOpen;
+use crate::menus::ActiveMenu;
+use crate::pause_menu::GamePaused;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 use crate::time::GameTime;
 
@@ -24,9 +26,6 @@ impl Default for ShopState {
         }
     }
 }
-
-#[derive(Resource, Default)]
-pub struct ShopOverviewOpen(pub bool);
 
 #[derive(Resource, Default)]
 pub struct ShopNameEditing(pub bool);
@@ -56,25 +55,36 @@ pub struct CafeCloseButton;
 
 pub fn toggle_shop_overview(
     input: Res<ButtonInput<KeyCode>>,
-    mut overview: ResMut<ShopOverviewOpen>,
+    paused: Res<GamePaused>,
+    mut active: ResMut<ActiveMenu>,
+) {
+    if paused.0 {
+        return;
+    }
+    if input.just_pressed(KeyCode::Tab) {
+        active.toggle(ActiveMenu::ShopOverview);
+    }
+}
+
+/// Runs whenever [`ActiveMenu`] changes. When the overview is no longer the
+/// active menu, commit any in-progress name edit and exit editing mode. This
+/// fires for every close path — Tab, pause, opening another menu.
+pub fn cleanup_shop_overview_when_inactive(
+    active: Res<ActiveMenu>,
     mut editing: ResMut<ShopNameEditing>,
     mut shop_state: ResMut<ShopState>,
     input_q: Query<&ShopNameInput>,
 ) {
-    if !input.just_pressed(KeyCode::Tab) {
+    if !active.is_changed() || active.is(ActiveMenu::ShopOverview) {
         return;
     }
-    if overview.0 {
-        if editing.0 {
-            if let Ok(ti) = input_q.single() {
-                shop_state.name = sanitize_name(&ti.value);
-            }
-            editing.0 = false;
-        }
-        overview.0 = false;
-    } else {
-        overview.0 = true;
+    if !editing.0 {
+        return;
     }
+    if let Ok(ti) = input_q.single() {
+        shop_state.name = sanitize_name(&ti.value);
+    }
+    editing.0 = false;
 }
 
 pub fn handle_open_cafe_button(
@@ -204,13 +214,13 @@ pub fn sync_shop_name_display(
 
 pub fn build_shop_overview(
     mut commands: Commands,
-    overview: Res<ShopOverviewOpen>,
+    active: Res<ActiveMenu>,
     editing: Res<ShopNameEditing>,
     shop_state: Res<ShopState>,
     cafe_open: Res<CafeOpen>,
     existing: Query<Entity, With<ShopOverviewRoot>>,
 ) {
-    if !overview.is_changed() && !editing.is_changed() && !cafe_open.is_changed() {
+    if !active.is_changed() && !editing.is_changed() && !cafe_open.is_changed() {
         return;
     }
 
@@ -218,7 +228,7 @@ pub fn build_shop_overview(
         commands.entity(e).despawn();
     }
 
-    if !overview.0 {
+    if !active.is(ActiveMenu::ShopOverview) {
         return;
     }
 

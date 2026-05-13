@@ -5,6 +5,7 @@ pub enum PieceKind {
     Decoration,
     Countertop,
     CoffeeMachine,
+    GarbageCan,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +55,12 @@ pub const CATALOG: &[CategoryDef] = &[
                 asset_path: "cafe-sim/Tabletop.glb#Scene0",
                 kind: PieceKind::CoffeeMachine,
                 color: [0.80, 0.25, 0.25],
+            },
+            PieceDef {
+                name: "Garbage Can",
+                asset_path: "cafe-sim/Tabletop.glb#Scene0",
+                kind: PieceKind::GarbageCan,
+                color: [0.08, 0.08, 0.10],
             },
         ],
     },
