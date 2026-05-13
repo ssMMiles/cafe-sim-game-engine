@@ -34,7 +34,7 @@ pub fn toggle_shop(
     if !shift && input.just_pressed(KeyCode::KeyB) {
         active.toggle(ActiveMenu::Shop);
         if active.is(ActiveMenu::Shop) {
-            selection.0 = None;
+            selection.clear();
         }
     }
 }
@@ -229,7 +229,7 @@ pub fn handle_card_click(
     for (interaction, card) in interaction_q.iter() {
         if *interaction == Interaction::Pressed {
             let piece = &CATALOG[card.cat].pieces[card.piece];
-            selection.0 = Some(piece);
+            selection.set(piece, (card.cat as u8, card.piece as u8));
             active.close();
             mouse.clear_just_pressed(MouseButton::Left);
         }

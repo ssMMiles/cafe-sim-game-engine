@@ -96,7 +96,7 @@ pub fn handle_machine_click(
     if active.is_open() && !active.is(ActiveMenu::Coffee) {
         return;
     }
-    if selection.0.is_some() {
+    if selection.piece.is_some() {
         return;
     }
     if !mouse.just_pressed(MouseButton::Left) {

@@ -7,8 +7,35 @@ use crate::grid::{FLOOR_Y, PIECE_SCALE, camera_floor_hit, cell_center, world_to_
 use crate::menus::ActiveMenu;
 use crate::spawn::SpawnOwnedCommands;
 
+/// Currently selected piece for placement.
+///
+/// `piece` is the `'static` catalog reference used by every readonly site
+/// (preview rendering, grid hints, click-target gating, etc.).
+/// `indices` is the parallel `(category, piece)` lookup key, captured at
+/// shop-card click time and threaded into `spawn_piece` so placed entities
+/// get a stable `CafePiece` tag for save serialization.
+///
+/// The indices live next to the reference (rather than being recovered
+/// via pointer comparison) because `pub const CATALOG` does not guarantee
+/// a stable address — the compiler can inline `const` accesses into
+/// separate copies, making pointer-equality lookups unreliable.
 #[derive(Resource, Default)]
-pub struct PlacementSelection(pub Option<&'static PieceDef>);
+pub struct PlacementSelection {
+    pub piece: Option<&'static PieceDef>,
+    pub indices: Option<(u8, u8)>,
+}
+
+impl PlacementSelection {
+    pub fn set(&mut self, piece: &'static PieceDef, indices: (u8, u8)) {
+        self.piece = Some(piece);
+        self.indices = Some(indices);
+    }
+
+    pub fn clear(&mut self) {
+        self.piece = None;
+        self.indices = None;
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct GridOccupancy(pub HashMap<(i32, i32), Entity>);
@@ -46,6 +73,15 @@ pub struct GarbageCan;
 #[derive(Component, Clone, Copy)]
 pub struct PlacedCell(pub i32, pub i32);
 
+/// Stable identifier of a placed piece's catalog entry, for save serialization.
+/// Captured at spawn time from the active `PlacementSelection` (or from save
+/// data on load) and never mutated afterwards.
+#[derive(Component, Clone, Copy)]
+pub struct CafePiece {
+    pub category_idx: u8,
+    pub piece_idx: u8,
+}
+
 pub fn sync_preview(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -60,7 +96,7 @@ pub fn sync_preview(
         commands.entity(e).despawn();
     }
 
-    if let Some(piece) = selection.0 {
+    if let Some(piece) = selection.piece {
         let scene: Handle<Scene> = asset_server.load(piece.asset_path);
         let entity = commands
             .spawn_owned((
@@ -181,7 +217,7 @@ pub fn handle_place_click(
     if active.is_open() || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    let Some(piece) = selection.0 else {
+    let (Some(piece), Some(indices)) = (selection.piece, selection.indices) else {
         return;
     };
     let Ok(cam) = cam_q.single() else {
@@ -197,12 +233,39 @@ pub fn handle_place_click(
         return;
     }
 
+    spawn_piece(
+        &mut commands,
+        &asset_server,
+        piece,
+        indices,
+        (i, j),
+        &mut occupancy,
+    );
+}
+
+/// Spawn a catalog piece at the given grid cell, register it in the
+/// occupancy map, and tag it with [`CafePiece`] so the save layer can
+/// re-serialize it later. Shared between the live "click to place" path
+/// and the save-load hydration path; the caller is responsible for
+/// passing the correct catalog indices for `piece`.
+pub fn spawn_piece(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    piece: &'static PieceDef,
+    indices: (u8, u8),
+    (i, j): (i32, i32),
+    occupancy: &mut GridOccupancy,
+) -> Entity {
     let scene: Handle<Scene> = asset_server.load(piece.asset_path);
     let mut placed = commands.spawn_owned((
         SceneRoot(scene),
         Transform::from_translation(cell_center(i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
         AutoCollider,
         PlacedCell(i, j),
+        CafePiece {
+            category_idx: indices.0,
+            piece_idx: indices.1,
+        },
         PaintMaterial {
             color: piece.color(),
             alpha: 1.0,
@@ -223,6 +286,7 @@ pub fn handle_place_click(
     }
     let entity = placed.id();
     occupancy.0.insert((i, j), entity);
+    entity
 }
 
 pub fn cancel_placement(
@@ -230,11 +294,11 @@ pub fn cancel_placement(
     active: Res<ActiveMenu>,
     mut selection: ResMut<PlacementSelection>,
 ) {
-    if active.is_open() || selection.0.is_none() {
+    if active.is_open() || selection.piece.is_none() {
         return;
     }
     if input.just_pressed(KeyCode::KeyC) {
-        selection.0 = None;
+        selection.clear();
     }
 }
 
@@ -244,7 +308,7 @@ pub fn manage_placement_hint(
     active: Res<ActiveMenu>,
     existing: Query<Entity, With<PlacementHint>>,
 ) {
-    let should_show = selection.0.is_some() && !active.is_open();
+    let should_show = selection.piece.is_some() && !active.is_open();
 
     if should_show && existing.is_empty() {
         let bg = Color::srgba(0.0, 0.0, 0.0, 0.55);

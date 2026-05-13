@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use engine_api::{AutoCollider, DynamicPlugin, add};
+use engine_api::{AutoCollider, DynamicPlugin, Player, add};
 
 mod balance;
 mod cafe;
@@ -10,11 +10,14 @@ mod customer;
 mod delivery;
 mod drinks;
 mod grid;
+mod main_menu;
 mod menus;
 mod pause_menu;
 mod placement;
+mod saves;
 mod shop;
 mod shop_overview;
+mod slot_picker;
 mod spawn;
 mod thumbnails;
 mod time;
@@ -37,20 +40,26 @@ use delivery::{
     handle_pickup_click, init_delivery_assets, manage_carried_visual, manage_ready_drinks,
     tick_served_timer,
 };
-use grid::{FLOOR_Y, draw_floor_grid};
+use grid::{FLOOR_Y, PLAYER_SPAWN, draw_floor_grid};
+use main_menu::{
+    CafePhase, MainMenuRoot, build_main_menu, handle_main_menu_buttons, in_main_menu,
+    in_playing, in_slot_picker,
+};
 use menus::{ActiveMenu, close_menus_when_paused};
 use pause_menu::{GamePaused, handle_pause_buttons, sync_pause_menu_ui, toggle_pause_on_escape};
 use placement::{
     GridOccupancy, PlacementSelection, PreviewEntity, apply_paint_when_loaded, cancel_placement,
     handle_place_click, manage_placement_hint, sync_preview, update_preview_transform,
 };
+use saves::SlotMetadataCache;
 use shop::{handle_card_click, sync_shop_ui, toggle_shop};
 use shop_overview::{
     ShopNameEditing, ShopState, apply_shop_name_keystrokes, build_shop_overview,
     cleanup_shop_overview_when_inactive, focus_shop_name_input, handle_close_cafe_button,
     handle_edit_button, handle_open_cafe_button, sync_shop_name_display, toggle_shop_overview,
 };
-use spawn::SpawnOwnedWorld;
+use slot_picker::{SlotPickerRoot, build_slot_picker, handle_slot_picker_buttons};
+use spawn::SpawnOwnedCommands;
 use thumbnails::{init_thumbnails, propagate_thumbnail_layers};
 use time::{GameTime, advance_game_time, spawn_time_hud, update_time_text};
 use ui::{UiTheme, update_interactive_visuals};
@@ -60,16 +69,9 @@ pub struct CafeSimPlugin;
 
 impl DynamicPlugin for CafeSimPlugin {
     fn setup(&self, world: &mut World, schedule: &mut Schedule) {
-        let cafe: Handle<Scene> = world
-            .resource::<AssetServer>()
-            .load("cafe-sim/Cafe.glb#Scene0");
-
-        world.spawn_owned((
-            SceneRoot(cafe),
-            Transform::from_xyz(0.0, FLOOR_Y, 0.0),
-            AutoCollider,
-        ));
-
+        // Resources are inserted unconditionally so they exist while the
+        // menu phases run; the slot picker overwrites them when a save is
+        // loaded, and the "new game" path resets them via `apply_new_game`.
         world.insert_resource(ActiveMenu::default());
         world.insert_resource(ActiveCoffeeMachine::default());
         world.insert_resource(CarriedDrink::default());
@@ -88,13 +90,36 @@ impl DynamicPlugin for CafeSimPlugin {
         // prior session would pop the menu open the instant the plugin runs.
         world.insert_resource(GamePaused(false));
 
+        // New: phase machine + slot metadata cache. The transition system
+        // below picks `MainMenu` up as a fresh change on the first frame
+        // and builds the main-menu UI in response.
+        world.insert_resource(CafePhase::default());
+        world.insert_resource(SlotMetadataCache::default());
+
         init_customer_assets(world);
         init_delivery_assets(world);
         init_thumbnails(world);
 
-        spawn_balance_hud(world);
-        spawn_time_hud(world);
+        // Cafe scene + HUDs are no longer spawned here; the transition
+        // system spawns them when entering `CafePhase::Playing`.
 
+        // Phase enter/exit hooks. Must run before any phase-gated system
+        // so newly-spawned UI is queryable this frame and outgoing UI is
+        // gone before its handlers fire.
+        schedule.add_systems(apply_phase_transitions);
+
+        // Always-on UI visuals (hover/press styling for any button in any
+        // phase), cursor management (which needs to react to phase changes
+        // so the main menu/slot picker get a free, visible cursor), and
+        // menu-phase button handlers.
+        schedule.add_systems((
+            update_interactive_visuals,
+            manage_cursor,
+            handle_main_menu_buttons.run_if(in_main_menu),
+            handle_slot_picker_buttons.run_if(in_slot_picker),
+        ));
+
+        // Gameplay — the entire prior schedule, gated to Playing.
         schedule.add_systems(
             (
                 (
@@ -144,14 +169,12 @@ impl DynamicPlugin for CafeSimPlugin {
                     propagate_thumbnail_layers,
                     update_preview_transform,
                     handle_place_click,
-                    manage_cursor,
                     manage_placement_hint,
                     draw_floor_grid,
                     update_balance_text,
                     advance_game_time,
                     enforce_closing_time,
                     update_time_text,
-                    update_interactive_visuals,
                     clear_customers_when_closed,
                     tick_spawn_timer,
                     spawn_customers,
@@ -173,10 +196,81 @@ impl DynamicPlugin for CafeSimPlugin {
                 )
                     .chain(),
             )
-                .chain(),
+                .chain()
+                .run_if(in_playing),
         );
 
         info!("[{PLUGIN_NAME}] loaded");
+    }
+}
+
+/// Single transition system that despawns the outgoing screen UI and sets
+/// up the incoming one whenever [`CafePhase`] changes. Skips work when
+/// the phase is unchanged so it's cheap to run every frame.
+#[allow(clippy::too_many_arguments)]
+fn apply_phase_transitions(
+    mut last: Local<Option<CafePhase>>,
+    phase: Res<CafePhase>,
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    asset_server: Res<AssetServer>,
+    mut cache: ResMut<SlotMetadataCache>,
+    balance: Res<Balance>,
+    time: Res<GameTime>,
+    main_menu_q: Query<Entity, With<MainMenuRoot>>,
+    slot_picker_q: Query<Entity, With<SlotPickerRoot>>,
+    mut player_q: Query<&mut Transform, With<Player>>,
+) {
+    let curr = *phase;
+    if *last == Some(curr) {
+        return;
+    }
+    let prev = *last;
+    *last = Some(curr);
+
+    match prev {
+        Some(CafePhase::MainMenu) => {
+            for e in &main_menu_q {
+                commands.entity(e).despawn();
+            }
+        }
+        Some(CafePhase::SlotPicker(_)) => {
+            for e in &slot_picker_q {
+                commands.entity(e).despawn();
+            }
+        }
+        // Exits from `Playing` happen via plugin teardown (AppState::MainMenu),
+        // not via phase change — nothing to do here.
+        _ => {}
+    }
+
+    match curr {
+        CafePhase::MainMenu => {
+            build_main_menu(&mut commands, &theme);
+        }
+        CafePhase::SlotPicker(mode) => {
+            build_slot_picker(&mut commands, &theme, mode, &mut cache);
+        }
+        CafePhase::Playing { .. } => {
+            // The slot-picker click handler has already applied save data
+            // (or new-game defaults) by the time we get here; we just
+            // bring up the cafe scene and the gameplay HUDs.
+            let cafe: Handle<Scene> = asset_server.load("cafe-sim/Cafe.glb#Scene0");
+            commands.spawn_owned((
+                SceneRoot(cafe),
+                Transform::from_xyz(0.0, FLOOR_Y, 0.0),
+                AutoCollider,
+            ));
+            spawn_balance_hud(&mut commands, &balance);
+            spawn_time_hud(&mut commands, &time);
+
+            // Move the engine-spawned player to the cafe entrance so they
+            // don't end up clipping into furniture that was loaded from a
+            // save (or placed by `apply_save` in the slot picker handler).
+            if let Ok(mut player_tf) = player_q.single_mut() {
+                player_tf.translation = PLAYER_SPAWN;
+            }
+        }
     }
 }
 

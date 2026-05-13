@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::pause_menu::GamePaused;
-use crate::spawn::SpawnOwnedWorld;
+use crate::spawn::SpawnOwnedCommands;
 
 /// Real seconds → in-game seconds. One real minute equals one in-game hour
 /// (60 real seconds → 3600 in-game seconds).
@@ -57,14 +57,12 @@ pub struct TimeClockText;
 #[derive(Component)]
 pub struct TimeDayText;
 
-pub fn spawn_time_hud(world: &mut World) {
+pub fn spawn_time_hud(commands: &mut Commands, initial: &GameTime) {
     let bg = Color::srgba(0.06, 0.07, 0.10, 0.85);
     let day_color = Color::srgb(0.65, 0.70, 0.78);
     let clock_color = Color::srgb(0.98, 0.92, 0.55);
 
-    let initial = GameTime::default();
-
-    let root = world
+    let root = commands
         .spawn_owned((
             Node {
                 position_type: PositionType::Absolute,
@@ -81,7 +79,7 @@ pub fn spawn_time_hud(world: &mut World) {
         ))
         .id();
 
-    let day = world
+    let day = commands
         .spawn_owned((
             TimeDayText,
             Text::new(format!("Day {}", initial.day)),
@@ -93,7 +91,7 @@ pub fn spawn_time_hud(world: &mut World) {
         ))
         .id();
 
-    let clock = world
+    let clock = commands
         .spawn_owned((
             TimeClockText,
             Text::new(initial.formatted()),
@@ -105,8 +103,8 @@ pub fn spawn_time_hud(world: &mut World) {
         ))
         .id();
 
-    world.entity_mut(root).add_child(day);
-    world.entity_mut(root).add_child(clock);
+    commands.entity(root).add_child(day);
+    commands.entity(root).add_child(clock);
 }
 
 pub fn advance_game_time(

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::pause_menu::GamePaused;
-use crate::spawn::{SpawnOwnedCommands, SpawnOwnedWorld, WithChildOwned};
+use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 
 const POPUP_LIFETIME_SECS: f32 = 1.2;
 const POPUP_START_BOTTOM: f32 = 60.0;
@@ -21,11 +21,11 @@ impl Default for Balance {
 #[derive(Component)]
 pub struct BalanceText;
 
-pub fn spawn_balance_hud(world: &mut World) {
+pub fn spawn_balance_hud(commands: &mut Commands, balance: &Balance) {
     let bg = Color::srgba(0.06, 0.07, 0.10, 0.85);
     let text_color = Color::srgb(0.98, 0.92, 0.55);
 
-    let root = world
+    commands
         .spawn_owned((
             Node {
                 position_type: PositionType::Absolute,
@@ -39,21 +39,15 @@ pub fn spawn_balance_hud(world: &mut World) {
             BackgroundColor(bg),
             GlobalZIndex(80),
         ))
-        .id();
-
-    let text = world
-        .spawn_owned((
+        .with_child_owned((
             BalanceText,
-            Text::new(format_balance(STARTING_BALANCE)),
+            Text::new(format_balance(balance.0)),
             TextFont {
                 font_size: 20.0,
                 ..default()
             },
             TextColor(text_color),
-        ))
-        .id();
-
-    world.entity_mut(root).add_child(text);
+        ));
 }
 
 pub fn update_balance_text(balance: Res<Balance>, mut text_q: Query<&mut Text, With<BalanceText>>) {

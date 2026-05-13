@@ -84,7 +84,7 @@ pub fn handle_pickup_click(
     parent_q: Query<&ChildOf>,
     mut ray_cast: MeshRayCast,
 ) {
-    if paused.0 || active.is_open() || selection.0.is_some() || carried.drink.is_some() {
+    if paused.0 || active.is_open() || selection.piece.is_some() || carried.drink.is_some() {
         return;
     }
     if !mouse.just_pressed(MouseButton::Left) {
@@ -136,7 +136,7 @@ pub fn handle_delivery_click(
     mut customers_q: Query<(Entity, &mut Customer)>,
     mut ray_cast: MeshRayCast,
 ) {
-    if paused.0 || active.is_open() || selection.0.is_some() {
+    if paused.0 || active.is_open() || selection.piece.is_some() {
         return;
     }
     let Some(drink) = carried.drink else {
@@ -232,7 +232,7 @@ pub fn handle_discard_click(
     parent_q: Query<&ChildOf>,
     mut ray_cast: MeshRayCast,
 ) {
-    if paused.0 || active.is_open() || selection.0.is_some() || carried.drink.is_none() {
+    if paused.0 || active.is_open() || selection.piece.is_some() || carried.drink.is_none() {
         return;
     }
     if !mouse.just_pressed(MouseButton::Left) {

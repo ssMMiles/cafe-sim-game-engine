@@ -31,6 +31,14 @@ pub struct CategoryDef {
     pub pieces: &'static [PieceDef],
 }
 
+/// Look up a piece in the static catalog by stable indices. Returns `None`
+/// if either index is out of range — used by the save-loader to skip
+/// records that reference pieces no longer present in the catalog.
+pub fn lookup(category_idx: u8, piece_idx: u8) -> Option<&'static PieceDef> {
+    let cat = CATALOG.get(category_idx as usize)?;
+    cat.pieces.get(piece_idx as usize)
+}
+
 pub const CATALOG: &[CategoryDef] = &[
     CategoryDef {
         name: "Surfaces",

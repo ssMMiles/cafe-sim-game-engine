@@ -9,6 +9,12 @@ pub const HALF_D: i32 = CAFE_DEPTH / 2;
 pub const FLOOR_Y: f32 = 0.1;
 pub const PIECE_SCALE: f32 = 0.5;
 
+/// Where the player gets placed each time gameplay starts. Just outside the
+/// placeable grid on the entrance side (+Z), so saved furniture can never
+/// end up beneath the player. See `customer.rs::pick_queue_cell` for the
+/// matching "front = +Z" convention.
+pub const PLAYER_SPAWN: Vec3 = Vec3::new(0.0, FLOOR_Y, HALF_D as f32 + 1.5);
+
 pub fn camera_floor_hit(cam: &Transform) -> Option<Vec3> {
     let f = cam.forward().as_vec3();
     if f.y >= -1e-4 {
@@ -40,7 +46,7 @@ pub fn cell_center(i: i32, j: i32) -> Vec3 {
 }
 
 pub fn draw_floor_grid(mut gizmos: Gizmos, selection: Res<PlacementSelection>) {
-    if selection.0.is_none() {
+    if selection.piece.is_none() {
         return;
     }
 

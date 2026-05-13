@@ -11,8 +11,14 @@
 use bevy::prelude::*;
 use engine_api::AppState;
 
+use crate::balance::Balance;
+use crate::main_menu::CafePhase;
 use crate::menus::ActiveMenu;
+use crate::placement::{CafePiece, PlacedCell};
+use crate::saves;
+use crate::shop_overview::ShopState;
 use crate::spawn::SpawnOwnedCommands;
+use crate::time::GameTime;
 use crate::ui::{ButtonVariant, UiExt, UiTheme};
 
 /// Plugin-local pause flag for gameplay. Other cafe-sim systems read this to
@@ -26,6 +32,7 @@ pub struct PauseMenuRoot;
 #[derive(Component)]
 pub enum PauseMenuButton {
     Resume,
+    Save,
     Exit,
 }
 
@@ -91,6 +98,12 @@ pub fn sync_pause_menu_ui(
                 &theme,
             );
             parent.ui_button(
+                "Save",
+                PauseMenuButton::Save,
+                ButtonVariant::Primary,
+                &theme,
+            );
+            parent.ui_button(
                 "Exit Game",
                 PauseMenuButton::Exit,
                 ButtonVariant::Danger,
@@ -103,6 +116,11 @@ pub fn handle_pause_buttons(
     interactions: Query<(&Interaction, &PauseMenuButton), Changed<Interaction>>,
     mut paused: ResMut<GamePaused>,
     mut app_state: ResMut<NextState<AppState>>,
+    phase: Res<CafePhase>,
+    shop: Res<ShopState>,
+    balance: Res<Balance>,
+    time: Res<GameTime>,
+    pieces_q: Query<(&PlacedCell, &CafePiece)>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -112,10 +130,35 @@ pub fn handle_pause_buttons(
             PauseMenuButton::Resume => {
                 paused.0 = false;
             }
+            PauseMenuButton::Save => {
+                save_active_slot(&phase, &shop, &balance, &time, &pieces_q);
+            }
             PauseMenuButton::Exit => {
+                // Auto-save the active slot before dropping back to the
+                // engine main menu — the plugin is about to be torn down
+                // and any unsaved state would be lost.
+                save_active_slot(&phase, &shop, &balance, &time, &pieces_q);
                 paused.0 = false;
                 app_state.set(AppState::MainMenu);
             }
         }
+    }
+}
+
+fn save_active_slot(
+    phase: &CafePhase,
+    shop: &ShopState,
+    balance: &Balance,
+    time: &GameTime,
+    pieces_q: &Query<(&PlacedCell, &CafePiece)>,
+) {
+    let CafePhase::Playing { slot } = *phase else {
+        return;
+    };
+    let pieces: Vec<(PlacedCell, CafePiece)> = pieces_q.iter().map(|(c, p)| (*c, *p)).collect();
+    let file = saves::capture_state(shop, balance, time, &pieces);
+    match saves::save_slot(slot, &file) {
+        Ok(()) => info!("Saved cafe-sim slot {slot}"),
+        Err(e) => error!("Save to slot {slot} failed: {e}"),
     }
 }

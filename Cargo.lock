@@ -1972,6 +1972,7 @@ dependencies = [
  "bevy",
  "engine-api",
  "rand 0.8.5",
+ "rkyv",
 ]
 
 [[package]]

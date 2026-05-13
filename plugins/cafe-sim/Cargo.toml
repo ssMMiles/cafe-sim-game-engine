@@ -10,3 +10,4 @@ crate-type = ["dylib"]
 engine-api = { path = "../../crates/engine-api" }
 bevy = { workspace = true }
 rand = "0.8"
+rkyv = { version = "0.8", features = ["bytecheck"] }
