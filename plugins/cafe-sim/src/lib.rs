@@ -1,8 +1,9 @@
 use bevy::prelude::*;
-use engine_api::{AutoCollider, DynamicPlugin, Player, add};
+use engine_api::{DynamicPlugin, Player, add};
 
 mod balance;
 mod cafe;
+mod cafe_scene;
 mod catalog;
 mod coffee_menu;
 mod cursor;
@@ -25,6 +26,7 @@ mod ui;
 
 use balance::{Balance, spawn_balance_hud, tick_balance_popups, update_balance_text};
 use cafe::{CafeOpen, enforce_closing_time};
+use cafe_scene::spawn_cafe_scene;
 use coffee_menu::{
     ActiveCoffeeMachine, handle_drink_click, handle_machine_click, manage_brew_popups,
     position_brew_popups, sync_active_coffee_machine, sync_coffee_menu_ui, tick_brewing,
@@ -40,7 +42,7 @@ use delivery::{
     handle_pickup_click, init_delivery_assets, manage_carried_visual, manage_ready_drinks,
     tick_served_timer,
 };
-use grid::{FLOOR_Y, PLAYER_SPAWN, draw_floor_grid};
+use grid::{PLAYER_SPAWN, draw_floor_grid};
 use main_menu::{
     CafePhase, MainMenuRoot, build_main_menu, handle_main_menu_buttons, in_main_menu,
     in_playing, in_slot_picker,
@@ -59,7 +61,6 @@ use shop_overview::{
     handle_edit_button, handle_open_cafe_button, sync_shop_name_display, toggle_shop_overview,
 };
 use slot_picker::{SlotPickerRoot, build_slot_picker, handle_slot_picker_buttons};
-use spawn::SpawnOwnedCommands;
 use thumbnails::{init_thumbnails, propagate_thumbnail_layers};
 use time::{GameTime, advance_game_time, spawn_time_hud, update_time_text};
 use ui::{UiTheme, update_interactive_visuals};
@@ -255,12 +256,7 @@ fn apply_phase_transitions(
             // The slot-picker click handler has already applied save data
             // (or new-game defaults) by the time we get here; we just
             // bring up the cafe scene and the gameplay HUDs.
-            let cafe: Handle<Scene> = asset_server.load("cafe-sim/Cafe.glb#Scene0");
-            commands.spawn_owned((
-                SceneRoot(cafe),
-                Transform::from_xyz(0.0, FLOOR_Y, 0.0),
-                AutoCollider,
-            ));
+            spawn_cafe_scene(&mut commands, &asset_server);
             spawn_balance_hud(&mut commands, &balance);
             spawn_time_hud(&mut commands, &time);
 

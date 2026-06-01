@@ -1,6 +1,7 @@
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_vertex_output,
     pbr_bindings,
+    pbr_types,
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     shadows,
@@ -52,6 +53,22 @@ fn fragment(
     // only VERTEX_UVS_B is defined on the mesh.
     pbr_input.material.base_color = pbr_bindings::material.base_color;
     pbr_input.material.flags = pbr_bindings::material.flags;
+
+    // Mix in base_color_texture when one is bound and the mesh ships a
+    // primary UV channel. Mirrors the StandardMaterial path in
+    // pbr_fragment::pbr_input_from_standard_material; guarded on
+    // VERTEX_UVS_A so lightmap-only meshes still compile.
+#ifdef VERTEX_UVS_A
+    if ((pbr_input.material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u) {
+        let uv = (pbr_bindings::material.uv_transform * vec3<f32>(in.uv, 1.0)).xy;
+        pbr_input.material.base_color = pbr_input.material.base_color * textureSampleBias(
+            pbr_bindings::base_color_texture,
+            pbr_bindings::base_color_sampler,
+            uv,
+            view_bindings::view.mip_bias,
+        );
+    }
+#endif
 
 #ifdef PREPASS_PIPELINE
     let out = deferred_output(in, pbr_input);
