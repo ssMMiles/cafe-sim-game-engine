@@ -20,6 +20,7 @@ pub enum ActiveMenu {
     Shop,
     ShopOverview,
     Coffee,
+    HireStaff,
 }
 
 impl ActiveMenu {

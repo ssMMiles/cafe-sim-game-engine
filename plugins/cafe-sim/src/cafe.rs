@@ -6,15 +6,23 @@
 
 use bevy::prelude::*;
 
+use crate::balance::{Balance, DayStartBalance};
 use crate::time::{CLOSING_HOUR, DAY_START_HOUR, GameTime};
 
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct CafeOpen(pub bool);
 
-pub fn enforce_closing_time(mut game_time: ResMut<GameTime>, mut cafe_open: ResMut<CafeOpen>) {
+pub fn enforce_closing_time(
+    mut game_time: ResMut<GameTime>,
+    mut cafe_open: ResMut<CafeOpen>,
+    balance: Res<Balance>,
+    mut day_start: ResMut<DayStartBalance>,
+) {
     let (hour, _) = game_time.hour_minute();
     if hour >= CLOSING_HOUR || hour < DAY_START_HOUR {
         cafe_open.0 = false;
         game_time.start_next_day();
+        // The day's earnings are now banked — the next day starts from here.
+        day_start.0 = balance.0;
     }
 }

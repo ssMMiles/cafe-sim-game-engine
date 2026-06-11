@@ -98,20 +98,20 @@ pub fn sync_preview(
 
     if let Some(piece) = selection.piece {
         let scene: Handle<Scene> = asset_server.load(piece.asset_path);
-        let entity = commands
-            .spawn_owned((
-                PlacementPreview,
-                PaintMaterial {
-                    color: piece.color(),
-                    alpha: 0.55,
-                    unlit: false,
-                },
-                SceneRoot(scene),
-                Transform::from_xyz(0.0, FLOOR_Y, 0.0).with_scale(Vec3::splat(PIECE_SCALE)),
-                Visibility::Hidden,
-            ))
-            .id();
-        preview_entity.0 = Some(entity);
+        let mut preview = commands.spawn_owned((
+            PlacementPreview,
+            SceneRoot(scene),
+            Transform::from_xyz(0.0, FLOOR_Y, 0.0).with_scale(Vec3::splat(PIECE_SCALE)),
+            Visibility::Hidden,
+        ));
+        if piece.tint {
+            preview.insert(PaintMaterial {
+                color: piece.color(),
+                alpha: 0.55,
+                unlit: false,
+            });
+        }
+        preview_entity.0 = Some(preview.id());
     }
 }
 
@@ -266,12 +266,14 @@ pub fn spawn_piece(
             category_idx: indices.0,
             piece_idx: indices.1,
         },
-        PaintMaterial {
+    ));
+    if piece.tint {
+        placed.insert(PaintMaterial {
             color: piece.color(),
             alpha: 1.0,
             unlit: false,
-        },
-    ));
+        });
+    }
     match piece.kind {
         PieceKind::Countertop => {
             placed.insert(Countertop);

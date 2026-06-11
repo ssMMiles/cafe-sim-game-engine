@@ -8,10 +8,15 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
+use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
 use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
+use crate::staff::{
+    AssignJobButton, AssignJobOpenFor, HireStaffButton, JOBS, JobOptionButton, Staff, spawn_button,
+    stat_lines,
+};
 use crate::time::GameTime;
 
 #[derive(Resource, Debug)]
@@ -104,12 +109,16 @@ pub fn handle_close_cafe_button(
     interactions: Query<&Interaction, (Changed<Interaction>, With<CafeCloseButton>)>,
     mut cafe_open: ResMut<CafeOpen>,
     mut game_time: ResMut<GameTime>,
+    balance: Res<Balance>,
+    mut day_start: ResMut<DayStartBalance>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
     for interaction in &interactions {
         if *interaction == Interaction::Pressed {
             cafe_open.0 = false;
             game_time.start_next_day();
+            // The day's earnings are now banked — the next day starts from here.
+            day_start.0 = balance.0;
             mouse.clear_just_pressed(MouseButton::Left);
         }
     }
@@ -218,9 +227,16 @@ pub fn build_shop_overview(
     editing: Res<ShopNameEditing>,
     shop_state: Res<ShopState>,
     cafe_open: Res<CafeOpen>,
+    staff: Res<Staff>,
+    assign_open: Res<AssignJobOpenFor>,
     existing: Query<Entity, With<ShopOverviewRoot>>,
 ) {
-    if !active.is_changed() && !editing.is_changed() && !cafe_open.is_changed() {
+    if !active.is_changed()
+        && !editing.is_changed()
+        && !cafe_open.is_changed()
+        && !staff.is_changed()
+        && !assign_open.is_changed()
+    {
         return;
     }
 
@@ -367,6 +383,151 @@ pub fn build_shop_overview(
             commands.entity(header).add_child(open_btn);
         }
     }
+
+    // ---- Staff section ----
+    let dim_color = Color::srgb(0.65, 0.70, 0.78);
+    let assign_bg = Color::srgb(0.30, 0.34, 0.40);
+
+    let section = commands
+        .spawn_owned((Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(10.0),
+            ..default()
+        },))
+        .id();
+    commands.entity(root).add_child(section);
+
+    let staff_title = commands
+        .spawn_owned((
+            Text::new("Staff"),
+            TextFont {
+                font_size: 24.0,
+                ..default()
+            },
+            TextColor(text_color),
+        ))
+        .id();
+    commands.entity(section).add_child(staff_title);
+
+    if staff.members.is_empty() {
+        let empty = commands
+            .spawn_owned((
+                Text::new("No staff yet."),
+                TextFont {
+                    font_size: 14.0,
+                    ..default()
+                },
+                TextColor(dim_color),
+            ))
+            .id();
+        commands.entity(section).add_child(empty);
+    }
+
+    let cards_row = commands
+        .spawn_owned((Node {
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(12.0),
+            flex_wrap: FlexWrap::Wrap,
+            ..default()
+        },))
+        .id();
+    commands.entity(section).add_child(cards_row);
+
+    for (i, member) in staff.members.iter().enumerate() {
+        let card = commands
+            .spawn_owned((
+                Node {
+                    width: Val::Px(190.0),
+                    padding: UiRect::all(Val::Px(12.0)),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                },
+                BackgroundColor(surface_bg),
+                BorderColor::all(border),
+            ))
+            .id();
+        commands.entity(cards_row).add_child(card);
+
+        let name = commands
+            .spawn_owned((
+                Text::new(member.name.clone()),
+                TextFont {
+                    font_size: 20.0,
+                    ..default()
+                },
+                TextColor(text_color),
+            ))
+            .id();
+        commands.entity(card).add_child(name);
+
+        for line in stat_lines(member) {
+            let stat = commands
+                .spawn_owned((
+                    Text::new(line),
+                    TextFont {
+                        font_size: 13.0,
+                        ..default()
+                    },
+                    TextColor(dim_color),
+                ))
+                .id();
+            commands.entity(card).add_child(stat);
+        }
+
+        let job_label = member.job.map(|j| j.title()).unwrap_or("Chilling");
+        let job = commands
+            .spawn_owned((
+                Text::new(format!("Job: {job_label}")),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(text_color),
+                Node {
+                    margin: UiRect::top(Val::Px(4.0)),
+                    ..default()
+                },
+            ))
+            .id();
+        commands.entity(card).add_child(job);
+
+        let assign_btn = spawn_button(
+            &mut commands,
+            AssignJobButton { staff: i },
+            "Assign Job",
+            assign_bg,
+            border,
+            text_color,
+        );
+        commands.entity(card).add_child(assign_btn);
+
+        if assign_open.0 == Some(i) {
+            for &job in JOBS {
+                let opt = spawn_button(
+                    &mut commands,
+                    JobOptionButton { staff: i, job },
+                    job.title(),
+                    primary_bg,
+                    border,
+                    text_color,
+                );
+                commands.entity(card).add_child(opt);
+            }
+        }
+    }
+
+    let hire_btn = spawn_button(
+        &mut commands,
+        HireStaffButton,
+        "Hire Staff",
+        primary_bg,
+        border,
+        text_color,
+    );
+    commands.entity(section).add_child(hire_btn);
 }
 
 fn spawn_action_button(

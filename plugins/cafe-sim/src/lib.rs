@@ -20,13 +20,17 @@ mod shop;
 mod shop_overview;
 mod slot_picker;
 mod spawn;
+mod staff;
+mod staff_agent;
 mod thumbnails;
 mod time;
 mod ui;
 
-use balance::{Balance, spawn_balance_hud, tick_balance_popups, update_balance_text};
+use balance::{
+    Balance, DayStartBalance, spawn_balance_hud, tick_balance_popups, update_balance_text,
+};
 use cafe::{CafeOpen, enforce_closing_time};
-use cafe_scene::spawn_cafe_scene;
+use cafe_scene::{spawn_cafe_lights, spawn_cafe_scene};
 use coffee_menu::{
     ActiveCoffeeMachine, handle_drink_click, handle_machine_click, manage_brew_popups,
     position_brew_popups, sync_active_coffee_machine, sync_coffee_menu_ui, tick_brewing,
@@ -61,6 +65,14 @@ use shop_overview::{
     handle_edit_button, handle_open_cafe_button, sync_shop_name_display, toggle_shop_overview,
 };
 use slot_picker::{SlotPickerRoot, build_slot_picker, handle_slot_picker_buttons};
+use staff::{
+    AssignJobOpenFor, HireCandidates, Staff, build_hire_menu, handle_assign_job_button,
+    handle_hire_back_button, handle_hire_candidate_click, handle_hire_staff_button,
+    handle_job_option_click,
+};
+use staff_agent::{
+    PayrollNotice, init_staff_assets, staff_day_lifecycle, tick_notice_toast, tick_staff,
+};
 use thumbnails::{init_thumbnails, propagate_thumbnail_layers};
 use time::{GameTime, advance_game_time, spawn_time_hud, update_time_text};
 use ui::{UiTheme, update_interactive_visuals};
@@ -83,9 +95,14 @@ impl DynamicPlugin for CafeSimPlugin {
         world.insert_resource(GridOccupancy::default());
         world.insert_resource(PreviewEntity::default());
         world.insert_resource(Balance::default());
+        world.insert_resource(DayStartBalance::default());
         world.insert_resource(GameTime::default());
         world.insert_resource(UiTheme::default());
         world.insert_resource(CustomerSpawnTimer::default());
+        world.insert_resource(Staff::default());
+        world.insert_resource(HireCandidates::default());
+        world.insert_resource(AssignJobOpenFor::default());
+        world.insert_resource(PayrollNotice::default());
 
         // Start every load with the pause flag cleared — stale `true` from a
         // prior session would pop the menu open the instant the plugin runs.
@@ -99,6 +116,7 @@ impl DynamicPlugin for CafeSimPlugin {
 
         init_customer_assets(world);
         init_delivery_assets(world);
+        init_staff_assets(world);
         init_thumbnails(world);
 
         // Cafe scene + HUDs are no longer spawned here; the transition
@@ -143,6 +161,11 @@ impl DynamicPlugin for CafeSimPlugin {
                         handle_edit_button,
                         handle_open_cafe_button,
                         handle_close_cafe_button,
+                        handle_hire_staff_button,
+                        handle_hire_candidate_click,
+                        handle_hire_back_button,
+                        handle_assign_job_button,
+                        handle_job_option_click,
                         handle_pause_buttons,
                         cancel_placement,
                     )
@@ -159,6 +182,7 @@ impl DynamicPlugin for CafeSimPlugin {
                         sync_coffee_menu_ui,
                         sync_active_coffee_machine,
                         build_shop_overview,
+                        build_hire_menu,
                     )
                         .chain(),
                 )
@@ -177,6 +201,8 @@ impl DynamicPlugin for CafeSimPlugin {
                     enforce_closing_time,
                     update_time_text,
                     clear_customers_when_closed,
+                    staff_day_lifecycle,
+                    tick_staff,
                     tick_spawn_timer,
                     spawn_customers,
                     walk_customers,
@@ -191,6 +217,7 @@ impl DynamicPlugin for CafeSimPlugin {
                     manage_ready_drinks,
                     cleanup_orphan_drinks,
                     tick_balance_popups,
+                    tick_notice_toast,
                     manage_brew_popups,
                     update_brew_popups,
                     position_brew_popups,
@@ -257,6 +284,7 @@ fn apply_phase_transitions(
             // (or new-game defaults) by the time we get here; we just
             // bring up the cafe scene and the gameplay HUDs.
             spawn_cafe_scene(&mut commands, &asset_server);
+            spawn_cafe_lights(&mut commands);
             spawn_balance_hud(&mut commands, &balance);
             spawn_time_hud(&mut commands, &time);
 

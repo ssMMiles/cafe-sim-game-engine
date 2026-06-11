@@ -94,7 +94,10 @@
       "Bash(Select-Object -ExpandProperty Name)",
       "PowerShell($f = \"target\\\\debug\\\\example.loaded.0.dll\"; try { $s = [System.IO.File]::Open\\($f, 'Open', 'ReadWrite', 'None'\\); $s.Close\\(\\); \"OK: $f is writable\" } catch { \"LOCKED: $f -- $_\" }; $f = \"target\\\\debug\\\\example.dll\"; try { $s = [System.IO.File]::Open\\($f, 'Open', 'ReadWrite', 'None'\\); $s.Close\\(\\); \"OK: $f is writable\" } catch { \"LOCKED: $f -- $_\" })",
       "Bash(engine)",
-      "Read(//Users/milesmoonlove/Documents/projects/games/**)"
+      "Read(//Users/milesmoonlove/Documents/projects/games/**)",
+      "Bash(cp \"C:/Users/Miles/Documents/projects/assets/Cafe.gltf\" \"C:/Users/Miles/Documents/projects/engine/assets/cafe-sim/Cafe.gltf\")",
+      "Bash(cp \"C:/Users/Miles/Documents/projects/assets/Cafe.bin\" \"C:/Users/Miles/Documents/projects/engine/assets/cafe-sim/Cafe.bin\")",
+      "Bash(cp \"C:/Users/Miles/Documents/projects/assets/brick-wall.jpg\" \"C:/Users/Miles/Documents/projects/engine/assets/cafe-sim/brick-wall.jpg\")"
     ],
     "deny": [],
     "ask": [],

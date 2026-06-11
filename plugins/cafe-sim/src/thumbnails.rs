@@ -89,18 +89,21 @@ pub fn init_thumbnails(world: &mut World) {
             layers.clone(),
         ));
 
-        // The piece itself, painted with the catalog color.
+        // The piece itself — painted with the catalog color, unless the piece
+        // opts out of tinting to keep its own model material.
         let scene: Handle<Scene> = world.resource::<AssetServer>().load(piece.asset_path);
-        world.spawn_owned((
+        let mut thumb = world.spawn_owned((
             SceneRoot(scene),
             Transform::from_translation(origin).with_scale(Vec3::splat(PIECE_SCALE)),
-            PaintMaterial {
+            ThumbnailScene(layers),
+        ));
+        if piece.tint {
+            thumb.insert(PaintMaterial {
                 color: piece.color(),
                 alpha: 1.0,
                 unlit: false,
-            },
-            ThumbnailScene(layers),
-        ));
+            });
+        }
 
         thumbs.0.insert(piece.name, image_handle);
     }

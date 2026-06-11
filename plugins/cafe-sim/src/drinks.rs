@@ -44,3 +44,7 @@ pub const DRINKS: &[Drink] = &[
 pub fn price_for(name: &str) -> Option<i64> {
     DRINKS.iter().find(|d| d.name == name).map(|d| d.price)
 }
+
+pub fn brew_secs_for(name: &str) -> Option<f32> {
+    DRINKS.iter().find(|d| d.name == name).map(|d| d.brew_secs)
+}

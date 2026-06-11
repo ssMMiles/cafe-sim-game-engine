@@ -15,8 +15,12 @@ pub struct PieceDef {
     pub kind: PieceKind,
     /// Linear-ish sRGB tint applied to the piece's mesh material in both the
     /// placement preview and the placed object. Stored as a plain array so the
-    /// catalog can live in a `const`.
+    /// catalog can live in a `const`. Only used when [`PieceDef::tint`] is true.
     pub color: [f32; 3],
+    /// When true, every mesh of the piece is repainted with [`PieceDef::color`]
+    /// (the placeholder look). Set false to keep the model's own material — e.g.
+    /// a real baked asset that already looks right.
+    pub tint: bool,
 }
 
 impl PieceDef {
@@ -44,9 +48,10 @@ pub const CATALOG: &[CategoryDef] = &[
         name: "Surfaces",
         pieces: &[PieceDef {
             name: "Table",
-            asset_path: "cafe-sim/Tabletop.glb#Scene0",
+            asset_path: "cafe-sim/tabletop-baked/Mesh_0.gltf#Scene0",
             kind: PieceKind::Decoration,
             color: [0.25, 0.45, 0.85],
+            tint: false,
         }],
     },
     CategoryDef {
@@ -57,18 +62,21 @@ pub const CATALOG: &[CategoryDef] = &[
                 asset_path: "cafe-sim/Tabletop.glb#Scene0",
                 kind: PieceKind::Countertop,
                 color: [0.30, 0.70, 0.35],
+                tint: true,
             },
             PieceDef {
                 name: "Coffee Machine",
                 asset_path: "cafe-sim/Tabletop.glb#Scene0",
                 kind: PieceKind::CoffeeMachine,
                 color: [0.80, 0.25, 0.25],
+                tint: true,
             },
             PieceDef {
                 name: "Garbage Can",
                 asset_path: "cafe-sim/Tabletop.glb#Scene0",
                 kind: PieceKind::GarbageCan,
                 color: [0.08, 0.08, 0.10],
+                tint: true,
             },
         ],
     },

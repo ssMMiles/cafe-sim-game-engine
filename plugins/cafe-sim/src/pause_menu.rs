@@ -11,13 +11,14 @@
 use bevy::prelude::*;
 use engine_api::AppState;
 
-use crate::balance::Balance;
+use crate::balance::DayStartBalance;
 use crate::main_menu::CafePhase;
 use crate::menus::ActiveMenu;
 use crate::placement::{CafePiece, PlacedCell};
 use crate::saves;
 use crate::shop_overview::ShopState;
 use crate::spawn::SpawnOwnedCommands;
+use crate::staff::Staff;
 use crate::time::GameTime;
 use crate::ui::{ButtonVariant, UiExt, UiTheme};
 
@@ -118,8 +119,9 @@ pub fn handle_pause_buttons(
     mut app_state: ResMut<NextState<AppState>>,
     phase: Res<CafePhase>,
     shop: Res<ShopState>,
-    balance: Res<Balance>,
+    day_start: Res<DayStartBalance>,
     time: Res<GameTime>,
+    staff: Res<Staff>,
     pieces_q: Query<(&PlacedCell, &CafePiece)>,
 ) {
     for (interaction, action) in &interactions {
@@ -131,13 +133,13 @@ pub fn handle_pause_buttons(
                 paused.0 = false;
             }
             PauseMenuButton::Save => {
-                save_active_slot(&phase, &shop, &balance, &time, &pieces_q);
+                save_active_slot(&phase, &shop, &day_start, &time, &staff, &pieces_q);
             }
             PauseMenuButton::Exit => {
                 // Auto-save the active slot before dropping back to the
                 // engine main menu — the plugin is about to be torn down
                 // and any unsaved state would be lost.
-                save_active_slot(&phase, &shop, &balance, &time, &pieces_q);
+                save_active_slot(&phase, &shop, &day_start, &time, &staff, &pieces_q);
                 paused.0 = false;
                 app_state.set(AppState::MainMenu);
             }
@@ -148,15 +150,16 @@ pub fn handle_pause_buttons(
 fn save_active_slot(
     phase: &CafePhase,
     shop: &ShopState,
-    balance: &Balance,
+    day_start: &DayStartBalance,
     time: &GameTime,
+    staff: &Staff,
     pieces_q: &Query<(&PlacedCell, &CafePiece)>,
 ) {
     let CafePhase::Playing { slot } = *phase else {
         return;
     };
     let pieces: Vec<(PlacedCell, CafePiece)> = pieces_q.iter().map(|(c, p)| (*c, *p)).collect();
-    let file = saves::capture_state(shop, balance, time, &pieces);
+    let file = saves::capture_state(shop, day_start, time, staff, &pieces);
     match saves::save_slot(slot, &file) {
         Ok(()) => info!("Saved cafe-sim slot {slot}"),
         Err(e) => error!("Save to slot {slot} failed: {e}"),

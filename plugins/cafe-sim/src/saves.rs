@@ -12,11 +12,12 @@ use bevy::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::collections::HashMap;
 
-use crate::balance::Balance;
+use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
 use crate::catalog;
 use crate::placement::{CafePiece, GridOccupancy, PlacedCell, spawn_piece};
 use crate::shop_overview::ShopState;
+use crate::staff::{Staff, StaffMember};
 use crate::time::{DAY_START_HOUR, GameTime};
 
 // ----------------------------------------------------------------------------
@@ -25,7 +26,7 @@ use crate::time::{DAY_START_HOUR, GameTime};
 
 /// Bump on any incompatible change to [`CafeSaveFile`] so older saves are
 /// rejected with a clear error rather than silently mis-deserializing.
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 pub const SLOT_COUNT: u8 = 4;
 
@@ -45,6 +46,7 @@ pub struct CafeSaveFile {
     pub balance: i64,
     pub day: u32,
     pub pieces: Vec<PlacedPieceRecord>,
+    pub staff: Vec<StaffMember>,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy)]
@@ -86,10 +88,15 @@ pub struct SlotMetadataCache(pub HashMap<u8, SlotStatus>);
 // ----------------------------------------------------------------------------
 
 /// Snapshot the live game state into a serializable `CafeSaveFile`.
+///
+/// We persist `day_start`, the balance at the start of the current day, rather
+/// than the live [`Balance`] — saves resume at opening hour, so mid-day
+/// earnings are intentionally rolled back. See [`DayStartBalance`].
 pub fn capture_state(
     shop: &ShopState,
-    balance: &Balance,
+    day_start: &DayStartBalance,
     time: &GameTime,
+    staff: &Staff,
     pieces: &[(PlacedCell, CafePiece)],
 ) -> CafeSaveFile {
     let pieces = pieces
@@ -105,9 +112,10 @@ pub fn capture_state(
     CafeSaveFile {
         version: SAVE_VERSION,
         shop_name: shop.name.clone(),
-        balance: balance.0,
+        balance: day_start.0,
         day: time.day,
         pieces,
+        staff: staff.members.clone(),
     }
 }
 
@@ -122,14 +130,18 @@ pub fn apply_save(
     occupancy: &mut GridOccupancy,
     shop: &mut ShopState,
     balance: &mut Balance,
+    day_start: &mut DayStartBalance,
     time: &mut GameTime,
     cafe_open: &mut CafeOpen,
+    staff: &mut Staff,
 ) {
     shop.name = file.shop_name.clone();
     balance.0 = file.balance;
+    day_start.0 = file.balance;
     time.day = file.day;
     time.seconds = DAY_START_HOUR as f32 * 3600.0;
     cafe_open.0 = false;
+    staff.members = file.staff.clone();
 
     for rec in &file.pieces {
         let Some(piece) = catalog::lookup(rec.category_idx, rec.piece_idx) else {
@@ -162,13 +174,17 @@ pub fn apply_save(
 pub fn apply_new_game(
     shop: &mut ShopState,
     balance: &mut Balance,
+    day_start: &mut DayStartBalance,
     time: &mut GameTime,
     cafe_open: &mut CafeOpen,
+    staff: &mut Staff,
 ) {
     *shop = ShopState::default();
     *balance = Balance::default();
+    *day_start = DayStartBalance::default();
     *time = GameTime::default();
     *cafe_open = CafeOpen::default();
+    *staff = Staff::default();
 }
 
 // ----------------------------------------------------------------------------
