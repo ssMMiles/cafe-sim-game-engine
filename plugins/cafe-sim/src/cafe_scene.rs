@@ -27,7 +27,7 @@ pub fn spawn_cafe_scene(commands: &mut Commands, asset_server: &AssetServer) {
     let cafe: Handle<Scene> = asset_server.load("cafe-sim/Cafe.gltf#Scene0");
 
     let bricks: Handle<Image> = asset_server.load_with_settings(
-        "cafe-sim/brick-wall.jpg",
+        "cafe-sim/brick-wall.png",
         |s: &mut ImageLoaderSettings| {
             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,

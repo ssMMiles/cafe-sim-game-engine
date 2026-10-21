@@ -88,7 +88,7 @@ pub struct PlacementConfig {
 impl Default for PlacementConfig {
     fn default() -> Self {
         Self {
-            asset_path: "meshes/mountain/mountain.gltf#Scene0".to_string(),
+            asset_path: "meshes/rock/bigrock.gltf#Scene0".to_string(),
             scale: Vec3::splat(0.75),
         }
     }
