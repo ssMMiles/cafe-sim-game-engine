@@ -93,3 +93,21 @@ This bit us once: the scripts panel showed only "No stamp" because no plugin dyl
 Mitigations now in place: `LoadedPluginIds` resource (actually-loaded ids, vs `ActiveProject.plugins` which is only declared); the scripts panel shows `empty_reason(...)` in red naming declared-but-unloaded plugins; `try_load_plugin` / `reload_plugin` log how many scripts each plugin registered.
 
 Also fixed: both `reload_plugin` failure paths left `loaded_mtime` stale, so a plugin that failed to prepare or set up was retried **every frame**, copying a fresh `.loaded.N.dylib` each time and re-clearing its registry entries. Both paths now bank `new_mtime`.
+
+## Post-commit review of the level save system — October 2026
+
+A three-way review (persistence, script host, editor) after the v3 landing found real bugs. The **critical four are fixed**:
+
+1. Streaming no longer unloads chunks present in either dirty set (`update_streaming_ring`). Before, Shift+S after walking >6 chunks from an edit rebuilt the chunk file from zero live entities / evicted (0.0) heightmap tiles — wiping objects and flattening terrain on disk. Dirty chunks stay resident until a save drains the dirty sets.
+2. (same fix covers terrain and objects)
+3. `PlacedObjectRegistry.next_id` is seeded by `seed_placed_ids` (`objects.rs`) from `WorldMetadata::next_entity_id` — a persisted high-water counter written on every save (`save_terrain` maxes it with the registry). This bumped **`WORLD_FORMAT_VERSION` 3 → 4**; v3 was never released and is *rejected* (old test worlds are deleted, not migrated — user's explicit call, a first implementation that scanned all `.objects` files at load was dropped as overcomplicated). Placement stays gated on `registry.ids_seeded` so `alloc_id` can't reuse an id from a not-yet-streamed chunk (which collided `obj_{id}_lightmap.png` and `PropValue::EntityRef`). `seed_placed_ids` keys on `TerrainWorld::is_added()`, NOT on `!ids_seeded` — a lingering old `TerrainWorld` during a world switch must not seed the next world's fresh registry.
+4. `run_setup` failure paths now call `abort_failed_setup`: `mem::forget` the dylib (it was **dropped** → `dlclose` → dangling registry fn pointers + unmapped drop glue → segfault), remove the plugin's registry entries, despawn its orphaned `ScriptOwned` entities.
+
+### Deferred findings (known, not yet fixed)
+
+- **Archetype-diff sharing**: if two bindings' factories insert the same component, only the first records it; detaching the first strips it from under the second. A factory that *replaces* a pre-existing component records nothing.
+- **`PlacedPicker` picks through occluders** (`editor/object_placement.rs`): non-placed ray hits (terrain, walls) are skipped instead of terminating the ray — Delete/attach can act on hidden entities. Ray should stop at first hit of any kind.
+- **Stale armed stamp**: `PlacementConfig.stamp_script` is never cleared on plugin unload; panel shows "No stamp" while the status line and placements still use the stale stamp, seeding bindings with *empty* props (schema lookup falls back to default).
+- **Catalog highlight vs `config.kind` divergence** after registry-change rebuilds (`mesh_selector.rs` — `config.kind` only corrected when `manifest_changed`).
+- **Edit mode + terrain-sculpt both active**: every LMB sculpt stroke also places an object (`handle_edit_mode_click` doesn't check the terrain-edit flag).
+- Lower: dirty sets `drain()`ed before I/O (failed write loses dirtiness); `collect_plugin_level_data` not ordered after the Shift+S trigger (one-frame window); camera zoom eats a frame of leftover panel scroll (`camera.rs` reader not drained while inactive); `last_saved` always written 0; unresolvable `NeedsHydration` entities re-scanned every frame (perf only); reload-failure leaves plugin listed as loaded but inert (log-only); `AppliedPluginData` skips re-apply on same-world reload.

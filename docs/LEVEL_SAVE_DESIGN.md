@@ -409,6 +409,17 @@ Deviations from §5, all deliberate:
   (balance, day, staff) and reference pieces by `PlacedObject.id` instead of
   re-spawning them.
 
+**Post-landing fixes (2026-10-23)** — from a three-way review after Phases 0–2:
+- Streaming never unloads a chunk present in either dirty set (save rebuilds
+  chunk files from live state; unloading a dirty chunk destroyed its data).
+- `world.meta` is **v4**: adds `next_entity_id`, a persisted id high-water
+  mark written on save and seeded into `PlacedObjectRegistry` on load, so a
+  fresh load can't re-allocate ids living in unstreamed chunks. v3 was never
+  released and is rejected rather than migrated (test worlds get deleted).
+- A failed/panicking `plugin_setup` now `mem::forget`s the dylib, clears the
+  plugin's registry entries, and sweeps its orphaned `ScriptOwned` entities
+  (dropping the library `dlclose`d pages that live fn pointers referenced).
+
 ## 7. Decisions (settled 2026-10-21)
 
 1. **Script components go directly on the placed entity**, tracked by

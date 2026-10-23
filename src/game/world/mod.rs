@@ -18,7 +18,7 @@ use chunk_assets::{
 };
 use objects::{
     PlacedObjectRegistry, PlacementConfig, apply_auto_colliders, draw_light_gizmos,
-    save_placed_objects,
+    save_placed_objects, seed_placed_ids,
 };
 use streaming::{
     ChunkStreamingConfig, StreamingState, finalize_computed_chunks, launch_chunk_tasks,
@@ -69,7 +69,13 @@ impl Plugin for WorldPlugin {
 
         app.add_systems(
             Update,
-            (save_placed_objects, apply_auto_colliders, apply_environment).in_set(WorldSet::InGame),
+            (
+                save_placed_objects,
+                apply_auto_colliders,
+                apply_environment,
+                seed_placed_ids,
+            )
+                .in_set(WorldSet::InGame),
         );
 
         // Light markers are an authoring aid, so they only draw in the editor.

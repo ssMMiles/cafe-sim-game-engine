@@ -175,11 +175,20 @@ pub fn update_streaming_ring(
     let metadata = &terrain_world.metadata;
 
     // ── Unload distant loaded chunks ──────────────────────────────────────────
+    // Chunks with unsaved edits are exempt: the save systems rebuild chunk
+    // files from live entities and heightmap tiles, so unloading a dirty
+    // chunk would make the next save overwrite its file with empty/flat
+    // data. A dirty chunk stays resident until a save drains the dirty sets,
+    // after which it unloads normally.
     let to_unload: Vec<(i32, i32)> = state
         .loaded
         .iter()
         .copied()
         .filter(|&(cx, cy)| chebyshev(cx, cy, player_cx, player_cy) > config.unload_radius)
+        .filter(|chunk| {
+            !chunk_registry.dirty_chunks.contains(chunk)
+                && !obj_registry.dirty_chunks.contains(chunk)
+        })
         .collect();
 
     for chunk in to_unload {

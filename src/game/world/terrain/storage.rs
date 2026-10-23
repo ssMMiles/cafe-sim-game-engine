@@ -25,10 +25,12 @@ const CHUNK_MAGIC: &[u8; 4] = b"TCNK";
 /// u32 to i32 for infinite terrain support. Unchanged by the level-save work —
 /// the chunk payload itself did not change.
 const CHUNK_FORMAT_VERSION: u32 = 2;
-/// `world.meta` format version. Version 3 adds [`EnvironmentData`],
-/// `required_plugins`, and `plugin_data`. Version 2 is still readable and is
-/// upgraded in memory (see [`legacy`]).
-const WORLD_FORMAT_VERSION: u32 = 3;
+/// `world.meta` format version. Version 3 added [`EnvironmentData`],
+/// `required_plugins`, and `plugin_data`; version 4 adds `next_entity_id`.
+/// Version 2 is still readable and is upgraded in memory (see [`legacy`]).
+/// Version 3 was never in a release and is **not** readable — the few v3 test
+/// worlds are expected to be deleted (they fail parse and start fresh).
+const WORLD_FORMAT_VERSION: u32 = 4;
 
 // ============================================================================
 // Serializable Data Structures
@@ -59,6 +61,13 @@ pub struct WorldMetadata {
     pub required_plugins: Vec<String>,
     /// Opaque per-plugin level data, written and read by the plugin itself.
     pub plugin_data: Vec<PluginLevelData>,
+    /// High-water mark for placed-entity ids: the next id to allocate.
+    /// Persisted so a freshly loaded world can't re-allocate an id that
+    /// already exists in a not-yet-streamed chunk's `.objects` file (ids key
+    /// baked lightmaps on disk and `PropValue::EntityRef` links). Written on
+    /// every save from `PlacedObjectRegistry::next_id`; seeded back into the
+    /// registry by `seed_placed_ids` on world load.
+    pub next_entity_id: u64,
 }
 
 /// Global lighting saved with the level.
@@ -282,6 +291,10 @@ pub mod legacy {
             environment: EnvironmentData::default(),
             required_plugins: Vec::new(),
             plugin_data: Vec::new(),
+            // v2 object files do carry ids but no counter, so 0 could
+            // collide with them. Like v3, pre-v4 worlds are dev-era test
+            // data expected to be deleted rather than migrated.
+            next_entity_id: 0,
         }
     }
 }
@@ -483,7 +496,7 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
 }
 
 /// Parse world metadata from a raw byte slice (same binary format as `load_world`).
-/// Accepts v2 (upgraded in memory) and v3.
+/// Accepts v2 (upgraded in memory) and v4; v3 was never released and is rejected.
 /// Used by the async `WorldMetaLoader` which reads bytes via Bevy's `AssetServer`.
 pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, StorageError> {
     use std::io::Read as StdRead;
@@ -580,6 +593,7 @@ pub fn create_world_metadata(
         environment: EnvironmentData::default(),
         required_plugins: Vec::new(),
         plugin_data: Vec::new(),
+        next_entity_id: 0,
     }
 }
 
@@ -632,8 +646,9 @@ mod tests {
     }
 
     #[test]
-    fn test_world_v3_environment_and_plugin_data_roundtrip() {
+    fn test_world_v4_environment_plugin_data_and_id_counter_roundtrip() {
         let mut metadata = create_world_metadata("env".to_string(), 128, 128, 64, (1.0, 1.0), 10.0);
+        metadata.next_entity_id = 77;
         metadata.environment = EnvironmentData {
             sun_rotation: [0.1, 0.2, 0.3, 0.9],
             sun_position: [1.0, 50.0, -2.0],
@@ -659,13 +674,14 @@ mod tests {
         assert_eq!(loaded.plugin_data.len(), 1);
         assert_eq!(loaded.plugin_data[0].plugin, "cafe-sim");
         assert_eq!(loaded.plugin_data[0].data, vec![1, 2, 3, 4]);
+        assert_eq!(loaded.next_entity_id, 77);
     }
 
-    /// Guard against breaking the existing `cafe` / `default` worlds: a v2
-    /// `world.meta` must still load, keeping its chunk index and picking up
-    /// the default environment.
+    /// A v2 `world.meta` must still load, keeping its chunk index and picking
+    /// up the default environment (and a zero id counter — pre-v4 worlds are
+    /// dev-era data expected to be recreated, not migrated).
     #[test]
-    fn test_world_v2_upgrades_to_v3() {
+    fn test_world_v2_upgrades_to_current() {
         let old = legacy::WorldMetadataV2 {
             version: 2,
             world_id: "legacy".to_string(),
@@ -710,6 +726,7 @@ mod tests {
         assert_eq!(loaded.environment.sun_position, d.sun_position);
         assert!(loaded.required_plugins.is_empty());
         assert!(loaded.plugin_data.is_empty());
+        assert_eq!(loaded.next_entity_id, 0);
     }
 
     /// The chunk payload did not change in v3; `.terrain` files stay at

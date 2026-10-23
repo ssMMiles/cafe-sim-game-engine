@@ -47,6 +47,7 @@ pub fn save_terrain(
     terrain_world: Option<Res<TerrainWorld>>,
     registry: Option<ResMut<TerrainChunkRegistry>>,
     heightmap: Option<Res<HeightmapData>>,
+    placed_registry: Option<Res<crate::game::world::objects::PlacedObjectRegistry>>,
     mut pending: ResMut<PendingTerrainSave>,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
@@ -80,7 +81,14 @@ pub fn save_terrain(
         .iter()
         .map(|&(cx, cy)| extract_chunk_data(&heightmap, cx, cy))
         .collect();
-    let metadata_snapshot = terrain_world.metadata.clone();
+    let mut metadata_snapshot = terrain_world.metadata.clone();
+
+    // Persist the placed-entity id high-water mark. It lives on the registry
+    // at runtime; without this a future load would re-allocate ids that are
+    // already on disk in not-yet-streamed chunks.
+    if let Some(placed) = placed_registry.as_ref() {
+        metadata_snapshot.next_entity_id = metadata_snapshot.next_entity_id.max(placed.next_id);
+    }
 
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     {

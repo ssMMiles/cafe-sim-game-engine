@@ -131,15 +131,16 @@ src/
 
 ```
 worlds/{id}/
-  world.meta                   # v3 (WORLD_FORMAT_VERSION): terrain config + chunk index
+  world.meta                   # v4 (WORLD_FORMAT_VERSION): terrain config + chunk index
                                #   + EnvironmentData (sun/ambient) + required_plugins + plugin_data
+                               #   + next_entity_id (placed-entity id counter, seeds the registry on load)
   chunks/chunk_X_Y.terrain     # v2 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc
   chunks/chunk_X_Y.objects     # v3: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty)
                                #   + Vec<ScriptBinding> with typed PropValue props
   chunks/chunk_X_Y_lightmap.png, objects/obj_{id}_lightmap.png
 ```
 
-All rkyv; v2 files are read via `legacy` modules and upgraded in memory, rewritten as v3 on next save. Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
+All rkyv; v2 files are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
 
 ## Shaders (`assets/shaders/`)
 

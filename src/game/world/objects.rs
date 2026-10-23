@@ -295,6 +295,12 @@ pub struct PlacedObjectRegistry {
     pub by_id: HashMap<u64, Entity>,
     pub next_id: u64,
     pub dirty_chunks: HashSet<(i32, i32)>,
+    /// `next_id` is only trustworthy once [`seed_placed_ids`] has applied the
+    /// world's saved `next_entity_id` counter. Until then `alloc_id` could
+    /// hand out an id already used by an entity in a not-yet-streamed chunk —
+    /// colliding baked lightmap files and breaking `PropValue::EntityRef` —
+    /// so the editor refuses to place anything while this is false.
+    pub ids_seeded: bool,
 }
 
 impl PlacedObjectRegistry {
@@ -531,6 +537,32 @@ pub fn despawn_chunk_objects(
         registry.by_id.remove(&id);
         commands.entity(entity).despawn();
     }
+}
+
+// ============================================================================
+// Id Seeding
+// ============================================================================
+
+/// Seed `PlacedObjectRegistry::next_id` from the world's saved counter
+/// (`WorldMetadata::next_entity_id`) when a world loads.
+///
+/// `observe_id` only sees records whose chunks have streamed in, so without
+/// the counter the first `alloc_id` in a freshly loaded world could reuse an
+/// id that belongs to an entity in a distant, unloaded chunk. Keyed on
+/// `is_added` rather than `ids_seeded` so a lingering `TerrainWorld` from a
+/// world being switched away can't seed the next world's fresh registry.
+pub fn seed_placed_ids(
+    terrain_world: Option<Res<TerrainWorld>>,
+    mut registry: ResMut<PlacedObjectRegistry>,
+) {
+    let Some(terrain_world) = terrain_world else {
+        return;
+    };
+    if !terrain_world.is_added() {
+        return;
+    }
+    registry.next_id = registry.next_id.max(terrain_world.metadata.next_entity_id);
+    registry.ids_seeded = true;
 }
 
 // ============================================================================

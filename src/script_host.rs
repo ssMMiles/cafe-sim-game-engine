@@ -363,24 +363,28 @@ fn run_setup(world: &mut World, plugin_id: &str, prepared: PreparedLibrary) -> O
         (prepared.setup_fn)(world_ptr, schedule_ptr)
     }));
 
-    match result {
-        Ok(0) => {}
+    let failed = match result {
+        Ok(0) => false,
         Ok(2) => {
             bevy::log::error!(
                 "[scripts] '{plugin_id}' TypeId mismatch — the DLL was compiled \
                  against different bevy metadata. Rebuild the full workspace \
                  (cargo build --workspace) and restart."
             );
-            return None;
+            true
         }
         Ok(code) => {
             bevy::log::error!("[scripts] '{plugin_id}' plugin_setup returned error code {code}");
-            return None;
+            true
         }
         Err(_) => {
             bevy::log::error!("[scripts] '{plugin_id}' plugin_setup panicked");
-            return None;
+            true
         }
+    };
+    if failed {
+        abort_failed_setup(world, plugin_id, prepared.library);
+        return None;
     }
 
     // Replaces any prior schedule with the same label. The dropped schedule's
@@ -398,6 +402,41 @@ fn run_setup(world: &mut World, plugin_id: &str, prepared: PreparedLibrary) -> O
         library: prepared.library,
         plugin_name: prepared.plugin_name,
     })
+}
+
+/// Clean up after a `plugin_setup` that failed or panicked partway through.
+///
+/// A failed setup may already have mutated the world: registered script
+/// factories and level hooks (fn pointers into the dylib) and spawned
+/// `ScriptOwned` entities whose component drop glue lives in the dylib's
+/// pages. Dropping the library here would `dlclose` those pages and turn any
+/// later registry call or despawn into a jump into unmapped memory. So, like
+/// every other unload path, the library is `mem::forget`'d (pages stay mapped
+/// forever), the plugin's registry entries are removed, and its orphaned
+/// entities are despawned — safe precisely because the pages stay mapped.
+#[cfg(not(target_family = "wasm"))]
+fn abort_failed_setup(world: &mut World, plugin_id: &str, library: libloading::Library) {
+    std::mem::forget(library);
+
+    world
+        .resource_mut::<ScriptRegistry>()
+        .remove_plugin(plugin_id);
+
+    let orphans: Vec<Entity> = world
+        .query::<(Entity, &engine_api::ScriptOwned)>()
+        .iter(world)
+        .filter(|(_, owned)| owned.plugin == plugin_id)
+        .map(|(entity, _)| entity)
+        .collect();
+    if !orphans.is_empty() {
+        bevy::log::warn!(
+            "[scripts] '{plugin_id}' left {} entity(ies) behind in its failed setup; despawning",
+            orphans.len()
+        );
+        for entity in orphans {
+            world.despawn(entity);
+        }
+    }
 }
 
 /// Call `plugin_teardown` on a still-loaded library. Used during hot-reload

@@ -131,6 +131,15 @@ pub fn handle_edit_mode_click(
     if *vis == Visibility::Hidden {
         return;
     }
+
+    // Until the world's saved id counter has been applied, alloc_id could
+    // reuse an id from a not-yet-streamed chunk. Seeding happens the frame
+    // the world's metadata lands, so hitting this is a same-frame race.
+    if !registry.ids_seeded {
+        warn!("Placement unavailable: world entity-id counter not seeded yet");
+        return;
+    }
+
     let pos = preview_transform.translation;
 
     let chunk = world_pos_to_chunk(pos.x, pos.z);

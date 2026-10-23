@@ -9,3 +9,9 @@ To run:
 ```bash
 cargo run
 ```
+
+If updating a plugin, rebuild the workspace:
+
+```
+cargo build --workspace
+```
