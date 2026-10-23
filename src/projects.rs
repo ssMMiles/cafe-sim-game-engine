@@ -202,11 +202,12 @@ pub fn discover_plugin_ids() -> Vec<String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_manifest(manifest: &ProjectManifest) -> std::io::Result<()> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let project_dir = Path::new(manifest_dir)
-        .join("projects")
-        .join(&manifest.id);
+    let project_dir = Path::new(manifest_dir).join("projects").join(&manifest.id);
     std::fs::create_dir_all(&project_dir)?;
-    std::fs::write(project_dir.join("project.toml"), serialize_manifest(manifest))?;
+    std::fs::write(
+        project_dir.join("project.toml"),
+        serialize_manifest(manifest),
+    )?;
     Ok(())
 }
 
@@ -268,10 +269,7 @@ fn discover_projects() -> Vec<ProjectManifest> {
         let source = match std::fs::read_to_string(&manifest_path) {
             Ok(s) => s,
             Err(e) => {
-                warn!(
-                    "[projects] failed to read {}: {e}",
-                    manifest_path.display()
-                );
+                warn!("[projects] failed to read {}: {e}", manifest_path.display());
                 continue;
             }
         };

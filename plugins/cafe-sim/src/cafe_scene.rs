@@ -10,8 +10,8 @@
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::pbr::ExtendedMaterial;
-use bevy::{log, prelude::*};
 use bevy::scene::SceneInstanceReady;
+use bevy::{log, prelude::*};
 use engine_api::AutoCollider;
 use engine_api::toon_material::{DefaultToonLightmap, ToonMaterial};
 

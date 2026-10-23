@@ -2,12 +2,12 @@ use avian3d::prelude::*;
 use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
-pub use engine_api::{Player, PlayerCollider};
-use engine_api::{CharacterState, GameEntity, SimulationConfig};
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS};
 use crate::game::gfx::camera::setup_camera;
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
+use engine_api::{CharacterState, GameEntity, SimulationConfig};
+pub use engine_api::{Player, PlayerCollider};
 
 pub fn setup(
     mut commands: Commands,

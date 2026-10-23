@@ -55,9 +55,7 @@ pub fn spawn_dropdown<M: Component>(
             },
             BackgroundColor(theme.bg_surface),
             BorderColor::all(theme.border),
-            Dropdown {
-                open: initial_open,
-            },
+            Dropdown { open: initial_open },
             marker,
         ))
         .with_children(|root| {
@@ -77,7 +75,11 @@ pub fn spawn_dropdown<M: Component>(
             ))
             .with_children(|header| {
                 header.spawn((
-                    Text::new(if initial_open { CHEVRON_OPEN } else { CHEVRON_CLOSED }),
+                    Text::new(if initial_open {
+                        CHEVRON_OPEN
+                    } else {
+                        CHEVRON_CLOSED
+                    }),
                     TextFont {
                         font_size: theme.size_body,
                         ..default()

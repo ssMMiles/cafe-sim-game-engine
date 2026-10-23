@@ -8,9 +8,7 @@ mod widgets;
 pub use anchors::{UiAnchors, setup_ui_anchors};
 pub use checkbox::{Checkbox, CheckboxPlugin, spawn_checkbox};
 pub use dropdown::{DropdownPlugin, spawn_dropdown};
-pub use text_input::{
-    TextInput, TextInputPlugin, clear_focus, spawn_text_input,
-};
+pub use text_input::{TextInput, TextInputPlugin, clear_focus, spawn_text_input};
 pub use theme::UiTheme;
 pub use widgets::{ButtonVariant, UiExt, update_interactive_visuals};
 

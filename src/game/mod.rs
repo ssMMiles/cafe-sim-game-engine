@@ -155,10 +155,7 @@ impl Plugin for SimulationPlugin {
             OnEnter(PauseMenuState::AddPlugin),
             (cleanup_pause_menu, setup_pause_add_plugin),
         );
-        app.add_systems(
-            OnExit(PauseMenuState::AddPlugin),
-            cleanup_pause_add_plugin,
-        );
+        app.add_systems(OnExit(PauseMenuState::AddPlugin), cleanup_pause_add_plugin);
 
         app.add_systems(
             OnEnter(PauseMenuState::Main),

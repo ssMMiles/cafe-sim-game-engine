@@ -120,7 +120,11 @@ const FIRST_NAMES: &[&str] = &[
 pub fn generate_candidate() -> StaffMember {
     let mut rng = rand::thread_rng();
 
-    let name = FIRST_NAMES.choose(&mut rng).copied().unwrap_or("Pat").to_string();
+    let name = FIRST_NAMES
+        .choose(&mut rng)
+        .copied()
+        .unwrap_or("Pat")
+        .to_string();
     let drink_time_mod = rng.gen_range(-0.5..=0.5);
     let move_speed_mod = rng.gen_range(-0.2..=0.4);
     let friendliness = rng.gen_range(0.0..=1.0);

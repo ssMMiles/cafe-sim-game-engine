@@ -58,30 +58,9 @@ pub fn setup(mut commands: Commands, theme: Res<UiTheme>) {
         .with_children(|root| {
             root.ui_title("New Project", &theme);
 
-            spawn_text_input(
-                root,
-                "Project ID",
-                "",
-                "my-game",
-                IdInput,
-                &theme,
-            );
-            spawn_text_input(
-                root,
-                "Display Name",
-                "",
-                "My Game",
-                NameInput,
-                &theme,
-            );
-            spawn_text_input(
-                root,
-                "Start World",
-                "",
-                "default",
-                WorldInput,
-                &theme,
-            );
+            spawn_text_input(root, "Project ID", "", "my-game", IdInput, &theme);
+            spawn_text_input(root, "Display Name", "", "My Game", NameInput, &theme);
+            spawn_text_input(root, "Start World", "", "default", WorldInput, &theme);
 
             spawn_dropdown(root, "Plugins", false, PluginsDropdown, &theme, |body| {
                 if plugin_ids.is_empty() {
@@ -101,27 +80,25 @@ pub fn setup(mut commands: Commands, theme: Res<UiTheme>) {
                 }
             });
 
-            root.spawn((
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    margin: UiRect::top(Val::Px(theme.pad_lg)),
-                    ..default()
-                },
-            ))
-            .with_children(|row| {
-                row.ui_button(
-                    "Create",
-                    CreateAction::Create,
-                    ButtonVariant::Primary,
-                    &theme,
-                );
-                row.ui_button(
-                    "Cancel",
-                    CreateAction::Cancel,
-                    ButtonVariant::Danger,
-                    &theme,
-                );
-            });
+            root.spawn((Node {
+                flex_direction: FlexDirection::Row,
+                margin: UiRect::top(Val::Px(theme.pad_lg)),
+                ..default()
+            },))
+                .with_children(|row| {
+                    row.ui_button(
+                        "Create",
+                        CreateAction::Create,
+                        ButtonVariant::Primary,
+                        &theme,
+                    );
+                    row.ui_button(
+                        "Cancel",
+                        CreateAction::Cancel,
+                        ButtonVariant::Danger,
+                        &theme,
+                    );
+                });
 
             root.spawn((
                 Text::new(""),
@@ -160,7 +137,10 @@ pub fn handle_actions(
                 return;
             }
             CreateAction::Create => {
-                let id = id_q.single().map(|t| t.value.trim().to_owned()).unwrap_or_default();
+                let id = id_q
+                    .single()
+                    .map(|t| t.value.trim().to_owned())
+                    .unwrap_or_default();
                 let name = name_q
                     .single()
                     .map(|t| t.value.trim().to_owned())
@@ -226,12 +206,7 @@ pub fn handle_actions(
     }
 }
 
-fn validate(
-    id: &str,
-    _name: &str,
-    _world: &str,
-    registry: &ProjectRegistry,
-) -> Result<(), String> {
+fn validate(id: &str, _name: &str, _world: &str, registry: &ProjectRegistry) -> Result<(), String> {
     if id.is_empty() {
         return Err("Project ID is required.".into());
     }
@@ -257,4 +232,3 @@ fn set_status(
         text_color.0 = color;
     }
 }
-

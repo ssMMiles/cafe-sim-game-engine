@@ -519,7 +519,12 @@ pub fn top_up_gpu_bake(
             chunk_x, chunk_y, total_strips, config.dispatch_strip_rows, remaining,
         );
 
-        dispatch_chunk(entry, config.dispatch_strip_rows, &mut buffers, &mut pending);
+        dispatch_chunk(
+            entry,
+            config.dispatch_strip_rows,
+            &mut buffers,
+            &mut pending,
+        );
 
         // The chunk job we just pushed is the last one in the vec.
         let chunk_job = pending.jobs.last().unwrap();

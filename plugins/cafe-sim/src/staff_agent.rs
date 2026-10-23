@@ -465,9 +465,12 @@ fn serve(
     ));
 
     cust.state = CustomerState::Served;
-    commands
-        .entity(customer)
-        .insert((ServedTimer { remaining: SERVED_HOLD_SECS }, HappyFace));
+    commands.entity(customer).insert((
+        ServedTimer {
+            remaining: SERVED_HOLD_SECS,
+        },
+        HappyFace,
+    ));
 }
 
 // ----------------------------------------------------------------------------

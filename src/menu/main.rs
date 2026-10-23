@@ -42,7 +42,9 @@ pub fn setup_main_menu(
 
             if registry.projects.is_empty() {
                 parent.spawn((
-                    Text::new("No projects found in `projects/`. Create a project.toml to get started."),
+                    Text::new(
+                        "No projects found in `projects/`. Create a project.toml to get started.",
+                    ),
                     TextFont {
                         font_size: theme.size_body,
                         ..default()

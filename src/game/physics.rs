@@ -1,9 +1,9 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use crate::game::world::terrain::HeightmapData;
 pub use engine_api::CharacterState;
 use engine_api::{InputLock, MovementMode, Player, PlayerCamera, PlayerCollider, UserSettings};
-use crate::game::world::terrain::HeightmapData;
 
 // Physics constants
 const GRAVITY: f32 = 19.6;

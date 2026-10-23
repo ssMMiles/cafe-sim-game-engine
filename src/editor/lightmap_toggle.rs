@@ -5,10 +5,7 @@ use crate::game::world::baking::BakedSun;
 use crate::game::world::terrain::material::TerrainMaterial;
 use crate::settings::UserSettings;
 
-pub fn toggle_lightmap_mode(
-    input: Res<ButtonInput<KeyCode>>,
-    mut settings: ResMut<UserSettings>,
-) {
+pub fn toggle_lightmap_mode(input: Res<ButtonInput<KeyCode>>, mut settings: ResMut<UserSettings>) {
     let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
     if shift && input.just_pressed(KeyCode::KeyL) {
         settings.toggle_use_lightmap();

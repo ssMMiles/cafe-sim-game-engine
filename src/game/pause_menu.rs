@@ -11,11 +11,7 @@ use crate::{
         self,
         objects::{PlacedObject, PlacedObjectRegistry},
         streaming::StreamingState,
-        terrain::{
-            TerrainChunk,
-            bootstrap::TerrainSetupMarker,
-            storage::WorldConfig,
-        },
+        terrain::{TerrainChunk, bootstrap::TerrainSetupMarker, storage::WorldConfig},
     },
     projects::{self, ActiveProject, ProjectRegistry},
     settings::{
@@ -156,9 +152,7 @@ pub fn handle_pause_input(
                 sim_next_state.set(SimulationState::Paused);
             }
             SimulationState::Paused => match current_menu_state.get() {
-                PauseMenuState::Settings
-                | PauseMenuState::AddWorld
-                | PauseMenuState::AddPlugin => {
+                PauseMenuState::Settings | PauseMenuState::AddWorld | PauseMenuState::AddPlugin => {
                     menu_next_state.set(PauseMenuState::Main);
                 }
                 PauseMenuState::Main => {
@@ -248,45 +242,38 @@ pub fn setup_editor_pause_menu(
                     },
                 );
 
-                spawn_dropdown(
-                    parent,
-                    "Plugins",
-                    false,
-                    PluginsDropdown,
-                    &theme,
-                    |body| {
-                        if active.0.plugins.is_empty() {
-                            body.spawn((
-                                Text::new("(none — add one to enable scripted behavior)"),
-                                TextFont {
-                                    font_size: theme.size_caption,
-                                    ..default()
-                                },
-                                TextColor(theme.text_dim),
-                                Node {
-                                    margin: UiRect::bottom(Val::Px(theme.pad_sm)),
-                                    ..default()
-                                },
-                            ));
-                        } else {
-                            for plugin_id in &active.0.plugins {
-                                body.ui_button(
-                                    &format!("- {plugin_id}"),
-                                    PauseMenuButton::RemovePlugin(plugin_id.clone()),
-                                    ButtonVariant::Primary,
-                                    &theme,
-                                );
-                            }
+                spawn_dropdown(parent, "Plugins", false, PluginsDropdown, &theme, |body| {
+                    if active.0.plugins.is_empty() {
+                        body.spawn((
+                            Text::new("(none — add one to enable scripted behavior)"),
+                            TextFont {
+                                font_size: theme.size_caption,
+                                ..default()
+                            },
+                            TextColor(theme.text_dim),
+                            Node {
+                                margin: UiRect::bottom(Val::Px(theme.pad_sm)),
+                                ..default()
+                            },
+                        ));
+                    } else {
+                        for plugin_id in &active.0.plugins {
+                            body.ui_button(
+                                &format!("- {plugin_id}"),
+                                PauseMenuButton::RemovePlugin(plugin_id.clone()),
+                                ButtonVariant::Primary,
+                                &theme,
+                            );
                         }
+                    }
 
-                        body.ui_button(
-                            "+ Add Plugin",
-                            PauseMenuButton::OpenAddPlugin,
-                            ButtonVariant::Primary,
-                            &theme,
-                        );
-                    },
-                );
+                    body.ui_button(
+                        "+ Add Plugin",
+                        PauseMenuButton::OpenAddPlugin,
+                        ButtonVariant::Primary,
+                        &theme,
+                    );
+                });
             }
 
             parent.ui_button(
@@ -390,14 +377,7 @@ pub fn setup_pause_add_world(mut commands: Commands, theme: Res<UiTheme>) {
         ))
         .with_children(|parent| {
             parent.ui_title("ADD WORLD", &theme);
-            spawn_text_input(
-                parent,
-                "World ID",
-                "",
-                "my-world",
-                AddWorldIdInput,
-                &theme,
-            );
+            spawn_text_input(parent, "World ID", "", "my-world", AddWorldIdInput, &theme);
 
             parent
                 .spawn((Node {
@@ -613,11 +593,7 @@ pub fn handle_pause_menu(
                     }
                 }
 
-                if let Some(slot) = registry
-                    .projects
-                    .iter_mut()
-                    .find(|m| m.id == active.0.id)
-                {
+                if let Some(slot) = registry.projects.iter_mut().find(|m| m.id == active.0.id) {
                     slot.plugins = active.0.plugins.clone();
                 }
 
@@ -636,7 +612,10 @@ pub fn handle_pause_menu(
                     }
                     let _ = world.try_run_schedule(OnEnter(PauseMenuState::Main));
                 });
-                log::info!("Removed plugin '{plugin_id}' from project '{}'", active.0.id);
+                log::info!(
+                    "Removed plugin '{plugin_id}' from project '{}'",
+                    active.0.id
+                );
             }
         }
     }
@@ -702,11 +681,7 @@ pub fn handle_add_world(
 
                 // Mirror the change into ProjectRegistry so the main menu also
                 // sees the new world if the user heads back.
-                if let Some(slot) = registry
-                    .projects
-                    .iter_mut()
-                    .find(|m| m.id == active.0.id)
-                {
+                if let Some(slot) = registry.projects.iter_mut().find(|m| m.id == active.0.id) {
                     slot.worlds = active.0.worlds.clone();
                 }
 
@@ -751,11 +726,7 @@ pub fn handle_add_plugin(
                     }
                 }
 
-                if let Some(slot) = registry
-                    .projects
-                    .iter_mut()
-                    .find(|m| m.id == active.0.id)
-                {
+                if let Some(slot) = registry.projects.iter_mut().find(|m| m.id == active.0.id) {
                     slot.plugins = active.0.plugins.clone();
                 }
 

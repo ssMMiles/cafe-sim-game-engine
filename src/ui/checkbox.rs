@@ -57,11 +57,7 @@ pub fn spawn_checkbox<M: Component>(
                     ..default()
                 },
                 BorderColor::all(theme.text_dim),
-                BackgroundColor(if checked {
-                    theme.positive
-                } else {
-                    Color::NONE
-                }),
+                BackgroundColor(if checked { theme.positive } else { Color::NONE }),
                 CheckboxBox,
             ));
             row.spawn((
@@ -86,10 +82,7 @@ impl Plugin for CheckboxPlugin {
 }
 
 fn handle_checkbox_clicks(
-    mut interactions: Query<
-        (&Interaction, &mut Checkbox),
-        (Changed<Interaction>, With<Button>),
-    >,
+    mut interactions: Query<(&Interaction, &mut Checkbox), (Changed<Interaction>, With<Button>)>,
 ) {
     for (interaction, mut checkbox) in &mut interactions {
         if *interaction == Interaction::Pressed {

@@ -48,8 +48,8 @@ use delivery::{
 };
 use grid::{PLAYER_SPAWN, draw_floor_grid};
 use main_menu::{
-    CafePhase, MainMenuRoot, build_main_menu, handle_main_menu_buttons, in_main_menu,
-    in_playing, in_slot_picker,
+    CafePhase, MainMenuRoot, build_main_menu, handle_main_menu_buttons, in_main_menu, in_playing,
+    in_slot_picker,
 };
 use menus::{ActiveMenu, close_menus_when_paused};
 use pause_menu::{GamePaused, handle_pause_buttons, sync_pause_menu_ui, toggle_pause_on_escape};
