@@ -66,13 +66,15 @@ pub fn save_terrain(
         return;
     };
 
-    if registry.dirty_chunks.is_empty() {
-        info!("No terrain changes to save");
-        return;
-    }
-
+    // Note: an empty dirty set is *not* an early return. `world.meta` carries
+    // the level environment and per-plugin data, which can change without any
+    // chunk being touched, so every save request rewrites it.
     let dirty: Vec<(i32, i32)> = registry.dirty_chunks.drain().collect();
-    info!("Saving {} dirty chunk(s) (background)", dirty.len(),);
+    if dirty.is_empty() {
+        info!("No terrain changes; writing world metadata only");
+    } else {
+        info!("Saving {} dirty chunk(s) (background)", dirty.len());
+    }
 
     let chunks: Vec<ChunkData> = dirty
         .iter()

@@ -21,8 +21,14 @@ use std::{
 // File format constants
 const WORLD_MAGIC: &[u8; 4] = b"TWNM";
 const CHUNK_MAGIC: &[u8; 4] = b"TCNK";
-// Version 2: chunk_x/chunk_y changed from u32 to i32 for infinite terrain support.
-const FORMAT_VERSION: u32 = 2;
+/// Chunk (`.terrain`) format version. Version 2: chunk_x/chunk_y changed from
+/// u32 to i32 for infinite terrain support. Unchanged by the level-save work —
+/// the chunk payload itself did not change.
+const CHUNK_FORMAT_VERSION: u32 = 2;
+/// `world.meta` format version. Version 3 adds [`EnvironmentData`],
+/// `required_plugins`, and `plugin_data`. Version 2 is still readable and is
+/// upgraded in memory (see [`legacy`]).
+const WORLD_FORMAT_VERSION: u32 = 3;
 
 // ============================================================================
 // Serializable Data Structures
@@ -44,6 +50,92 @@ pub struct WorldMetadata {
     pub chunk_index: Vec<ChunkIndexEntry>,
     /// Last save timestamp (Unix epoch seconds)
     pub last_saved: u64,
+    /// Global lighting for this level.
+    pub environment: EnvironmentData,
+    /// Plugin ids referenced by script bindings in this level. Informational:
+    /// the project manifest still decides what loads. A level that names a
+    /// plugin the active project does not load produces a warning and nothing
+    /// more — the engine never edits the project manifest on a level's behalf.
+    pub required_plugins: Vec<String>,
+    /// Opaque per-plugin level data, written and read by the plugin itself.
+    pub plugin_data: Vec<PluginLevelData>,
+}
+
+/// Global lighting saved with the level.
+///
+/// Defaults match the values `game::world::setup` previously hard-coded, so a
+/// world with no saved environment (or a v2 world) looks exactly as before.
+#[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+pub struct EnvironmentData {
+    /// Sun orientation as a quaternion, xyzw. Drives the `BakedSun` entity's
+    /// transform, which the lightmap baker reads for its sun direction.
+    pub sun_rotation: [f32; 4],
+    /// Sun position. Purely cosmetic (the debug cone marker sits here); the
+    /// bake and the directional light only use the rotation.
+    pub sun_position: [f32; 3],
+    /// Linear RGB.
+    pub sun_color: [f32; 3],
+    /// Illuminance for the real-time `DirectionalLight` used when baked
+    /// lightmaps are toggled off.
+    pub sun_illuminance: f32,
+    /// Linear RGB.
+    pub ambient_color: [f32; 3],
+    pub ambient_brightness: f32,
+}
+
+/// The sun placement `game::world::setup` has always used: high and to one
+/// side, aimed at the origin.
+pub const DEFAULT_SUN_POSITION: [f32; 3] = [20.0, 120.0, -80.0];
+
+impl Default for EnvironmentData {
+    fn default() -> Self {
+        let pos = bevy::math::Vec3::from(DEFAULT_SUN_POSITION);
+        let dir = (bevy::math::Vec3::ZERO - pos).normalize();
+        let rot = Quat::from_rotation_arc(bevy::math::Vec3::NEG_Z, dir);
+        Self {
+            sun_rotation: [rot.x, rot.y, rot.z, rot.w],
+            sun_position: DEFAULT_SUN_POSITION,
+            sun_color: [1.0, 1.0, 1.0],
+            sun_illuminance: 10_000.0,
+            ambient_color: [0.9, 0.9, 1.0],
+            ambient_brightness: 80.0,
+        }
+    }
+}
+
+impl EnvironmentData {
+    pub fn sun_transform(&self) -> Transform {
+        Transform {
+            translation: Vec3::from(self.sun_position),
+            rotation: Quat::from_xyzw(
+                self.sun_rotation[0],
+                self.sun_rotation[1],
+                self.sun_rotation[2],
+                self.sun_rotation[3],
+            ),
+            ..default()
+        }
+    }
+
+    pub fn sun_color(&self) -> Color {
+        Color::linear_rgb(self.sun_color[0], self.sun_color[1], self.sun_color[2])
+    }
+
+    pub fn ambient_color(&self) -> Color {
+        Color::linear_rgb(
+            self.ambient_color[0],
+            self.ambient_color[1],
+            self.ambient_color[2],
+        )
+    }
+}
+
+/// Opaque level-scoped blob belonging to one plugin.
+#[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+pub struct PluginLevelData {
+    /// Plugin id (directory name under `plugins/`).
+    pub plugin: String,
+    pub data: Vec<u8>,
 }
 
 /// Terrain configuration (serializable version of TerrainConfig)
@@ -155,6 +247,46 @@ pub struct VertexMaterial {
 }
 
 // ============================================================================
+// Legacy (v2) world metadata
+// ============================================================================
+
+/// The v2 `world.meta` shape, retained so existing worlds keep loading.
+/// Parsed by [`parse_world_meta_from_bytes`] and upgraded in memory; never
+/// written.
+pub mod legacy {
+    use super::{ChunkIndexEntry, EnvironmentData, TerrainConfigData, WorldMetadata};
+    use rkyv::{Archive, Deserialize, Serialize};
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct WorldMetadataV2 {
+        pub version: u32,
+        pub world_id: String,
+        pub terrain_config: TerrainConfigData,
+        pub chunks_x: u32,
+        pub chunks_y: u32,
+        pub chunk_index: Vec<ChunkIndexEntry>,
+        pub last_saved: u64,
+    }
+
+    /// v2 worlds had no stored environment, so they adopt the defaults —
+    /// which are exactly the values the engine used to hard-code.
+    pub fn upgrade(old: WorldMetadataV2) -> WorldMetadata {
+        WorldMetadata {
+            version: super::WORLD_FORMAT_VERSION,
+            world_id: old.world_id,
+            terrain_config: old.terrain_config,
+            chunks_x: old.chunks_x,
+            chunks_y: old.chunks_y,
+            chunk_index: old.chunk_index,
+            last_saved: old.last_saved,
+            environment: EnvironmentData::default(),
+            required_plugins: Vec::new(),
+            plugin_data: Vec::new(),
+        }
+    }
+}
+
+// ============================================================================
 // Bevy Runtime Resources and Components
 // ============================================================================
 
@@ -258,7 +390,7 @@ pub fn serialize_world(world: &WorldMetadata) -> Result<Vec<u8>, StorageError> {
 
     let mut out = Vec::with_capacity(4 + 4 + 4 + rkyv_bytes.len() + 4);
     out.extend_from_slice(WORLD_MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&WORLD_FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(&rkyv_bytes);
     out.extend_from_slice(&checksum.to_le_bytes());
@@ -274,7 +406,7 @@ pub fn serialize_chunk(chunk: &ChunkData) -> Result<Vec<u8>, StorageError> {
 
     let mut out = Vec::with_capacity(4 + 4 + 4 + 4 + 4 + rkyv_bytes.len() + 4);
     out.extend_from_slice(CHUNK_MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&CHUNK_FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&chunk.chunk_x.to_le_bytes());
     out.extend_from_slice(&chunk.chunk_y.to_le_bytes());
     out.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
@@ -317,9 +449,9 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != FORMAT_VERSION {
+    if version != CHUNK_FORMAT_VERSION {
         return Err(StorageError::VersionMismatch {
-            expected: FORMAT_VERSION,
+            expected: CHUNK_FORMAT_VERSION,
             found: version,
         });
     }
@@ -351,6 +483,7 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
 }
 
 /// Parse world metadata from a raw byte slice (same binary format as `load_world`).
+/// Accepts v2 (upgraded in memory) and v3.
 /// Used by the async `WorldMetaLoader` which reads bytes via Bevy's `AssetServer`.
 pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, StorageError> {
     use std::io::Read as StdRead;
@@ -365,9 +498,9 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != FORMAT_VERSION {
+    if version != 2 && version != WORLD_FORMAT_VERSION {
         return Err(StorageError::VersionMismatch {
-            expected: FORMAT_VERSION,
+            expected: WORLD_FORMAT_VERSION,
             found: version,
         });
     }
@@ -384,6 +517,15 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
     let stored_checksum = u32::from_le_bytes(checksum_bytes);
     if stored_checksum != crc32fast::hash(&data) {
         return Err(StorageError::ChecksumMismatch);
+    }
+
+    if version == 2 {
+        let archived = rkyv::access::<legacy::ArchivedWorldMetadataV2, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::WorldMetadataV2 =
+            rkyv::deserialize::<legacy::WorldMetadataV2, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade(old));
     }
 
     let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
@@ -422,7 +564,7 @@ pub fn create_world_metadata(
     }
 
     WorldMetadata {
-        version: FORMAT_VERSION,
+        version: WORLD_FORMAT_VERSION,
         world_id,
         terrain_config: TerrainConfigData {
             grid_width,
@@ -435,6 +577,9 @@ pub fn create_world_metadata(
         chunks_y,
         chunk_index,
         last_saved: 0,
+        environment: EnvironmentData::default(),
+        required_plugins: Vec::new(),
+        plugin_data: Vec::new(),
     }
 }
 
@@ -484,6 +629,104 @@ mod tests {
         assert_eq!(loaded.world_id, metadata.world_id);
         assert_eq!(loaded.chunks_x, metadata.chunks_x);
         assert_eq!(loaded.chunks_y, metadata.chunks_y);
+    }
+
+    #[test]
+    fn test_world_v3_environment_and_plugin_data_roundtrip() {
+        let mut metadata = create_world_metadata("env".to_string(), 128, 128, 64, (1.0, 1.0), 10.0);
+        metadata.environment = EnvironmentData {
+            sun_rotation: [0.1, 0.2, 0.3, 0.9],
+            sun_position: [1.0, 50.0, -2.0],
+            sun_color: [0.9, 0.8, 0.7],
+            sun_illuminance: 12_345.0,
+            ambient_color: [0.1, 0.2, 0.3],
+            ambient_brightness: 42.0,
+        };
+        metadata.required_plugins = vec!["cafe-sim".to_string()];
+        metadata.plugin_data = vec![PluginLevelData {
+            plugin: "cafe-sim".to_string(),
+            data: vec![1, 2, 3, 4],
+        }];
+
+        let bytes = serialize_world(&metadata).unwrap();
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
+
+        assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
+        assert_eq!(loaded.environment.sun_illuminance, 12_345.0);
+        assert_eq!(loaded.environment.ambient_brightness, 42.0);
+        assert_eq!(loaded.environment.sun_position, [1.0, 50.0, -2.0]);
+        assert_eq!(loaded.required_plugins, vec!["cafe-sim".to_string()]);
+        assert_eq!(loaded.plugin_data.len(), 1);
+        assert_eq!(loaded.plugin_data[0].plugin, "cafe-sim");
+        assert_eq!(loaded.plugin_data[0].data, vec![1, 2, 3, 4]);
+    }
+
+    /// Guard against breaking the existing `cafe` / `default` worlds: a v2
+    /// `world.meta` must still load, keeping its chunk index and picking up
+    /// the default environment.
+    #[test]
+    fn test_world_v2_upgrades_to_v3() {
+        let old = legacy::WorldMetadataV2 {
+            version: 2,
+            world_id: "legacy".to_string(),
+            terrain_config: TerrainConfigData {
+                grid_width: 256,
+                grid_height: 256,
+                tile_size_x: 1.0,
+                tile_size_y: 1.0,
+                height_scale: 10.0,
+            },
+            chunks_x: 4,
+            chunks_y: 4,
+            chunk_index: vec![ChunkIndexEntry {
+                chunk_x: -1,
+                chunk_y: 2,
+                state: ChunkState::FullyOverwritten,
+            }],
+            last_saved: 99,
+        };
+
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(WORLD_MAGIC);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
+
+        assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
+        assert_eq!(loaded.world_id, "legacy");
+        assert_eq!(loaded.chunks_x, 4);
+        assert_eq!(loaded.last_saved, 99);
+        assert_eq!(loaded.chunk_index.len(), 1);
+        assert_eq!(loaded.chunk_index[0].chunk_x, -1);
+        assert_eq!(loaded.chunk_index[0].state, ChunkState::FullyOverwritten);
+        // Upgraded worlds adopt the engine's historical hard-coded lighting.
+        let d = EnvironmentData::default();
+        assert_eq!(loaded.environment.ambient_brightness, d.ambient_brightness);
+        assert_eq!(loaded.environment.sun_position, d.sun_position);
+        assert!(loaded.required_plugins.is_empty());
+        assert!(loaded.plugin_data.is_empty());
+    }
+
+    /// The chunk payload did not change in v3; `.terrain` files stay at
+    /// version 2 so existing chunk files keep loading.
+    #[test]
+    fn test_chunk_format_version_unchanged() {
+        let chunk = ChunkData {
+            chunk_x: 0,
+            chunk_y: 0,
+            width: 4,
+            height: 4,
+            height_data: HeightData::UseBase,
+            material_data: MaterialData::Uniform,
+        };
+        let bytes = serialize_chunk(&chunk).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
+        assert!(parse_chunk_from_bytes(&bytes).is_ok());
     }
 
     #[test]

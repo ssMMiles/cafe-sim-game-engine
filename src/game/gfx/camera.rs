@@ -1,11 +1,9 @@
 use std::f32::consts::PI;
 
 use crate::{
-    editor::MeshSelectorOpen,
+    editor::{MeshSelectorOpen, ScriptPanelOpen},
     game::{
-        GameEntity,
-        gfx::post_process::EdgeDetectionSettings,
-        simulation::Player,
+        GameEntity, gfx::post_process::EdgeDetectionSettings, simulation::Player,
         world::terrain::HeightmapData,
     },
     settings::{CameraView, InputLock, MovementMode, UserSettings, setting_ranges},
@@ -328,13 +326,15 @@ pub fn adjust_camera_distance(
     mut settings: ResMut<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
     selector: Res<MeshSelectorOpen>,
+    script_panel: Res<ScriptPanelOpen>,
 ) {
-    // Yield scroll to the mesh-selector panel when it is open.
-    // Shift+scroll is reserved for placement scale adjustment.
+    // Yield scroll to whichever editor strip is open (mesh catalog or scripts
+    // panel). Shift+scroll is reserved for placement scale adjustment.
     if settings.camera_view != CameraView::ThirdPerson
         || input.pressed(KeyCode::ShiftLeft)
         || input.pressed(KeyCode::ShiftRight)
         || selector.0
+        || script_panel.0
     {
         return;
     }

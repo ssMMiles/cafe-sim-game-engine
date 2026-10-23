@@ -44,12 +44,22 @@ AppState::Starting → AppState::MainMenu → AppState::InGame
 
 System sets enforce execution order: `SimSet::InGame` > `SimSet::Running` / `SimSet::Paused`.
 
-## Module Structure
+## Repository Layout
 
 ```
+crates/engine-api/      # Shared crate linked by host AND plugin dylibs (stable TypeIds)
+│   ├── lib.rs          # DynamicPlugin trait, add! macro, ScriptOwned, ABI version
+│   ├── script.rs       # ScriptBinding(s), PropValue, ScriptSchema, ScriptRegistry, LevelDataHooks
+│   └── toon_material.rs
+plugins/                # Dynamic plugin crates (dylibs): cafe-sim, example, example2
+projects/               # Project manifests: projects/{id}/project.toml (plugins, worlds, start_world)
+docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save system, v3 format)
 src/
 ├── lib.rs              # App init, plugin registration, custom "world" asset source
 ├── main.rs             # Binary entry point
+├── projects.rs         # Project discovery (project.toml), ActiveProject resource
+├── script_host.rs      # Dylib loader, hot-reload (Shift+R), script hydration/dehydration,
+│                       #   plugin level-data save/load hooks
 ├── settings.rs         # UserSettings resource, SliderSetting trait
 ├── storage/            # Platform-agnostic async file I/O (native + WASM)
 ├── ui/                 # UiTheme, UiAnchors, UiExt widget trait
@@ -59,38 +69,47 @@ src/
 ├── menu/               # Main menu screen + navigation
 │   ├── mod.rs          # MenuPlugin, Camera2d setup
 │   └── main.rs         # Start Game / Settings buttons
+├── editor/             # EditorPlugin — all authoring-only systems (F1 toggles Editor/Gameplay)
+│   ├── mod.rs          # EditorMode state, EditorSet system sets
+│   ├── mesh_selector.rs    # Placement catalog (Tab): meshes + lights + plugin presets
+│   ├── object_placement.rs # Placement preview/config, PlacedPicker, place/delete under crosshair
+│   ├── script_binding.rs   # Scripts panel (K): attach/detach script bindings, stamp mode
+│   ├── terrain_edit.rs     # Terrain brush (raise/lower, Shift+G toggle)
+│   ├── terrain_save.rs     # Shift+S save trigger
+│   ├── baking_trigger.rs   # Shift+B bake trigger
+│   ├── debug_hud.rs        # HUD panels (FPS, keybinds, position, interaction)
+│   ├── lightmap_toggle.rs
+│   └── physics_debug.rs    # Gizmo toggle (Shift+P)
 └── game/               # Core simulation (SimulationPlugin)
     ├── mod.rs           # Plugin orchestration, system set config
     ├── simulation.rs    # Player spawn, world setup, cleanup
     ├── physics.rs       # CharacterState, kinematic controller (avian3d)
     ├── animation.rs     # AnimationGraph, state machine (Idle/Run/Jump)
     ├── gltf_loading.rs  # Scene loading, toon material conversion, interactions
-    ├── ui_displays.rs   # HUD panels (FPS, keybinds, position, interaction)
-    ├── pause_menu.rs    # Pause overlay, settings submenu, generic sliders
+    ├── pause_menu.rs    # Pause overlay, settings submenu, plugin add/remove
     ├── gfx/             # Rendering pipeline
     │   ├── camera.rs    # PlayerCamera, render-to-texture (1920x1080 HDR)
     │   ├── toon_material.rs  # ToonMaterial (StandardMaterial extension + lightmap)
     │   ├── post_process.rs   # Edge detection post-processing
-    │   ├── crosshair.rs
-    │   └── physics_debug.rs  # Gizmo toggle (Shift+P)
+    │   ├── outline.rs
+    │   └── crosshair.rs
     └── world/           # WorldPlugin - terrain, objects, baking, streaming
-        ├── mod.rs       # WorldPlugin, sun/ambient light setup
+        ├── mod.rs       # WorldPlugin, sun/ambient setup, apply_environment, missing-plugin warnings
         ├── sky.rs       # SkyDomeMaterial, 4-band toon gradient
         ├── streaming.rs # Chunk load/unload by player proximity
         ├── chunk_assets.rs  # Custom asset loaders (.terrain, .objects, world.meta)
-        ├── objects.rs   # PlacedObjectRegistry, spawn/despawn, persistence
-        ├── edit_mode.rs # Placement preview, object placement (LMB)
-        ├── mesh_selector.rs # Mesh catalog panel, scroll-to-select
+        ├── objects.rs   # PlacedObjectRegistry, PlacedEntityRecord/PlacedKind, spawn/despawn,
+        │                #   persistence, light gizmos (legacy module reads v2 files)
         ├── terrain/
         │   ├── types.rs      # TerrainChunk, HeightmapData (sparse HashMap)
         │   ├── constants.rs  # CHUNK_SIZE=65, TILE_SIZE=1.0
-        │   ├── storage.rs    # rkyv WorldMetadata/ChunkData, quantized heights
+        │   ├── storage.rs    # rkyv WorldMetadata (v3: environment, required_plugins,
+        │   │                 #   plugin_data) / ChunkData, quantized heights, legacy v2 readers
         │   ├── bootstrap.rs  # Two-stage async terrain init
         │   ├── mesh.rs       # LOD mesh generation (4 levels), skirts
         │   ├── material.rs   # TerrainMaterial (stochastic no-tile sampling)
         │   ├── lod.rs        # LOD selection by camera distance
-        │   ├── edit.rs       # Terrain brush (raise/lower, Shift+G toggle)
-        │   ├── save.rs       # Dirty chunk persistence (Shift+S)
+        │   ├── save.rs       # Dirty chunk + metadata persistence (always rewrites world.meta)
         │   └── reconcile.rs  # Mesh-to-storage consistency
         └── baking/
             ├── mod.rs        # BakeConfig, BakingPlugin (Shift+B trigger)
@@ -100,6 +119,27 @@ src/
             ├── gpu.rs        # GPU compute pipeline (native only)
             └── uv_unwrap.rs  # xatlas UV2 generation
 ```
+
+## Dynamic Plugins & Scripts
+
+- Plugins are dylib crates under `plugins/` implementing `DynamicPlugin` (engine-api). `cargo run` does **not** build them — use `cargo build --workspace` first, or the loader silently finds no dylib.
+- Projects (`projects/{id}/project.toml`) declare which plugins load; `script_host.rs` loads/hot-reloads dylibs (Shift+R or mtime change), each with its own `PluginSchedule`.
+- Plugins register named *scripts* (factories) and optional `LevelDataHooks` in `ScriptRegistry`. The host hydrates `ScriptBindings` on placed entities by calling the factory and recording inserted `ComponentId`s via archetype diff; dehydration removes exactly those on unload/reload.
+- `ENGINE_SCRIPTS_ABI_VERSION` (currently 3) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
+
+## Level Persistence (see docs/LEVEL_SAVE_DESIGN.md)
+
+```
+worlds/{id}/
+  world.meta                   # v3 (WORLD_FORMAT_VERSION): terrain config + chunk index
+                               #   + EnvironmentData (sun/ambient) + required_plugins + plugin_data
+  chunks/chunk_X_Y.terrain     # v2 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc
+  chunks/chunk_X_Y.objects     # v3: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty)
+                               #   + Vec<ScriptBinding> with typed PropValue props
+  chunks/chunk_X_Y_lightmap.png, objects/obj_{id}_lightmap.png
+```
+
+All rkyv; v2 files are read via `legacy` modules and upgraded in memory, rewritten as v3 on next save. Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
 
 ## Shaders (`assets/shaders/`)
 
@@ -118,11 +158,16 @@ src/
 | WASD | Movement |
 | Space | Jump |
 | Escape | Pause menu |
+| F1 | Toggle Editor / Gameplay mode |
+| Shift+R | Force hot-reload all plugins |
 | Shift+E | Toggle edit mode |
-| Tab | Toggle mesh selector (edit mode) |
-| LMB | Place object (edit mode) / Raise terrain (terrain edit) |
+| Tab | Toggle placement catalog: meshes, lights, plugin presets (edit mode) |
+| K | Toggle scripts panel (edit mode) |
+| Enter / Backspace | Attach / detach selected script to the placed entity under the crosshair (scripts panel open) |
+| LMB | Place selected entry (edit mode) / Raise terrain (terrain edit) |
 | RMB | Lower terrain (terrain edit) |
-| Scroll | Cycle mesh selection (edit mode) |
+| Delete | Delete placed entity under the crosshair, lights included (edit mode) |
+| Scroll | Cycle the open panel's selection (edit mode) |
 | Shift+Scroll | Adjust placement scale |
 | Shift+G | Toggle terrain edit mode |
 | `[` / `]` | Adjust brush size |

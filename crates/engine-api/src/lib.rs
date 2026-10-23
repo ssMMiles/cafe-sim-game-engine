@@ -4,7 +4,12 @@ use std::collections::HashSet;
 /// Re-export so the `add!` macro can reference bevy via `$crate::bevy`.
 pub use bevy;
 
+pub mod script;
 pub mod toon_material;
+pub use script::{
+    LevelDataHooks, PropDef, PropDefault, PropValue, RegisteredScript, ScriptBinding,
+    ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
+};
 pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_lightmap};
 
 // ---------------------------------------------------------------------------
@@ -13,7 +18,10 @@ pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_l
 
 /// ABI version. Bump on any breaking change to [`DynamicPlugin`] or the
 /// generated FFI entry points.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 2;
+///
+/// - 3: added the [`script`] module — [`ScriptRegistry`], [`ScriptBindings`],
+///   and the level-data hooks.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 3;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -491,4 +499,3 @@ impl UserSettings {
         self.use_lightmap = !self.use_lightmap;
     }
 }
-

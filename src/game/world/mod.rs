@@ -16,7 +16,10 @@ use chunk_assets::{
     ChunkDataAsset, ChunkDataLoader, ChunkObjectsAsset, ChunkObjectsLoader, WorldMetaAsset,
     WorldMetaLoader,
 };
-use objects::{PlacedObjectRegistry, PlacementConfig, apply_auto_colliders, save_placed_objects};
+use objects::{
+    PlacedObjectRegistry, PlacementConfig, apply_auto_colliders, draw_light_gizmos,
+    save_placed_objects,
+};
 use streaming::{
     ChunkStreamingConfig, StreamingState, finalize_computed_chunks, launch_chunk_tasks,
     update_streaming_ring,
@@ -66,13 +69,26 @@ impl Plugin for WorldPlugin {
 
         app.add_systems(
             Update,
-            (save_placed_objects, apply_auto_colliders).in_set(WorldSet::InGame),
+            (save_placed_objects, apply_auto_colliders, apply_environment).in_set(WorldSet::InGame),
+        );
+
+        // Light markers are an authoring aid, so they only draw in the editor.
+        app.add_systems(
+            Update,
+            draw_light_gizmos
+                .in_set(WorldSet::InGame)
+                .run_if(in_state(crate::editor::EditorMode::Editor)),
         );
 
         app.init_resource::<PlacedObjectRegistry>();
         app.init_resource::<PlacementConfig>();
     }
 }
+
+/// Marks the yellow cone that visualises the sun's position, so
+/// [`apply_environment`] can keep it in sync with the saved sun.
+#[derive(Component)]
+pub struct SunDebugMarker;
 
 pub fn setup(
     commands: &mut Commands,
@@ -83,32 +99,26 @@ pub fn setup(
 
     terrain::setup(commands);
 
-    // Add ambient light for diffusion
+    // Seed lighting from the environment defaults. Once the world's metadata
+    // finishes loading, `apply_environment` overwrites these with whatever the
+    // level saved; the defaults are the same values the engine used to
+    // hard-code here, so an unsaved world looks identical either way.
+    let env = terrain::storage::EnvironmentData::default();
+
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.9, 0.9, 1.0),
-        brightness: 80.0, // Low fill light; main illumination comes from the directional sun
+        color: env.ambient_color(),
+        brightness: env.ambient_brightness,
         ..default()
     });
 
-    let sun_position = Vec3::new(20.0, 120.0, -80.0);
-
-    // Calculate rotation to point at origin
-    let target = Vec3::new(0.0, 0.0, 0.0);
-    let direction = (target - sun_position).normalize();
-    let sun_rotation = Quat::from_rotation_arc(Vec3::NEG_Z, direction);
-
-    // Add directional light (sunlight)
-    let sun_transform = Transform {
-        translation: sun_position,
-        rotation: sun_rotation,
-        ..default()
-    };
+    let sun_transform = env.sun_transform();
 
     commands.spawn((GameEntity, baking::BakedSun, sun_transform));
 
     // Debug sun position with yellow cone
     commands.spawn((
         GameEntity,
+        SunDebugMarker,
         Mesh3d(meshes.add(Cone::new(1.0, 3.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 1.0, 0.0),      // Bright yellow
@@ -117,19 +127,92 @@ pub fn setup(
             ..Default::default()
         })),
         NotShadowCaster, // Prevent casting shadows
-        Transform {
-            translation: sun_transform.translation,
-            rotation: sun_transform.rotation * Quat::from_rotation_x(-std::f32::consts::PI / 2.0), // Point the cone downwards
-            scale: Vec3::splat(3.0), // Make it bigger
-        },
+        sun_debug_transform(&sun_transform),
     ));
+}
+
+/// The sun cone is modelled pointing up `+Y`, so it needs an extra quarter
+/// turn to point along the sun's forward axis.
+fn sun_debug_transform(sun: &Transform) -> Transform {
+    Transform {
+        translation: sun.translation,
+        rotation: sun.rotation * Quat::from_rotation_x(-std::f32::consts::PI / 2.0),
+        scale: Vec3::splat(3.0),
+    }
+}
+
+/// Apply the level's saved lighting once the world metadata is available.
+///
+/// Runs on `TerrainWorld` insert (world load, and again after `switch_world`
+/// re-runs the terrain bootstrap) and whenever the environment is edited.
+/// Also warns about plugins the level expects but the active project does not
+/// load — by design the engine only warns and never edits the project
+/// manifest on a level's behalf.
+fn apply_environment(
+    terrain_world: Option<Res<terrain::storage::TerrainWorld>>,
+    active: Option<Res<crate::projects::ActiveProject>>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut sun_query: Query<&mut Transform, With<baking::BakedSun>>,
+    mut cone_query: Query<&mut Transform, (With<SunDebugMarker>, Without<baking::BakedSun>)>,
+) {
+    let Some(terrain_world) = terrain_world else {
+        return;
+    };
+    if !terrain_world.is_changed() {
+        return;
+    }
+
+    let env = &terrain_world.metadata.environment;
+
+    ambient.color = env.ambient_color();
+    ambient.brightness = env.ambient_brightness;
+
+    let sun_transform = env.sun_transform();
+    for mut t in sun_query.iter_mut() {
+        *t = sun_transform;
+    }
+    for mut t in cone_query.iter_mut() {
+        *t = sun_debug_transform(&sun_transform);
+    }
+
+    if terrain_world.is_added() {
+        warn_missing_plugins(&terrain_world, active.as_deref());
+    }
+}
+
+/// Log the plugins a level references that the active project does not load.
+/// Script bindings for them stay on their entities, so adding the plugin later
+/// is all that's needed — nothing here mutates the project.
+fn warn_missing_plugins(
+    terrain_world: &terrain::storage::TerrainWorld,
+    active: Option<&crate::projects::ActiveProject>,
+) {
+    let required = &terrain_world.metadata.required_plugins;
+    if required.is_empty() {
+        return;
+    }
+    let loaded: &[String] = active.map(|a| a.0.plugins.as_slice()).unwrap_or(&[]);
+    for plugin in required {
+        if !loaded.iter().any(|p| p == plugin) {
+            log::warn!(
+                "World '{}' references plugin '{}', which the active project does not load. \
+                 Script bindings for it will stay dormant until you add the plugin to the project.",
+                terrain_world.metadata.world_id,
+                plugin
+            );
+        }
+    }
 }
 
 /// Tear down world-scoped resources so the next session can load a fresh
 /// world. Entity despawn (terrain chunks, sun, sky, placed objects, etc.) is
 /// driven by the `GameEntity` cleanup elsewhere; this only clears the
 /// resource-shaped state that would otherwise carry over between projects.
-pub fn destroy(commands: &mut Commands, registry: &mut PlacedObjectRegistry, streaming_state: &mut StreamingState) {
+pub fn destroy(
+    commands: &mut Commands,
+    registry: &mut PlacedObjectRegistry,
+    streaming_state: &mut StreamingState,
+) {
     log::info!("Tearing down the game world");
     terrain::destroy(commands);
     *registry = PlacedObjectRegistry::default();

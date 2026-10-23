@@ -26,11 +26,16 @@ use std::{
 
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
+use engine_api::ScriptRegistry;
 
 #[cfg(not(target_family = "wasm"))]
-use engine_api::AppState;
-#[cfg(not(target_family = "wasm"))]
 use crate::projects::ActiveProject;
+#[cfg(not(target_family = "wasm"))]
+use bevy::ecs::component::ComponentId;
+#[cfg(not(target_family = "wasm"))]
+use engine_api::{AppState, ScriptBindings, ScriptHydrateFn};
+#[cfg(not(target_family = "wasm"))]
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // Schedule
@@ -42,6 +47,63 @@ use crate::projects::ActiveProject;
 pub struct PluginSchedule(pub String);
 
 // ---------------------------------------------------------------------------
+// Hydration bookkeeping
+// ---------------------------------------------------------------------------
+
+/// Marks a placed entity whose [`ScriptBindings`] are not yet fully realised
+/// into plugin components.
+///
+/// Set when the entity spawns, and re-set whenever a plugin is unloaded or
+/// hot-reloaded. It is *not* cleared when a binding names a plugin the project
+/// does not load — that entity simply stays marked, so adding the plugin later
+/// hydrates it on the next frame without a reload.
+///
+/// Defined unconditionally (not behind `cfg(not(wasm))`) so the spawn path in
+/// `world::objects` is platform-independent; on wasm nothing ever consumes it.
+#[derive(Component, Default)]
+pub struct NeedsHydration;
+
+/// Ids of the plugins whose dylibs are actually loaded right now.
+///
+/// Distinct from `ActiveProject.plugins`, which is only what the project
+/// *declares*. A plugin can be declared but absent here because its dylib was
+/// never built (`cargo run` does not build plugin crates), failed its ABI
+/// check, or panicked in `setup`. The editor uses the difference between the
+/// two lists to explain an empty script list instead of just showing nothing.
+#[derive(Resource, Default)]
+pub struct LoadedPluginIds(pub Vec<String>);
+
+/// Records which components a plugin's hydrate fn actually inserted, so the
+/// host can remove exactly those again when the plugin goes away.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Component, Default)]
+struct HydratedScripts(Vec<HydratedScript>);
+
+#[cfg(not(target_family = "wasm"))]
+struct HydratedScript {
+    plugin: String,
+    script: String,
+    /// Components added by the factory call, captured as an archetype diff.
+    component_ids: Vec<ComponentId>,
+}
+
+/// Which plugins have had their level-data `load` hook run for the currently
+/// loaded world, so a hook runs once per (world, plugin) rather than per frame.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Resource, Default)]
+struct AppliedPluginData {
+    world_id: String,
+    plugins: HashSet<String>,
+}
+
+/// `(plugin, script)` pairs already warned about, so an unresolvable binding
+/// logs once instead of every frame. Entries for a plugin are dropped when it
+/// unloads, so a reload that still fails warns again.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Resource, Default)]
+struct ReportedMissingScripts(HashSet<(String, String)>);
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -49,16 +111,34 @@ pub struct ScriptHostPlugin;
 
 impl Plugin for ScriptHostPlugin {
     fn build(&self, app: &mut App) {
+        // The registry exists on every platform so engine-side code (and the
+        // editor) can query it unconditionally; on wasm it just stays empty.
+        app.init_resource::<ScriptRegistry>();
+        app.init_resource::<LoadedPluginIds>();
+
         #[cfg(not(target_family = "wasm"))]
         {
             app.insert_resource(LoadedPlugins::default());
+            app.init_resource::<AppliedPluginData>();
+            app.init_resource::<ReportedMissingScripts>();
             app.add_systems(OnEnter(AppState::InGame), load_active_project_plugins);
             app.add_systems(OnExit(AppState::InGame), unload_all_plugins);
             app.add_systems(Update, run_scripts.run_if(in_state(AppState::InGame)));
+            app.add_systems(
+                Update,
+                apply_plugin_level_data.run_if(in_state(AppState::InGame)),
+            );
+            // Must observe the save request before the terrain save snapshots
+            // `TerrainWorld.metadata`, since that snapshot is what gets written.
+            app.add_systems(
+                Update,
+                collect_plugin_level_data
+                    .before(crate::game::world::terrain::save::save_terrain)
+                    .run_if(in_state(AppState::InGame)),
+            );
         }
         #[cfg(target_family = "wasm")]
         {
-            let _ = app;
             bevy::log::info!("[scripts] dynamic plugin loading disabled on wasm");
         }
     }
@@ -138,14 +218,8 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 /// `cargo build`. Returns the path to the copy.
 #[cfg(not(target_family = "wasm"))]
 fn copy_dll(source: &Path, n: u32) -> std::io::Result<PathBuf> {
-    let stem = source
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let ext = source
-        .extension()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = source.extension().unwrap_or_default().to_string_lossy();
     let dest = source
         .parent()
         .unwrap_or(source)
@@ -220,9 +294,7 @@ fn prepare_library(
         match library.get::<PluginAbiVersionFn>(b"plugin_abi_version") {
             Ok(sym) => sym(),
             Err(e) => {
-                bevy::log::error!(
-                    "[scripts] '{plugin_id}' missing plugin_abi_version symbol: {e}"
-                );
+                bevy::log::error!("[scripts] '{plugin_id}' missing plugin_abi_version symbol: {e}");
                 return None;
             }
         }
@@ -244,9 +316,7 @@ fn prepare_library(
                     bevy::log::error!("[scripts] '{plugin_id}' plugin_name returned null");
                     return None;
                 }
-                std::ffi::CStr::from_ptr(ptr)
-                    .to_string_lossy()
-                    .into_owned()
+                std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
             }
             Err(e) => {
                 bevy::log::error!("[scripts] '{plugin_id}' missing plugin_name symbol: {e}");
@@ -281,11 +351,7 @@ fn prepare_library(
 /// Touches world state — only call this once you're committed to swapping
 /// in the new dylib (i.e. after the old one's teardown has run).
 #[cfg(not(target_family = "wasm"))]
-fn run_setup(
-    world: &mut World,
-    plugin_id: &str,
-    prepared: PreparedLibrary,
-) -> Option<LoadedDylib> {
+fn run_setup(world: &mut World, plugin_id: &str, prepared: PreparedLibrary) -> Option<LoadedDylib> {
     // Make sure Time is registered host-side before the dylib touches it.
     let _ = world.register_resource::<bevy::time::Time>();
 
@@ -352,18 +418,14 @@ fn run_teardown(world: &mut World, library: &libloading::Library, plugin_id: &st
     };
 
     let world_ptr = world as *mut World as *mut c_void;
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
-        teardown_fn(world_ptr)
-    }));
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { teardown_fn(world_ptr) }));
 
     match result {
         Ok(0) => bevy::log::info!("[scripts] '{plugin_id}' torn down"),
-        Ok(code) => bevy::log::error!(
-            "[scripts] '{plugin_id}' plugin_teardown returned error code {code}"
-        ),
-        Err(_) => bevy::log::error!(
-            "[scripts] '{plugin_id}' plugin_teardown panicked"
-        ),
+        Ok(code) => {
+            bevy::log::error!("[scripts] '{plugin_id}' plugin_teardown returned error code {code}")
+        }
+        Err(_) => bevy::log::error!("[scripts] '{plugin_id}' plugin_teardown panicked"),
     }
 }
 
@@ -392,10 +454,7 @@ fn load_active_project_plugins(world: &mut World) {
     };
     let ids = active.0.plugins.clone();
     if ids.is_empty() {
-        bevy::log::info!(
-            "[scripts] project '{}' declares no plugins",
-            active.0.id
-        );
+        bevy::log::info!("[scripts] project '{}' declares no plugins", active.0.id);
         return;
     }
     bevy::log::info!(
@@ -424,7 +483,10 @@ fn unload_all_plugins(world: &mut World) {
     if ids.is_empty() {
         return;
     }
-    bevy::log::info!("[scripts] unloading {} plugin(s) on exit to menu", ids.len());
+    bevy::log::info!(
+        "[scripts] unloading {} plugin(s) on exit to menu",
+        ids.len()
+    );
 
     for id in ids {
         unload_one(world, &id);
@@ -443,6 +505,10 @@ fn unload_one(world: &mut World, id: &str) {
         return;
     };
 
+    // Strip hydrated components first: their drop glue lives in this dylib,
+    // which is still mapped here but whose pages we leak below.
+    dehydrate_plugin(world, id);
+
     run_teardown(world, &loaded.library, id);
 
     if let Some(mut schedules) = world.get_resource_mut::<bevy::ecs::schedule::Schedules>() {
@@ -450,6 +516,7 @@ fn unload_one(world: &mut World, id: &str) {
     }
 
     std::mem::forget(loaded.library);
+    refresh_loaded_plugin_ids(world);
     bevy::log::info!("[scripts] '{id}' unloaded");
 }
 
@@ -497,7 +564,10 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
 
     let copy_index = {
         let mut state = world.resource_mut::<LoadedPlugins>();
-        let slot = state.next_copy_index.entry(plugin_id.to_owned()).or_insert(0);
+        let slot = state
+            .next_copy_index
+            .entry(plugin_id.to_owned())
+            .or_insert(0);
         let n = *slot;
         *slot = n.wrapping_add(1);
         n
@@ -526,6 +596,40 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
             reload_count: copy_index,
         },
     );
+    refresh_loaded_plugin_ids(world);
+
+    // Say what the plugin actually contributed — "loaded successfully" alone
+    // doesn't tell you whether its scripts reached the registry.
+    let script_count = world
+        .resource::<ScriptRegistry>()
+        .scripts()
+        .filter(|s| s.plugin == plugin_id)
+        .count();
+    let has_hooks = world
+        .resource::<ScriptRegistry>()
+        .level_hooks(plugin_id)
+        .is_some();
+    bevy::log::info!(
+        "[scripts] '{plugin_id}' registered {script_count} script(s){}",
+        if has_hooks {
+            " and level-data hooks"
+        } else {
+            ""
+        }
+    );
+}
+
+/// Mirror `LoadedPlugins`' keys into the editor-visible [`LoadedPluginIds`].
+#[cfg(not(target_family = "wasm"))]
+fn refresh_loaded_plugin_ids(world: &mut World) {
+    let mut ids: Vec<String> = world
+        .resource::<LoadedPlugins>()
+        .plugins
+        .keys()
+        .cloned()
+        .collect();
+    ids.sort();
+    world.resource_mut::<LoadedPluginIds>().0 = ids;
 }
 
 /// Exclusive `Update` system: poll for reload triggers, then run every
@@ -539,6 +643,11 @@ fn run_scripts(world: &mut World) {
     };
 
     sync_plugins(world, manual_reload);
+
+    // After `sync_plugins` so a reload in this frame has already dehydrated
+    // and re-registered; before the plugin schedules so their systems see
+    // fully-hydrated entities on the very first tick after a load.
+    hydrate_script_bindings(world);
 
     let labels: Vec<PluginSchedule> = world
         .resource::<LoadedPlugins>()
@@ -576,10 +685,7 @@ fn sync_plugins(world: &mut World, manual: bool) {
         let last_failed_mtime = state.failed_mtimes.get(&id).copied();
 
         if is_loaded {
-            let loaded_mtime = state
-                .plugins
-                .get(&id)
-                .and_then(|p| p.loaded_mtime);
+            let loaded_mtime = state.plugins.get(&id).and_then(|p| p.loaded_mtime);
             let changed = current_mtime.is_some() && current_mtime != loaded_mtime;
             if manual || changed {
                 reload_plugin(world, &id);
@@ -611,9 +717,7 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
     {
         Some(p) => p,
         None => {
-            bevy::log::warn!(
-                "[scripts] '{plugin_id}' reload requested but not currently loaded"
-            );
+            bevy::log::warn!("[scripts] '{plugin_id}' reload requested but not currently loaded");
             return;
         }
     };
@@ -632,7 +736,10 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
 
     let new_count = {
         let mut state = world.resource_mut::<LoadedPlugins>();
-        let slot = state.next_copy_index.entry(plugin_id.to_owned()).or_insert(0);
+        let slot = state
+            .next_copy_index
+            .entry(plugin_id.to_owned())
+            .or_insert(0);
         let n = *slot;
         *slot = n.wrapping_add(1);
         n
@@ -643,15 +750,23 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
 
     // Phase 1: ABI-check the new dylib without touching world state.
     let Some(prepared) = prepare_library(plugin_id, &prev.source_path, new_count) else {
-        bevy::log::error!(
-            "[scripts] '{plugin_id}' reload failed, keeping previous version"
-        );
+        bevy::log::error!("[scripts] '{plugin_id}' reload failed, keeping previous version");
+        // Record the mtime we failed on. Without this the dylib still looks
+        // "changed" next frame, so we would retry — and copy the DLL again —
+        // every single frame until the user rebuilt it.
+        prev.loaded_mtime = new_mtime;
         world
             .resource_mut::<LoadedPlugins>()
             .plugins
             .insert(plugin_id.to_owned(), prev);
         return;
     };
+
+    // Remove the old dylib's hydrated components while its code (and so its
+    // drop glue) is still mapped, and clear its registry entries so the new
+    // dylib's `setup` re-registers into a clean slot. The bindings themselves
+    // survive, re-armed with `NeedsHydration`.
+    dehydrate_plugin(world, plugin_id);
 
     // Tear down OLD before NEW spawns its entities — otherwise the old
     // teardown's plugin-name match would catch the new plugin's entities.
@@ -665,10 +780,14 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
         );
         // Keep the old library mapped so a subsequent reload has something
         // valid to operate on (its teardown just ran, so it's a no-op).
+        // Same reasoning as above: bank the mtime so we retry on the next
+        // rebuild rather than on the next frame.
+        prev.loaded_mtime = new_mtime;
         world
             .resource_mut::<LoadedPlugins>()
             .plugins
             .insert(plugin_id.to_owned(), prev);
+        refresh_loaded_plugin_ids(world);
         return;
     };
 
@@ -688,7 +807,430 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
         .plugins
         .insert(plugin_id.to_owned(), prev);
 
-    bevy::log::info!("[scripts] '{plugin_id}' reload #{new_count} complete");
+    refresh_loaded_plugin_ids(world);
+
+    let script_count = world
+        .resource::<ScriptRegistry>()
+        .scripts()
+        .filter(|s| s.plugin == plugin_id)
+        .count();
+    bevy::log::info!(
+        "[scripts] '{plugin_id}' reload #{new_count} complete ({script_count} script(s))"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Script binding hydration
+// ---------------------------------------------------------------------------
+
+/// Realise [`ScriptBindings`] into plugin components.
+///
+/// For each binding not already hydrated, this snapshots the entity's
+/// archetype, calls the plugin's factory, and diffs the archetype again to
+/// learn exactly which components the factory inserted. Diffing beats asking
+/// plugins for a matching "detach" fn: it cannot drift from the factory, and
+/// it also catches host components the factory inserted (`AutoCollider`,
+/// `Interactable`), which are equally part of what must be undone.
+///
+/// Entities whose plugin isn't loaded keep [`NeedsHydration`] and are retried
+/// each frame — that is how a plugin added via the pause menu picks up
+/// already-spawned entities without a reload.
+#[cfg(not(target_family = "wasm"))]
+fn hydrate_script_bindings(world: &mut World) {
+    let pending: Vec<Entity> = world
+        .query_filtered::<Entity, (With<ScriptBindings>, With<NeedsHydration>)>()
+        .iter(world)
+        .collect();
+
+    for entity in pending {
+        let Some(bindings) = world.get::<ScriptBindings>(entity).cloned() else {
+            continue;
+        };
+
+        // (plugin, script) pairs already realised on this entity.
+        let done: Vec<(String, String)> = world
+            .get::<HydratedScripts>(entity)
+            .map(|h| {
+                h.0.iter()
+                    .map(|s| (s.plugin.clone(), s.script.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut newly_hydrated: Vec<HydratedScript> = Vec::new();
+        let mut all_resolved = true;
+
+        for binding in bindings.iter() {
+            if done
+                .iter()
+                .any(|(p, s)| p == &binding.plugin && s == &binding.script)
+            {
+                continue;
+            }
+
+            // Copy the fn pointer out so the registry borrow ends before we
+            // take a mutable borrow of the world to run it.
+            let hydrate: Option<ScriptHydrateFn> = world
+                .resource::<ScriptRegistry>()
+                .get(&binding.plugin, &binding.script)
+                .map(|r| r.hydrate);
+
+            let Some(hydrate) = hydrate else {
+                // Plugin not loaded, or loaded but doesn't export this script.
+                // Leave the marker so it resolves if the plugin shows up
+                // later; warn once so a typo'd script name isn't silent.
+                all_resolved = false;
+                let key = (binding.plugin.clone(), binding.script.clone());
+                let is_new = world.resource_mut::<ReportedMissingScripts>().0.insert(key);
+                if is_new {
+                    let plugin_loaded = world
+                        .resource::<LoadedPlugins>()
+                        .plugins
+                        .contains_key(&binding.plugin);
+                    if plugin_loaded {
+                        bevy::log::warn!(
+                            "[scripts] '{}' is loaded but exports no script named '{}' \
+                             — binding left dormant",
+                            binding.plugin,
+                            binding.script
+                        );
+                    } else {
+                        bevy::log::warn!(
+                            "[scripts] script '{}' needs plugin '{}', which is not loaded \
+                             — binding left dormant",
+                            binding.script,
+                            binding.plugin
+                        );
+                    }
+                }
+                continue;
+            };
+
+            let Ok(entity_ref) = world.get_entity(entity) else {
+                break; // despawned underneath us
+            };
+            let before: HashSet<ComponentId> = entity_ref
+                .archetype()
+                .components()
+                .iter()
+                .copied()
+                .collect();
+
+            let panicked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut em = world.entity_mut(entity);
+                hydrate(&mut em, binding);
+            }))
+            .is_err();
+
+            if panicked {
+                bevy::log::error!(
+                    "[scripts] '{}' script '{}' panicked while hydrating {entity:?}",
+                    binding.plugin,
+                    binding.script
+                );
+            }
+
+            let Ok(entity_ref) = world.get_entity(entity) else {
+                break;
+            };
+            let after: HashSet<ComponentId> = entity_ref
+                .archetype()
+                .components()
+                .iter()
+                .copied()
+                .collect();
+
+            // Record the diff even if the factory panicked part-way, so that
+            // whatever it did manage to insert is still cleaned up on unload.
+            newly_hydrated.push(HydratedScript {
+                plugin: binding.plugin.clone(),
+                script: binding.script.clone(),
+                component_ids: after.difference(&before).copied().collect(),
+            });
+        }
+
+        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+            continue;
+        };
+
+        if !newly_hydrated.is_empty() {
+            match entity_mut.get_mut::<HydratedScripts>() {
+                Some(mut existing) => existing.0.extend(newly_hydrated),
+                None => {
+                    entity_mut.insert(HydratedScripts(newly_hydrated));
+                }
+            }
+        }
+
+        if all_resolved {
+            entity_mut.remove::<NeedsHydration>();
+        }
+    }
+}
+
+/// Strip every component `plugin`'s factories inserted, and re-arm the
+/// entities for hydration.
+///
+/// Must run while the plugin's code pages are still mapped, because removing
+/// a component runs its drop glue, which lives in the dylib. Both call sites
+/// (unload and reload) invoke this before `plugin_teardown` and well before
+/// the library is `mem::forget`'d.
+#[cfg(not(target_family = "wasm"))]
+fn dehydrate_plugin(world: &mut World, plugin_id: &str) {
+    let candidates: Vec<Entity> = world
+        .query_filtered::<Entity, With<HydratedScripts>>()
+        .iter(world)
+        .collect();
+
+    for entity in candidates {
+        let Some(hydrated) = world.get::<HydratedScripts>(entity) else {
+            continue;
+        };
+        let to_remove: Vec<ComponentId> = hydrated
+            .0
+            .iter()
+            .filter(|s| s.plugin == plugin_id)
+            .flat_map(|s| s.component_ids.iter().copied())
+            .collect();
+        if to_remove.is_empty() {
+            continue;
+        }
+
+        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+            continue;
+        };
+        entity_mut.remove_by_ids(&to_remove);
+        if let Some(mut hydrated) = entity_mut.get_mut::<HydratedScripts>() {
+            hydrated.0.retain(|s| s.plugin != plugin_id);
+        }
+        // The binding is still authored on the entity, so re-arm it; if the
+        // plugin is coming back (hot-reload) it re-hydrates next frame.
+        entity_mut.insert(NeedsHydration);
+    }
+
+    world
+        .resource_mut::<ScriptRegistry>()
+        .remove_plugin(plugin_id);
+    world
+        .resource_mut::<AppliedPluginData>()
+        .plugins
+        .remove(plugin_id);
+    // Let a reload that still can't resolve these bindings warn again.
+    world
+        .resource_mut::<ReportedMissingScripts>()
+        .0
+        .retain(|(p, _)| p != plugin_id);
+}
+
+/// Strip the components one specific binding hydrated onto `entity`, for the
+/// editor's "detach script" action. The binding itself has already been
+/// removed from `ScriptBindings` by the caller; this only undoes its effects.
+///
+/// Exclusive because it needs `remove_by_ids`; drive it from a system via
+/// `commands.queue(move |world| detach_binding(world, ...))`.
+#[cfg(not(target_family = "wasm"))]
+pub fn detach_binding(world: &mut World, entity: Entity, plugin: &str, script: &str) {
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    let Some(mut hydrated) = entity_mut.get_mut::<HydratedScripts>() else {
+        return; // never hydrated (plugin not loaded) — nothing to undo
+    };
+    let Some(pos) = hydrated
+        .0
+        .iter()
+        .position(|s| s.plugin == plugin && s.script == script)
+    else {
+        return;
+    };
+    let removed = hydrated.0.remove(pos);
+    let now_empty = hydrated.0.is_empty();
+    entity_mut.remove_by_ids(&removed.component_ids);
+    if now_empty {
+        entity_mut.remove::<HydratedScripts>();
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub fn detach_binding(_world: &mut World, _entity: Entity, _plugin: &str, _script: &str) {}
+
+// ---------------------------------------------------------------------------
+// Plugin level data
+// ---------------------------------------------------------------------------
+
+/// Hand each loaded plugin its slice of the world's saved `plugin_data`.
+///
+/// Runs once per (world, plugin): on world load, when a plugin is added
+/// mid-session, and again after a hot-reload (which clears the plugin's entry
+/// via [`dehydrate_plugin`]). Tracking the world id rather than a change
+/// detection flag keeps this correct across `switch_world`, which swaps
+/// `TerrainWorld` wholesale.
+#[cfg(not(target_family = "wasm"))]
+fn apply_plugin_level_data(world: &mut World) {
+    use crate::game::world::terrain::storage::TerrainWorld;
+
+    let Some(terrain_world) = world.get_resource::<TerrainWorld>() else {
+        return;
+    };
+    let world_id = terrain_world.metadata.world_id.clone();
+
+    // A different world means none of the previous applications count.
+    {
+        let mut applied = world.resource_mut::<AppliedPluginData>();
+        if applied.world_id != world_id {
+            applied.world_id = world_id.clone();
+            applied.plugins.clear();
+        }
+    }
+
+    let loaded: Vec<String> = world
+        .resource::<LoadedPlugins>()
+        .plugins
+        .keys()
+        .cloned()
+        .collect();
+
+    for plugin_id in loaded {
+        if world
+            .resource::<AppliedPluginData>()
+            .plugins
+            .contains(&plugin_id)
+        {
+            continue;
+        }
+
+        let hooks = world.resource::<ScriptRegistry>().level_hooks(&plugin_id);
+
+        // Mark applied regardless of whether a hook or a blob exists, so this
+        // doesn't re-scan the same plugin every frame.
+        world
+            .resource_mut::<AppliedPluginData>()
+            .plugins
+            .insert(plugin_id.clone());
+
+        let Some(hooks) = hooks else {
+            continue;
+        };
+
+        let blob: Option<Vec<u8>> = world
+            .resource::<TerrainWorld>()
+            .metadata
+            .plugin_data
+            .iter()
+            .find(|d| d.plugin == plugin_id)
+            .map(|d| d.data.clone());
+
+        let Some(blob) = blob else {
+            continue;
+        };
+
+        let failed = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            (hooks.load)(world, &blob);
+        }))
+        .is_err();
+
+        if failed {
+            bevy::log::error!("[scripts] '{plugin_id}' level-data load hook panicked");
+        } else {
+            bevy::log::info!(
+                "[scripts] '{plugin_id}' loaded {} byte(s) of level data for world '{world_id}'",
+                blob.len()
+            );
+        }
+    }
+}
+
+/// Ask every loaded plugin for its level data and stage it on the live
+/// `TerrainWorld.metadata`, which the terrain save then writes out.
+#[cfg(not(target_family = "wasm"))]
+fn collect_plugin_level_data(
+    world: &mut World,
+    mut cursor: Local<
+        bevy::ecs::message::MessageCursor<crate::game::world::terrain::save::SaveTerrainMessage>,
+    >,
+) {
+    use crate::game::world::terrain::save::SaveTerrainMessage;
+    use crate::game::world::terrain::storage::{PluginLevelData, TerrainWorld};
+
+    let requested = {
+        let Some(messages) =
+            world.get_resource::<bevy::ecs::message::Messages<SaveTerrainMessage>>()
+        else {
+            return;
+        };
+        cursor.read(messages).count() > 0
+    };
+    if !requested {
+        return;
+    }
+    if !world.contains_resource::<TerrainWorld>() {
+        return;
+    }
+
+    let loaded: Vec<String> = world
+        .resource::<LoadedPlugins>()
+        .plugins
+        .keys()
+        .cloned()
+        .collect();
+
+    for plugin_id in loaded {
+        let Some(hooks) = world.resource::<ScriptRegistry>().level_hooks(&plugin_id) else {
+            continue;
+        };
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| (hooks.save)(world)));
+
+        let blob = match result {
+            Ok(blob) => blob,
+            Err(_) => {
+                bevy::log::error!("[scripts] '{plugin_id}' level-data save hook panicked");
+                continue;
+            }
+        };
+
+        let mut terrain_world = world.resource_mut::<TerrainWorld>();
+        let slot = terrain_world
+            .metadata
+            .plugin_data
+            .iter_mut()
+            .position(|d| d.plugin == plugin_id);
+
+        match (blob, slot) {
+            (Some(data), Some(i)) => terrain_world.metadata.plugin_data[i].data = data,
+            (Some(data), None) => terrain_world.metadata.plugin_data.push(PluginLevelData {
+                plugin: plugin_id.clone(),
+                data,
+            }),
+            // An explicit `None` means "store nothing for me", so drop any
+            // blob a previous save left behind.
+            (None, Some(i)) => {
+                terrain_world.metadata.plugin_data.remove(i);
+            }
+            (None, None) => {}
+        }
+    }
+
+    // Record which plugins this level's bindings depend on, so a later load
+    // without them can warn.
+    //
+    // This is a *union* with the stored list, not a replacement. Only loaded
+    // chunks have entities, so a replacement would silently drop a dependency
+    // whose only bindings happen to sit in a chunk the player has streamed
+    // out. The cost of the union is a stale entry after the last binding for
+    // a plugin is deleted, which at worst produces a spurious warning on load
+    // — strictly better than losing a real dependency.
+    let live: Vec<String> = world
+        .query::<&ScriptBindings>()
+        .iter(world)
+        .flat_map(|b| b.0.iter().map(|binding| binding.plugin.clone()))
+        .collect();
+
+    let mut terrain_world = world.resource_mut::<TerrainWorld>();
+    let required = &mut terrain_world.metadata.required_plugins;
+    required.extend(live);
+    required.sort();
+    required.dedup();
 }
 
 // ---------------------------------------------------------------------------
@@ -714,3 +1256,228 @@ fn add_dll_search_dir(dir: &Path) {
 
 #[cfg(all(not(target_family = "wasm"), not(target_os = "windows")))]
 fn add_dll_search_dir(_dir: &Path) {}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Hydration is exercised without any dylib: script factories are plain `fn`
+/// pointers, so a test can register one directly and drive the same
+/// hydrate / dehydrate / re-hydrate cycle the loader drives.
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+    use engine_api::{ScriptBinding, ScriptSchema};
+
+    /// Stands in for a plugin-private component (the thing whose `TypeId`
+    /// would change on every rebuild).
+    #[derive(Component, Debug, PartialEq)]
+    struct Spinner(f32);
+
+    /// A second component the same factory adds, to prove the diff captures
+    /// every insert rather than just the first.
+    #[derive(Component)]
+    struct AlsoAdded;
+
+    /// Something the entity already had; dehydration must not touch it.
+    #[derive(Component)]
+    struct PreExisting;
+
+    fn hydrate_spinner(entity: &mut bevy::ecs::world::EntityWorldMut, binding: &ScriptBinding) {
+        entity.insert((Spinner(binding.float_or("speed", 1.0)), AlsoAdded));
+    }
+
+    fn test_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<ScriptRegistry>();
+        world.init_resource::<ReportedMissingScripts>();
+        world.init_resource::<AppliedPluginData>();
+        world.insert_resource(LoadedPlugins::default());
+        world
+    }
+
+    fn spawn_bound(world: &mut World) -> Entity {
+        let binding =
+            ScriptBinding::new("example", "spinner").with_props(vec![engine_api::ScriptProp::new(
+                "speed",
+                engine_api::PropValue::Float(2.5),
+            )]);
+        world
+            .spawn((PreExisting, ScriptBindings(vec![binding]), NeedsHydration))
+            .id()
+    }
+
+    fn register(world: &mut World) {
+        world.resource_mut::<ScriptRegistry>().register_script(
+            "example",
+            ScriptSchema::new("spinner"),
+            hydrate_spinner,
+        );
+    }
+
+    #[test]
+    fn hydration_inserts_components_and_clears_the_marker() {
+        let mut world = test_world();
+        register(&mut world);
+        let entity = spawn_bound(&mut world);
+
+        hydrate_script_bindings(&mut world);
+
+        assert_eq!(world.get::<Spinner>(entity), Some(&Spinner(2.5)));
+        assert!(world.get::<AlsoAdded>(entity).is_some());
+        assert!(
+            world.get::<NeedsHydration>(entity).is_none(),
+            "a fully resolved entity should no longer be queued"
+        );
+    }
+
+    #[test]
+    fn hydration_is_idempotent_across_frames() {
+        let mut world = test_world();
+        register(&mut world);
+        let entity = spawn_bound(&mut world);
+
+        hydrate_script_bindings(&mut world);
+        hydrate_script_bindings(&mut world);
+
+        // One binding must not accumulate duplicate hydration records, or
+        // dehydration would try to remove the same ids twice.
+        assert_eq!(world.get::<HydratedScripts>(entity).unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn dehydration_removes_exactly_what_the_factory_added() {
+        let mut world = test_world();
+        register(&mut world);
+        let entity = spawn_bound(&mut world);
+        hydrate_script_bindings(&mut world);
+
+        dehydrate_plugin(&mut world, "example");
+
+        assert!(world.get::<Spinner>(entity).is_none());
+        assert!(world.get::<AlsoAdded>(entity).is_none());
+        // Untouched components and the authored bindings both survive.
+        assert!(world.get::<PreExisting>(entity).is_some());
+        assert!(world.get::<ScriptBindings>(entity).is_some());
+        // Re-armed, so a reload picks it back up.
+        assert!(world.get::<NeedsHydration>(entity).is_some());
+        assert!(
+            world
+                .resource::<ScriptRegistry>()
+                .get("example", "spinner")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reload_cycle_rehydrates_from_the_new_registration() {
+        let mut world = test_world();
+        register(&mut world);
+        let entity = spawn_bound(&mut world);
+        hydrate_script_bindings(&mut world);
+        dehydrate_plugin(&mut world, "example");
+
+        // Stand-in for the rebuilt dylib registering a changed factory.
+        fn hydrate_v2(entity: &mut bevy::ecs::world::EntityWorldMut, _: &ScriptBinding) {
+            entity.insert(Spinner(99.0));
+        }
+        world.resource_mut::<ScriptRegistry>().register_script(
+            "example",
+            ScriptSchema::new("spinner"),
+            hydrate_v2,
+        );
+
+        hydrate_script_bindings(&mut world);
+
+        assert_eq!(world.get::<Spinner>(entity), Some(&Spinner(99.0)));
+        assert!(world.get::<NeedsHydration>(entity).is_none());
+    }
+
+    #[test]
+    fn binding_for_an_unloaded_plugin_stays_dormant_then_resolves() {
+        let mut world = test_world();
+        // Nothing registered yet — this is the "level references a plugin the
+        // project doesn't load" case.
+        let entity = spawn_bound(&mut world);
+
+        hydrate_script_bindings(&mut world);
+
+        assert!(world.get::<Spinner>(entity).is_none());
+        assert!(
+            world.get::<NeedsHydration>(entity).is_some(),
+            "an unresolved binding must stay queued so a later load picks it up"
+        );
+        assert!(world.get::<ScriptBindings>(entity).is_some());
+
+        // Plugin shows up mid-session (e.g. added via the pause menu).
+        register(&mut world);
+        hydrate_script_bindings(&mut world);
+
+        assert_eq!(world.get::<Spinner>(entity), Some(&Spinner(2.5)));
+        assert!(world.get::<NeedsHydration>(entity).is_none());
+    }
+
+    #[test]
+    fn dehydrating_one_plugin_leaves_another_plugins_components_alone() {
+        #[derive(Component)]
+        struct OtherComponent;
+
+        fn hydrate_other(entity: &mut bevy::ecs::world::EntityWorldMut, _: &ScriptBinding) {
+            entity.insert(OtherComponent);
+        }
+
+        let mut world = test_world();
+        register(&mut world);
+        world.resource_mut::<ScriptRegistry>().register_script(
+            "other",
+            ScriptSchema::new("thing"),
+            hydrate_other,
+        );
+
+        let entity = world
+            .spawn((
+                ScriptBindings(vec![
+                    ScriptBinding::new("example", "spinner"),
+                    ScriptBinding::new("other", "thing"),
+                ]),
+                NeedsHydration,
+            ))
+            .id();
+        hydrate_script_bindings(&mut world);
+        assert!(world.get::<Spinner>(entity).is_some());
+        assert!(world.get::<OtherComponent>(entity).is_some());
+
+        dehydrate_plugin(&mut world, "example");
+
+        assert!(world.get::<Spinner>(entity).is_none());
+        assert!(
+            world.get::<OtherComponent>(entity).is_some(),
+            "unloading one plugin must not strip another's components"
+        );
+    }
+
+    #[test]
+    fn a_panicking_factory_is_contained_and_its_partial_work_still_tracked() {
+        fn hydrate_panics(entity: &mut bevy::ecs::world::EntityWorldMut, _: &ScriptBinding) {
+            entity.insert(AlsoAdded);
+            panic!("plugin bug");
+        }
+
+        let mut world = test_world();
+        world.resource_mut::<ScriptRegistry>().register_script(
+            "example",
+            ScriptSchema::new("spinner"),
+            hydrate_panics,
+        );
+        let entity = spawn_bound(&mut world);
+
+        // Must not unwind out of the host.
+        hydrate_script_bindings(&mut world);
+
+        // Whatever it managed to insert before panicking is still recorded,
+        // so unloading the plugin cleans it up rather than leaking it.
+        assert!(world.get::<AlsoAdded>(entity).is_some());
+        dehydrate_plugin(&mut world, "example");
+        assert!(world.get::<AlsoAdded>(entity).is_none());
+    }
+}

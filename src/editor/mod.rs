@@ -21,10 +21,12 @@ mod lightmap_toggle;
 mod mesh_selector;
 mod object_placement;
 mod physics_debug;
+mod script_binding;
 mod terrain_edit;
 mod terrain_save;
 
 pub use mesh_selector::MeshSelectorOpen;
+pub use script_binding::ScriptPanelOpen;
 
 use baking_trigger::trigger_bake;
 use debug_hud::{
@@ -35,16 +37,20 @@ use lightmap_toggle::{sync_lightmap_mode, toggle_lightmap_mode};
 use mesh_selector::{
     MeshCatalog, MeshManifestAsset, MeshManifestLoader, MeshSelectorIndex,
     cleanup_mesh_selector_panel, mesh_selector_open, populate_mesh_catalog, request_mesh_manifest,
-    scroll_mesh_selector, setup_mesh_selector_panel, teardown_mesh_selector,
-    toggle_mesh_selector,
+    scroll_mesh_selector, setup_mesh_selector_panel, teardown_mesh_selector, toggle_mesh_selector,
 };
 use object_placement::{
     PlacementPreviewEntity, adjust_placement_scale, cleanup_placement_preview,
-    delete_hovered_object, handle_edit_mode_click, rebuild_preview_on_config_change,
-    setup_placement_preview, teardown_placement_preview, toggle_edit_mode,
-    update_placement_preview,
+    delete_hovered_object, draw_preview_gizmo, handle_edit_mode_click,
+    rebuild_preview_on_config_change, setup_placement_preview, teardown_placement_preview,
+    toggle_edit_mode, update_placement_preview,
 };
 use physics_debug::{sync_physics_debug, toggle_physics_debug};
+use script_binding::{
+    ScriptPanelEntries, ScriptPanelIndex, handle_script_panel_keys, script_panel_open,
+    scroll_script_panel, sync_script_panel, teardown_script_panel, toggle_script_panel,
+    update_script_panel_status,
+};
 use terrain_edit::{
     TerrainBrushHit, adjust_brush_size, apply_terrain_brush, finalize_terrain_lod,
     raycast_terrain_hit, teardown_terrain_brush_preview, toggle_terrain_edit_mode,
@@ -77,8 +83,7 @@ impl Plugin for EditorPlugin {
 
         app.configure_sets(
             Update,
-            EditorSet::InGame
-                .run_if(in_state(AppState::InGame).and(in_state(EditorMode::Editor))),
+            EditorSet::InGame.run_if(in_state(AppState::InGame).and(in_state(EditorMode::Editor))),
         );
         app.configure_sets(
             Update,
@@ -106,7 +111,12 @@ impl Plugin for EditorPlugin {
         );
         app.add_systems(Update, setup_placement_preview.in_set(EditorSet::InGame));
         app.add_systems(Update, cleanup_placement_preview.in_set(EditorSet::InGame));
-        app.add_systems(Update, update_placement_preview.in_set(EditorSet::Active));
+        app.add_systems(
+            Update,
+            (update_placement_preview, draw_preview_gizmo)
+                .chain()
+                .in_set(EditorSet::Active),
+        );
         app.add_systems(Update, adjust_placement_scale.in_set(EditorSet::Active));
         app.add_systems(
             Update,
@@ -126,12 +136,32 @@ impl Plugin for EditorPlugin {
         app.add_systems(Update, populate_mesh_catalog.in_set(EditorSet::InGame));
         app.add_systems(Update, toggle_mesh_selector.in_set(EditorSet::InGame));
         app.add_systems(Update, setup_mesh_selector_panel.in_set(EditorSet::InGame));
-        app.add_systems(Update, cleanup_mesh_selector_panel.in_set(EditorSet::InGame));
+        app.add_systems(
+            Update,
+            cleanup_mesh_selector_panel.in_set(EditorSet::InGame),
+        );
         app.add_systems(
             Update,
             scroll_mesh_selector
                 .in_set(EditorSet::Active)
                 .run_if(mesh_selector_open),
+        );
+
+        // ── Scripts panel ───────────────────────────────────────────────────
+        app.init_resource::<ScriptPanelOpen>();
+        app.init_resource::<ScriptPanelIndex>();
+        app.init_resource::<ScriptPanelEntries>();
+        app.add_systems(Update, toggle_script_panel.in_set(EditorSet::InGame));
+        app.add_systems(Update, sync_script_panel.in_set(EditorSet::InGame));
+        app.add_systems(
+            Update,
+            (
+                scroll_script_panel,
+                handle_script_panel_keys,
+                update_script_panel_status,
+            )
+                .in_set(EditorSet::Active)
+                .run_if(script_panel_open),
         );
 
         // ── Terrain edit ────────────────────────────────────────────────────
@@ -196,6 +226,7 @@ impl Plugin for EditorPlugin {
             (
                 cleanup_debug_hud,
                 teardown_mesh_selector,
+                teardown_script_panel,
                 teardown_placement_preview,
                 teardown_terrain_brush_preview,
                 clear_editor_sub_modes,

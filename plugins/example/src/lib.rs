@@ -1,5 +1,8 @@
 use bevy::prelude::*;
-use engine_api::{DynamicPlugin, Player, ScriptOwned, add};
+use engine_api::{
+    DynamicPlugin, LevelDataHooks, Player, PropDef, PropDefault, ScriptBinding, ScriptOwned,
+    ScriptRegistry, ScriptSchema, add,
+};
 
 #[derive(Default)]
 pub struct ExamplePlugin;
@@ -12,6 +15,26 @@ struct ScriptCounter {
     ticks: u32,
 }
 
+/// Attached to placed level entities by the `spinner` script below.
+///
+/// Note this is *not* `ScriptOwned`: the entity belongs to the level, not to
+/// the plugin, so it must survive unload. The host instead records that this
+/// component was added and removes exactly it on unload/hot-reload — which is
+/// what makes a dylib-private component safe to put on a level entity.
+#[derive(Component, Debug)]
+struct Spinner {
+    radians_per_sec: f32,
+}
+
+/// Props the editor seeds when a `spinner` binding is attached.
+static SPINNER_PROPS: &[PropDef] = &[PropDef::new("speed", PropDefault::Float(1.0))];
+
+/// Level-scoped state owned by this plugin, persisted inside `world.meta`.
+#[derive(Resource, Default, Debug)]
+struct ExampleLevelData {
+    load_count: u32,
+}
+
 impl DynamicPlugin for ExamplePlugin {
     fn setup(&self, world: &mut World, schedule: &mut Schedule) {
         let entity = world
@@ -19,8 +42,68 @@ impl DynamicPlugin for ExamplePlugin {
             .id();
         info!("[{PLUGIN_NAME}] spawned counter entity {entity:?}");
 
-        schedule.add_systems((typeid_sanity_check, hello_tick, tick_counter));
+        world.init_resource::<ExampleLevelData>();
+
+        let mut registry = world.resource_mut::<ScriptRegistry>();
+
+        registry.register_script(
+            PLUGIN_NAME,
+            ScriptSchema::new("spinner").with_props(SPINNER_PROPS),
+            hydrate_spinner,
+        );
+
+        registry.register_level_hooks(
+            PLUGIN_NAME,
+            LevelDataHooks {
+                save: save_level_data,
+                load: load_level_data,
+            },
+        );
+
+        schedule.add_systems((typeid_sanity_check, hello_tick, tick_counter, spin));
     }
+}
+
+/// Turn a `spinner` binding into a live component.
+///
+/// Factories should *insert* onto the entity rather than spawn: the host
+/// tracks inserts via an archetype diff, but anything spawned here would need
+/// its own `ScriptOwned` tag to get cleaned up.
+fn hydrate_spinner(entity: &mut bevy::ecs::world::EntityWorldMut, binding: &ScriptBinding) {
+    entity.insert(Spinner {
+        radians_per_sec: binding.float_or("speed", 1.0),
+    });
+}
+
+fn spin(time: Res<Time>, mut q: Query<(&Spinner, &mut Transform)>) {
+    for (spinner, mut transform) in &mut q {
+        transform.rotate_y(spinner.radians_per_sec * time.delta_secs());
+    }
+}
+
+/// Serialize this plugin's level state. Returning `None` would mean "store
+/// nothing"; here we always persist the counter.
+fn save_level_data(world: &mut World) -> Option<Vec<u8>> {
+    let data = world.get_resource::<ExampleLevelData>()?;
+    info!(
+        "[{PLUGIN_NAME}] saving level data (load_count={})",
+        data.load_count
+    );
+    Some(data.load_count.to_le_bytes().to_vec())
+}
+
+/// Restore it. Called once per world load and again after a hot-reload.
+fn load_level_data(world: &mut World, bytes: &[u8]) {
+    let Ok(raw) = <[u8; 4]>::try_from(bytes) else {
+        warn!(
+            "[{PLUGIN_NAME}] level data is {} byte(s), expected 4 — ignoring",
+            bytes.len()
+        );
+        return;
+    };
+    let load_count = u32::from_le_bytes(raw).saturating_add(1);
+    world.insert_resource(ExampleLevelData { load_count });
+    info!("[{PLUGIN_NAME}] restored level data (load_count now {load_count})");
 }
 
 fn typeid_sanity_check(mut ran: Local<bool>) {
