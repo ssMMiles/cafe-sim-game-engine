@@ -47,39 +47,10 @@ pub fn spawn_cafe_scene(commands: &mut Commands, asset_server: &AssetServer) {
         .observe(on_cafe_scene_ready);
 }
 
-/// Drops a few warm point lights near the top of the cafe walls so the room
-/// reads as interior-lit rather than relying on the sun alone.
-///
-/// The toon shader (`toon_lighting.wgsl`) accumulates point lights using a
-/// smooth *range* falloff and ignores their lux intensity entirely, so the
-/// `range` is what actually shapes coverage here — pick it to span the room.
-/// Lights are spawned as owned top-level entities (world space) so plugin
-/// teardown sweeps them with the rest of the scene.
-pub fn spawn_cafe_lights(commands: &mut Commands) {
-    // Just below the wall tops (walls span scene-local y 0.875..2.625, scene
-    // root sits at FLOOR_Y), spread across the four quadrants of the floor.
-    let y = FLOOR_Y + 2.4;
-    let warm = Color::srgb(1.0, 0.85, 0.6);
-    let positions = [
-        Vec3::new(-5.0, y, -3.0),
-        Vec3::new(5.0, y, -3.0),
-        Vec3::new(-5.0, y, 3.0),
-        Vec3::new(5.0, y, 3.0),
-    ];
-
-    for pos in positions {
-        commands.spawn_owned((
-            PointLight {
-                color: warm,
-                intensity: 100_000.0,
-                range: 14.0,
-                shadows_enabled: false,
-                ..default()
-            },
-            Transform::from_translation(pos),
-        ));
-    }
-}
+// Interior lighting used to be four hand-spawned `PointLight`s here. All
+// lighting is baked now — the toon shaders read a lightmap and ignore runtime
+// lights entirely — so those did nothing but cost cluster assignment. Light
+// the room by placing lights in the editor (Tab) and baking with Shift+B.
 
 fn on_cafe_scene_ready(
     trigger: On<SceneInstanceReady>,

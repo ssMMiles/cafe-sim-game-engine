@@ -1,17 +1,14 @@
 use crate::game::{
     GameEntity,
     gfx::toon_material::{DefaultToonLightmap, ToonMaterial},
-    world::{objects::PlacedObject, terrain::storage::TerrainWorld},
 };
 
 use super::gfx::camera::PlayerCamera;
 use bevy::{
-    asset::RenderAssetUsages,
     log,
     pbr::ExtendedMaterial,
     picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     scene::SceneInstanceReady,
 };
 
@@ -25,7 +22,8 @@ pub struct PendingMaterial {
 }
 
 /// Converts GLTF-embedded StandardMaterials to toon materials on scene load,
-/// preserving each mesh's original base colour.
+/// preserving each mesh's original base colour. Saved lightmaps are applied
+/// afterwards by `baking::object_lightmaps::apply_object_lightmaps`.
 #[derive(Component)]
 pub struct ConvertToToon;
 
@@ -75,27 +73,17 @@ fn on_scene_ready(
         Option<&PendingMaterial>,
         Option<&ConvertToToon>,
         Option<&Children>,
-        Option<&PlacedObject>,
     )>,
     mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
-    mesh3d_query: Query<(Entity, &Mesh3d)>,
     children_query: Query<&Children>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
-    terrain_world: Option<Res<TerrainWorld>>,
 ) {
     let entity = trigger.entity;
 
-    let Ok((
-        maybe_interactable,
-        maybe_pending_material,
-        maybe_convert_toon,
-        maybe_children,
-        maybe_placed_object,
-    )) = entity_query.get(entity)
+    let Ok((maybe_interactable, maybe_pending_material, maybe_convert_toon, maybe_children)) =
+        entity_query.get(entity)
     else {
         return;
     };
@@ -144,20 +132,13 @@ fn on_scene_ready(
     }
 
     if maybe_convert_toon.is_some() {
-        // Attempt to load a saved lightmap for this placed object. If found, generate
-        // UV2 for all meshes in the subtree and use the loaded handle. Otherwise fall
-        // back to the shared default (white 1×1) lightmap.
-        let lightmap_handle = try_load_object_lightmap(
-            maybe_placed_object,
-            &terrain_world,
-            children,
-            &mesh3d_query,
-            &children_query,
-            &mut meshes,
-            &mut images,
-        )
-        .or_else(|| default_lightmap.as_ref().map(|r| r.0.clone()))
-        .unwrap_or_default();
+        // Every mesh starts on the shared white (unbaked) lightmap; the
+        // object-lightmap system swaps in saved bakes per sub-mesh once the
+        // toon materials exist.
+        let lightmap_handle = default_lightmap
+            .as_ref()
+            .map(|r| r.0.clone())
+            .unwrap_or_default();
 
         convert_to_toon_recursive(
             &mut commands,
@@ -170,91 +151,6 @@ fn on_scene_ready(
         );
         commands.entity(entity).remove::<ConvertToToon>();
     }
-}
-
-/// Walk the subtree rooted at `root_children`, generating lightmap UV2 for every
-/// mesh encountered. Uses an explicit stack to avoid recursive borrow conflicts.
-fn generate_uvs_in_subtree(
-    root_children: &Children,
-    mesh3d_query: &Query<(Entity, &Mesh3d)>,
-    children_query: &Query<&Children>,
-    meshes: &mut Assets<Mesh>,
-) {
-    let mut stack: Vec<Entity> = root_children.to_vec();
-    while let Some(entity) = stack.pop() {
-        if let Ok((_, mesh3d)) = mesh3d_query.get(entity) {
-            if let Some(mesh) = meshes.get_mut(mesh3d.id()) {
-                crate::game::world::baking::uv_unwrap::generate_lightmap_uvs(mesh);
-            }
-        }
-        if let Ok(children) = children_query.get(entity) {
-            stack.extend(children.to_vec());
-        }
-    }
-}
-
-/// Try to load a saved lightmap PNG for a placed object (non-wasm only).
-///
-/// Returns `Some(Handle<Image>)` if a lightmap file was found and loaded.
-/// Also generates UV2 on all meshes in the scene subtree when returning `Some`.
-/// Returns `None` on wasm, if no `PlacedObject` is present, if `TerrainWorld` is
-/// unavailable, or if the lightmap file does not exist.
-#[cfg(not(target_arch = "wasm32"))]
-fn try_load_object_lightmap(
-    placed_object: Option<&PlacedObject>,
-    terrain_world: &Option<Res<TerrainWorld>>,
-    children: &Children,
-    mesh3d_query: &Query<(Entity, &Mesh3d)>,
-    children_query: &Query<&Children>,
-    meshes: &mut Assets<Mesh>,
-    images: &mut Assets<Image>,
-) -> Option<Handle<Image>> {
-    let obj = placed_object?;
-    let world = terrain_world.as_ref()?;
-    let lm_path = world
-        .world_path
-        .join("objects")
-        .join(format!("obj_{}_lightmap.png", obj.id));
-
-    if !lm_path.exists() {
-        return None;
-    }
-
-    let bytes = std::fs::read(&lm_path).ok()?;
-    let img = image::load_from_memory(&bytes).ok()?;
-    let gray = img.to_luma8();
-    let image = Image::new(
-        Extent3d {
-            width: gray.width(),
-            height: gray.height(),
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        gray.into_raw(),
-        TextureFormat::R8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-
-    // Generate UV2 for all meshes in the subtree before returning the handle,
-    // so the lightmap coordinates are present when the material is applied.
-    generate_uvs_in_subtree(children, mesh3d_query, children_query, meshes);
-
-    Some(images.add(image))
-}
-
-/// Wasm stub — lightmap loading from disk is not supported on wasm.
-#[cfg(target_arch = "wasm32")]
-#[allow(clippy::too_many_arguments)]
-fn try_load_object_lightmap(
-    _placed_object: Option<&PlacedObject>,
-    _terrain_world: &Option<Res<TerrainWorld>>,
-    _children: &Children,
-    _mesh3d_query: &Query<(Entity, &Mesh3d)>,
-    _children_query: &Query<&Children>,
-    _meshes: &mut Assets<Mesh>,
-    _images: &mut Assets<Image>,
-) -> Option<Handle<Image>> {
-    None
 }
 
 fn convert_to_toon_recursive(

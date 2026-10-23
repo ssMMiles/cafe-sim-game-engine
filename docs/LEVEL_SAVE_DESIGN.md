@@ -420,6 +420,82 @@ Deviations from §5, all deliberate:
   plugin's registry entries, and sweeps its orphaned `ScriptOwned` entities
   (dropping the library `dlclose`d pages that live fn pointers referenced).
 
+**Lighting overhaul, phase 1 (2026-10-23)**
+- `world.meta` is **v5**: `EnvironmentData` stores `sun_intensity` /
+  `ambient_intensity` in *lightmap units* (1.0 = full base colour) instead of
+  lux / Bevy ambient brightness. v4 stays readable
+  (`legacy::WorldMetadataV4`); the physical intensities are dropped on upgrade
+  and the defaults used, since nothing baked ever depended on them. v2 → v5
+  still works through the same path.
+- Baked lightmaps are HDR OpenEXR (f16 RGB, ZIP16) carrying *all* lighting —
+  sun, ambient × AO, terrain bounce; point/spot lights follow in later phases.
+  `LIGHTMAP_FORMAT_VERSION` is part of the file name
+  (`chunk_X_Y_lightmap.v6.exr`, `obj_{id}_{k}_lightmap.v6.exr` where `k` is
+  the sub-mesh index in a pre-order walk of the object's toon meshes); files
+  from an older format are skipped and counted in a one-time warning on
+  world load rather than misread.
+- Object lightmap UVs come from a per-triangle grid atlas (`uv_unwrap`),
+  replacing a triplanar projection whose charts overlapped (opposite faces of
+  a box shared texels, so one face wore the other's lighting). The mesh is
+  de-indexed to give each triangle private corners; sequential indices are
+  restored for consumers that need them.
+- Object lightmaps are **per sub-mesh entity**, not per object: lightmap UVs
+  live on the shared `Mesh` asset, so instanced meshes (every cafe wall is
+  the same unit cube) would collide in a per-object atlas. Sub-meshes that
+  share a material get a private clone when a lightmap is applied.
+
+**Lighting overhaul, phases 2-4 (2026-10-23)**
+- Placed point and spot lights are baked into the lightmaps alongside the sun
+  and ambient, in all three bakers (CPU terrain, CPU object, GPU terrain).
+  Local lights use a smooth bounded range falloff rather than physical
+  inverse-square, and a *segment* shadow ray that stops at the light instead
+  of marching a fixed reach.
+- `.objects` is **v4**: light `intensity` now means lightmap units (1.0 ≈
+  full base colour up close) instead of bevy photometric units. v4 has v3's
+  exact byte layout — only the meaning changed — so v3 files parse with the
+  current types and have their intensities replaced by the preset defaults
+  (`legacy::rescale_v3_light_intensities`); the old lumen values would read
+  as blinding white and have no meaningful conversion.
+- Placed lights no longer spawn bevy `PointLight`/`SpotLight` components at
+  all. All lighting is baked, so a real light would illuminate nothing the
+  toon shaders draw while still costing cluster assignment every frame.
+  `PlacedKind`'s `shadows` field is retained for record-shape stability but
+  is unused.
+- `BakedLight` is `#[repr(C)]` POD and uploaded verbatim to the GPU bake; its
+  layout is asserted against the WGSL struct in a unit test (WGSL aligns
+  `vec3` to 16 bytes, so the trailing padding is three scalars, not a
+  `vec3`).
+
+**Lighting overhaul, phase 5 (2026-10-23)**
+- Convex-hull shadow proxies are gone. `baking/bvh.rs` builds a flat
+  triangle BVH (median split, leaves of 4, children adjacent) once per bake
+  over every static toon-shaded mesh — "static" meaning a `PlacedObject` or
+  `RigidBody::Static` somewhere in the entity's ancestry, which admits the
+  plugin-spawned cafe shell (via `AutoCollider`) while excluding a plugin's
+  moving meshes. The same nodes are traversed on the CPU and uploaded
+  verbatim to the GPU bake (layouts asserted in tests; the WGSL traversal
+  uses a 64-entry stack against a depth cap of 32).
+- Objects are no longer excluded from their own shadow rays, so they
+  self-shadow. Ray origins are offset along the geometric face normal (not
+  the interpolated vertex normal) to avoid acne. Terrain rays carry two
+  origins: 0.5 up for the coarse DDA march and at the surface for the exact
+  triangle test, so thin objects resting on the ground still shadow it.
+- AO rays also test the BVH (contact shadows); bounce rays are absorbed by
+  scenery but only terrain re-emits. `parry3d` is no longer a direct
+  dependency.
+
+**Post-phase-5 fix (2026-10-23)**
+- Object texels are now placed with each sub-mesh entity's own
+  `GlobalTransform`. The baker had always used the placed root's transform
+  for every sub-mesh, ignoring glTF node scale/offset (rock: 2.5× scale;
+  trees: 3-5 m translations; table top: mirrored). Self-exclusion from the
+  shadow test used to hide this; with self-shadowing, a texel placed inside
+  the real mesh was occluded in every direction and baked pure black.
+  Lightmap format is v6 so the bad v5 bakes are skipped. A unit test pins
+  the per-sub-mesh transform.
+- Toon shaders lift the bottom band to a neutral `TOON_FLOOR` (0.18 × base
+  colour) so fully shadowed surfaces read as a dark tint, never pure black.
+
 ## 7. Decisions (settled 2026-10-21)
 
 1. **Script components go directly on the placed entity**, tracked by

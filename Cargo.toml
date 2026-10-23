@@ -68,9 +68,12 @@ log = "0.4.29"
 wasm-bindgen = "0.2.111"
 
 avian3d = { version = "0.5" }
-parry3d = { version = "0.25", default-features = false }
 rayon = "1"
 bytemuck = { version = "1", features = ["derive"] }
+# HDR lightmaps: OpenEXR (f16 RGB, ZIP) on disk, Rgba16Float on the GPU.
+# Both crates are already in the graph via `image`; pinned to the same versions.
+exr = "1.73"
+half = "2.6"
 engine-api = { path = "crates/engine-api" }
 libloading = "0.8"
 toml = "0.8"
@@ -88,6 +91,9 @@ js-sys = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+# Validates the hand-written compute shader in a unit test (same naga Bevy
+# links) so capability errors surface at `cargo test`, not at runtime.
+naga = { version = "27", features = ["wgsl-in"] }
 
 [dependencies.bevy]
 workspace = true

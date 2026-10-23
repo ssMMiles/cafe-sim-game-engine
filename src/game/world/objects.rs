@@ -38,8 +38,10 @@ use crate::game::world::terrain::{CHUNK_SIZE, TILE_SIZE};
 // File format constants
 const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 /// Version 3: records generalised from mesh-only `PlacedObjectRecord` to
-/// `PlacedEntityRecord` (kind + scripts). Version 2 is still readable.
-pub const CHUNK_OBJECTS_VERSION: u32 = 3;
+/// `PlacedEntityRecord` (kind + scripts). Version 4: light `intensity`
+/// reinterpreted from bevy photometric units into lightmap units for the
+/// baked lighting pipeline. Versions 2 and 3 are still readable.
+pub const CHUNK_OBJECTS_VERSION: u32 = 4;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
 pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
@@ -101,20 +103,33 @@ pub enum PlacedKind {
         asset_path: String,
         collider: ColliderMode,
     },
+    /// A baked point light. Never spawned as a bevy `PointLight` — see
+    /// `spawn_placed_entity`.
     PointLight {
         /// Linear RGB.
         color: [f32; 3],
+        /// Radiance at the light, in lightmap units (1.0 ≈ full base colour
+        /// on a surface facing it from close up). Not lumens.
         intensity: f32,
+        /// World units at which the light falls off to nothing. The falloff
+        /// is smooth and bounded, not physical inverse-square.
         range: f32,
+        /// Unused: baked lights always cast baked shadows. Retained so the
+        /// record shape is stable for a future dynamic-light option.
         shadows: bool,
     },
+    /// A baked spot light. Never spawned as a bevy `SpotLight`.
     SpotLight {
         /// Linear RGB.
         color: [f32; 3],
+        /// Radiance at the light, in lightmap units. Not lumens.
         intensity: f32,
+        /// World units at which the light falls off to nothing.
         range: f32,
+        /// Half-angles in radians; the cone fades between the two.
         inner_angle: f32,
         outer_angle: f32,
+        /// Unused: baked lights always cast baked shadows.
         shadows: bool,
     },
     /// Transform only — a spawn point or script anchor.
@@ -134,7 +149,7 @@ impl PlacedKind {
     pub fn point_light() -> Self {
         PlacedKind::PointLight {
             color: [1.0, 0.85, 0.6],
-            intensity: 100_000.0,
+            intensity: 1.0,
             range: 14.0,
             shadows: false,
         }
@@ -143,7 +158,7 @@ impl PlacedKind {
     pub fn spot_light() -> Self {
         PlacedKind::SpotLight {
             color: [1.0, 0.95, 0.85],
-            intensity: 200_000.0,
+            intensity: 1.5,
             range: 20.0,
             inner_angle: 0.4,
             outer_angle: 0.7,
@@ -222,6 +237,32 @@ pub mod legacy {
         pub chunk_x: i32,
         pub chunk_y: i32,
         pub objects: Vec<PlacedObjectRecordV2>,
+    }
+
+    /// v3 → v4: light `intensity` was in bevy photometric units (lumens for
+    /// point lights, ~100 000 for a room light); v4 reads it as lightmap
+    /// units, where 1.0 is roughly "full base colour up close". There is no
+    /// meaningful conversion between the two — the old numbers would read as
+    /// blinding white — so lights adopt the current preset intensity and can
+    /// be re-tuned by hand.
+    pub fn rescale_v3_light_intensities(file: &mut ChunkObjectsFile) {
+        for entity in &mut file.entities {
+            match &mut entity.kind {
+                PlacedKind::PointLight { intensity, .. } => {
+                    *intensity = match PlacedKind::point_light() {
+                        PlacedKind::PointLight { intensity, .. } => intensity,
+                        _ => unreachable!(),
+                    };
+                }
+                PlacedKind::SpotLight { intensity, .. } => {
+                    *intensity = match PlacedKind::spot_light() {
+                        PlacedKind::SpotLight { intensity, .. } => intensity,
+                        _ => unreachable!(),
+                    };
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Every v2 record was a trimesh-collided mesh with no scripts.
@@ -419,6 +460,7 @@ pub fn spawn_entity_record(
                         distance: 5.0,
                     },
                     ConvertToToon,
+                    crate::game::world::baking::object_lightmaps::NeedsObjectLightmaps,
                     SceneRoot(handle),
                     transform,
                     GlobalTransform::default(),
@@ -433,48 +475,15 @@ pub fn spawn_entity_record(
             }
             entity
         }
-        PlacedKind::PointLight {
-            color,
-            intensity,
-            range,
-            shadows,
-        } => commands
-            .spawn((
-                GameEntity,
-                placed,
-                PointLight {
-                    color: linear_color(*color),
-                    intensity: *intensity,
-                    range: *range,
-                    shadows_enabled: *shadows,
-                    ..default()
-                },
-                transform,
-            ))
-            .id(),
-        PlacedKind::SpotLight {
-            color,
-            intensity,
-            range,
-            inner_angle,
-            outer_angle,
-            shadows,
-        } => commands
-            .spawn((
-                GameEntity,
-                placed,
-                SpotLight {
-                    color: linear_color(*color),
-                    intensity: *intensity,
-                    range: *range,
-                    inner_angle: *inner_angle,
-                    outer_angle: *outer_angle,
-                    shadows_enabled: *shadows,
-                    ..default()
-                },
-                transform,
-            ))
-            .id(),
+        // Lights carry no bevy light component: all lighting is baked, so a
+        // real `PointLight`/`SpotLight` would light nothing the toon shaders
+        // draw while still costing cluster assignment and shadow-map work
+        // every frame. The parameters live on `PlacedObject.kind`, which is
+        // what the baker reads; `draw_light_gizmos` visualises them in the
+        // editor.
+        PlacedKind::PointLight { .. } | PlacedKind::SpotLight { .. } => {
+            commands.spawn((GameEntity, placed, transform)).id()
+        }
         PlacedKind::Empty => commands
             .spawn((
                 GameEntity,
@@ -747,7 +756,7 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != 2 && version != CHUNK_OBJECTS_VERSION {
+    if version != 2 && version != 3 && version != CHUNK_OBJECTS_VERSION {
         return Err(StorageError::VersionMismatch {
             expected: CHUNK_OBJECTS_VERSION,
             found: version,
@@ -783,8 +792,15 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
 
     let archived = rkyv::access::<ArchivedChunkObjectsFile, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-    let file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
+    let mut file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+    // v3 shares v4's layout exactly — only the meaning of light `intensity`
+    // changed — so it parses with the current types and is fixed up here.
+    if version == 3 {
+        legacy::rescale_v3_light_intensities(&mut file);
+    }
+    file.version = CHUNK_OBJECTS_VERSION;
 
     Ok(file)
 }
@@ -794,7 +810,7 @@ mod tests {
     use super::*;
     use engine_api::{PropValue, ScriptProp};
 
-    fn sample_v3() -> ChunkObjectsFile {
+    fn sample_current() -> ChunkObjectsFile {
         ChunkObjectsFile {
             version: CHUNK_OBJECTS_VERSION,
             chunk_x: -3,
@@ -844,8 +860,8 @@ mod tests {
     }
 
     #[test]
-    fn v3_roundtrip_preserves_kinds_and_scripts() {
-        let file = sample_v3();
+    fn current_roundtrip_preserves_kinds_and_scripts() {
+        let file = sample_current();
         let bytes = serialize_chunk_objects(&file).unwrap();
         let loaded = parse_chunk_objects_from_bytes(&bytes).unwrap();
 
@@ -938,9 +954,94 @@ mod tests {
         }
     }
 
+    /// A v3 file has v4's exact byte layout — only the meaning of light
+    /// `intensity` changed — so it parses with the current types and gets its
+    /// photometric intensities swapped for lightmap-unit ones. Everything
+    /// else, including the lights' colour, range and cone, is preserved.
+    #[test]
+    fn v3_light_intensities_are_rescaled_on_load() {
+        let mut file = sample_current();
+        file.entities.push(PlacedEntityRecord {
+            id: 50,
+            name: "lamp".into(),
+            position: [0.0, 3.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            kind: PlacedKind::PointLight {
+                color: [1.0, 0.5, 0.25],
+                intensity: 100_000.0,
+                range: 9.0,
+                shadows: false,
+            },
+            scripts: Vec::new(),
+        });
+        file.entities.push(PlacedEntityRecord {
+            id: 51,
+            name: "spot".into(),
+            position: [1.0, 4.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            kind: PlacedKind::SpotLight {
+                color: [0.2, 0.4, 0.6],
+                intensity: 250_000.0,
+                range: 11.0,
+                inner_angle: 0.3,
+                outer_angle: 0.6,
+                shadows: true,
+            },
+            scripts: Vec::new(),
+        });
+
+        // Same payload, stamped as v3.
+        let mut bytes = serialize_chunk_objects(&file).unwrap();
+        bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+
+        let loaded = parse_chunk_objects_from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.version, CHUNK_OBJECTS_VERSION);
+
+        let point = &loaded.entities.iter().find(|e| e.id == 50).unwrap().kind;
+        match point {
+            PlacedKind::PointLight {
+                color,
+                intensity,
+                range,
+                ..
+            } => {
+                assert_eq!(*color, [1.0, 0.5, 0.25]);
+                assert_eq!(*range, 9.0);
+                assert!(*intensity < 10.0, "lumens must not survive: {intensity}");
+            }
+            other => panic!("expected a point light, got {other:?}"),
+        }
+
+        let spot = &loaded.entities.iter().find(|e| e.id == 51).unwrap().kind;
+        match spot {
+            PlacedKind::SpotLight {
+                color,
+                intensity,
+                range,
+                inner_angle,
+                outer_angle,
+                ..
+            } => {
+                assert_eq!(*color, [0.2, 0.4, 0.6]);
+                assert_eq!(*range, 11.0);
+                assert_eq!(*inner_angle, 0.3);
+                assert_eq!(*outer_angle, 0.6);
+                assert!(*intensity < 10.0, "lumens must not survive: {intensity}");
+            }
+            other => panic!("expected a spot light, got {other:?}"),
+        }
+
+        // Meshes are untouched by the rescale.
+        let rock = loaded.entities.iter().find(|e| e.id == 1).unwrap();
+        assert!(matches!(rock.kind, PlacedKind::Mesh { .. }));
+        assert_eq!(rock.scripts.len(), 1);
+    }
+
     #[test]
     fn unknown_version_is_rejected() {
-        let file = sample_v3();
+        let file = sample_current();
         let mut bytes = serialize_chunk_objects(&file).unwrap();
         bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
         assert!(matches!(
@@ -951,7 +1052,7 @@ mod tests {
 
     #[test]
     fn corrupt_payload_fails_checksum() {
-        let file = sample_v3();
+        let file = sample_current();
         let mut bytes = serialize_chunk_objects(&file).unwrap();
         let n = bytes.len();
         bytes[n - 8] ^= 0xFF;

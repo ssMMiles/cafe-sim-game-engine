@@ -30,7 +30,7 @@ use balance::{
     Balance, DayStartBalance, spawn_balance_hud, tick_balance_popups, update_balance_text,
 };
 use cafe::{CafeOpen, enforce_closing_time};
-use cafe_scene::{spawn_cafe_lights, spawn_cafe_scene};
+use cafe_scene::spawn_cafe_scene;
 use coffee_menu::{
     ActiveCoffeeMachine, handle_drink_click, handle_machine_click, manage_brew_popups,
     position_brew_popups, sync_active_coffee_machine, sync_coffee_menu_ui, tick_brewing,
@@ -284,7 +284,6 @@ fn apply_phase_transitions(
             // (or new-game defaults) by the time we get here; we just
             // bring up the cafe scene and the gameplay HUDs.
             spawn_cafe_scene(&mut commands, &asset_server);
-            spawn_cafe_lights(&mut commands);
             spawn_balance_hud(&mut commands, &balance);
             spawn_time_hud(&mut commands, &time);
 

@@ -18,12 +18,11 @@
 //!
 //! 4. **Render graph node** (`BakeComputeNode`): Dispatch the compute shader.
 //!
-//! 5. **Observer on readback entity** (`handle_bake_complete`): Convert raw
-//!    bytes → `Image`, save PNG, swap into the material.
+//! 5. **Observer on readback entity** (`handle_bake_complete`): Decode the
+//!    packed f16 RGBA texels, blur, save EXR, swap into the material.
 
 use bevy::{
     asset::{Assets, RenderAssetUsages},
-    mesh::{Mesh, Mesh3d},
     pbr::ExtendedMaterial,
     prelude::*,
     render::{
@@ -40,11 +39,13 @@ use bevy::{
         storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
     },
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
-use super::BakeConfig;
+use super::bvh::{BvhNode, BvhTriangle, TriangleBvh};
+use super::lightmap::{BakeLighting, BakedLight, LightmapBuffer, terrain_lightmap_path};
+use super::{BakeConfig, BakeRegion};
 use crate::game::world::{
-    objects::PlacedObject,
+    objects::CHUNK_WORLD_SIZE,
     terrain::{
         HeightmapData,
         material::TerrainMaterial,
@@ -85,10 +86,20 @@ pub struct BakeUniformsData {
     pub bounce_count: u32,
     /// Starting row of this dispatch strip. Set per-strip by `dispatch_strip`.
     pub row_offset: u32,
-    /// Number of hull triangles in the hull_tris storage buffer for this job.
-    pub num_hull_tris: u32,
+    /// Number of nodes in the scene BVH buffer; 0 means no occluders.
+    pub num_bvh_nodes: u32,
     /// Number of DDA steps for AO rays (shorter range than shadow/bounce).
     pub ao_steps: u32,
+    /// Sun colour × intensity, lightmap units (`BakeLighting::sun_rgb`).
+    pub sun_r: f32,
+    pub sun_g: f32,
+    pub sun_b: f32,
+    /// Ambient colour × intensity, lightmap units (`BakeLighting::ambient_rgb`).
+    pub ambient_r: f32,
+    pub ambient_g: f32,
+    pub ambient_b: f32,
+    /// Number of `BakedLight`s in the lights storage buffer.
+    pub num_lights: u32,
 }
 
 // ============================================================================
@@ -124,8 +135,10 @@ pub struct GpuBakeChunkJob {
     pub strip_uniforms: Vec<BakeUniformsData>,
     /// Flat heightmap tile values covering chunk + ray-reach border (shared across strips).
     pub heightmap_bytes: Vec<f32>,
-    /// Flat hull triangle data: 9 floats per triangle (shared across strips).
-    pub hull_tri_bytes: Vec<f32>,
+    /// Scene BVH, uploaded verbatim (shared across strips and chunks).
+    pub bvh: Arc<TriangleBvh>,
+    /// Placed point/spot lights, uploaded verbatim (shared across strips).
+    pub lights: Vec<BakedLight>,
     /// Handle to the output `ShaderStorageBuffer` (pre-allocated, zeroed).
     pub out_handle: Handle<ShaderStorageBuffer>,
     /// Material to swap the lightmap into once the readback completes.
@@ -151,8 +164,10 @@ struct GpuBakeQueueEntry {
     resolution: u32,
     uniforms_data: BakeUniformsData,
     heightmap_bytes: Vec<f32>,
-    /// Flat hull triangle data: 9 floats per triangle (v0.xyz, v1.xyz, v2.xyz).
-    hull_tri_bytes: Vec<f32>,
+    /// Scene BVH, uploaded verbatim.
+    bvh: Arc<TriangleBvh>,
+    /// Placed point/spot lights, uploaded verbatim.
+    lights: Vec<BakedLight>,
     material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
     world_path: PathBuf,
 }
@@ -191,7 +206,9 @@ struct BakeInFlightStrip {
 /// Shared GPU buffers for a chunk, kept alive until all its strips have dispatched.
 struct ChunkSharedBuffers {
     _heightmap_buf: Buffer,
-    _obj_tris_buf: Buffer,
+    _bvh_nodes_buf: Buffer,
+    _bvh_tris_buf: Buffer,
+    _lights_buf: Buffer,
 }
 
 /// In-flight jobs awaiting dispatch via the render graph node.
@@ -324,6 +341,7 @@ pub fn enqueue_terrain_bake_jobs(
     heightmap: &HeightmapData,
     terrain_world: &TerrainWorld,
     config: &BakeConfig,
+    region: &BakeRegion,
     chunk_registry: &TerrainChunkRegistry,
     chunk_query: &Query<(
         &crate::game::world::terrain::TerrainChunk,
@@ -331,15 +349,10 @@ pub fn enqueue_terrain_bake_jobs(
     )>,
     processed: &mut GpuBakeProcessed,
     queue: &mut GpuBakeQueue,
-    sun_dir: Vec3,
-    placed_query: &Query<(Entity, &PlacedObject, &GlobalTransform)>,
-    children_query: &Query<&Children>,
-    mesh_gt_query: &Query<(&Mesh3d, &GlobalTransform)>,
-    meshes: &Assets<Mesh>,
+    lighting: &BakeLighting,
+    bvh: &Arc<TriangleBvh>,
 ) {
     use super::raycast::BakeHeightCache;
-    use crate::game::world::terrain::TILE_SIZE;
-    use crate::game::world::terrain::constants::CHUNK_SIZE;
 
     // Clear processed set so results from a prior bake don't block this one,
     // and discard any leftover entries from an interrupted previous bake.
@@ -347,13 +360,15 @@ pub fn enqueue_terrain_bake_jobs(
     queue.pending.clear();
 
     let res = config.terrain_resolution;
-    let chunk_world_size = CHUNK_SIZE as f32 * TILE_SIZE.0;
+    // Same footprint the mesh's lightmap UVs span — see the CPU baker.
+    let chunk_world_size = CHUNK_WORLD_SIZE;
     let ray_reach = config.ao_radius * 4.0;
 
     for (chunk, material_handle) in chunk_query.iter() {
-        if !chunk_registry
-            .loaded_chunks
-            .contains_key(&(chunk.chunk_x, chunk.chunk_y))
+        if !region.contains_chunk(chunk.chunk_x, chunk.chunk_y)
+            || !chunk_registry
+                .loaded_chunks
+                .contains_key(&(chunk.chunk_x, chunk.chunk_y))
         {
             continue;
         }
@@ -369,30 +384,6 @@ pub fn enqueue_terrain_bake_jobs(
             chunk_origin_z + chunk_world_size + ray_reach,
         );
 
-        // Collect convex hull shadow proxies for placed objects near this chunk.
-        let hull_tris = super::raycast::collect_shadow_hulls(
-            placed_query,
-            children_query,
-            mesh_gt_query,
-            meshes,
-            chunk_origin_x - ray_reach,
-            chunk_origin_x + chunk_world_size + ray_reach,
-            chunk_origin_z - ray_reach,
-            chunk_origin_z + chunk_world_size + ray_reach,
-            None,
-        );
-
-        let hull_tri_bytes: Vec<f32> = hull_tris
-            .iter()
-            .flat_map(|tri| {
-                [
-                    tri[0].x, tri[0].y, tri[0].z, tri[1].x, tri[1].y, tri[1].z, tri[2].x, tri[2].y,
-                    tri[2].z,
-                ]
-            })
-            .collect();
-        let num_hull_tris = hull_tris.len() as u32;
-
         let uniforms_data = BakeUniformsData {
             cache_min_x: cache.cache_min_x(),
             cache_min_z: cache.cache_min_z(),
@@ -406,9 +397,9 @@ pub fn enqueue_terrain_bake_jobs(
             chunk_origin_z,
             chunk_world_size,
             ao_radius: config.ao_radius,
-            sun_dir_x: sun_dir.x,
-            sun_dir_y: sun_dir.y,
-            sun_dir_z: sun_dir.z,
+            sun_dir_x: lighting.sun_dir.x,
+            sun_dir_y: lighting.sun_dir.y,
+            sun_dir_z: lighting.sun_dir.z,
             shadow_steps: config.shadow_steps,
             cache_tile_min_x: cache.tile_min_x(),
             cache_tile_min_z: cache.tile_min_z(),
@@ -417,8 +408,15 @@ pub fn enqueue_terrain_bake_jobs(
             terrain_albedo: config.terrain_albedo,
             bounce_count: config.bounce_count,
             row_offset: 0,
-            num_hull_tris,
+            num_bvh_nodes: bvh.nodes.len() as u32,
             ao_steps: config.ao_steps,
+            sun_r: lighting.sun_rgb.x,
+            sun_g: lighting.sun_rgb.y,
+            sun_b: lighting.sun_rgb.z,
+            ambient_r: lighting.ambient_rgb.x,
+            ambient_g: lighting.ambient_rgb.y,
+            ambient_b: lighting.ambient_rgb.z,
+            num_lights: lighting.lights.len() as u32,
         };
 
         queue.pending.push_back(GpuBakeQueueEntry {
@@ -427,9 +425,10 @@ pub fn enqueue_terrain_bake_jobs(
             resolution: res,
             uniforms_data,
             heightmap_bytes: cache.into_data(),
-            hull_tri_bytes,
+            bvh: bvh.clone(),
             material_handle: material_handle.id(),
             world_path: terrain_world.world_path.clone(),
+            lights: lighting.lights.clone(),
         });
     }
 
@@ -457,7 +456,8 @@ fn dispatch_chunk(
     pending: &mut GpuBakePending,
 ) {
     let texel_count = (entry.resolution * entry.resolution) as usize;
-    let byte_count = texel_count * std::mem::size_of::<u32>();
+    // One `vec2<u32>` per texel: four packed f16s, i.e. an Rgba16Float texel.
+    let byte_count = texel_count * 2 * std::mem::size_of::<u32>();
 
     // COPY_SRC is required by GpuReadbackPlugin so it can copy results to CPU.
     let mut out_buf = ShaderStorageBuffer::with_size(byte_count, RenderAssetUsages::RENDER_WORLD);
@@ -482,7 +482,8 @@ fn dispatch_chunk(
         strip_rows,
         strip_uniforms,
         heightmap_bytes: entry.heightmap_bytes,
-        hull_tri_bytes: entry.hull_tri_bytes,
+        bvh: entry.bvh,
+        lights: entry.lights,
         out_handle,
         material_handle: entry.material_handle,
         world_path: entry.world_path,
@@ -580,7 +581,11 @@ fn init_gpu_bake_pipeline(
                 binding_types::uniform_buffer_sized(false, Some(uniform_size)),
                 // binding 2 – output storage (read/write, no min-size needed)
                 binding_types::storage_buffer_sized(false, None),
-                // binding 3 – hull triangles read-only storage (no min-size needed)
+                // binding 3 – scene BVH nodes, read-only storage
+                binding_types::storage_buffer_read_only_sized(false, None),
+                // binding 4 – placed lights, read-only storage
+                binding_types::storage_buffer_read_only_sized(false, None),
+                // binding 5 – scene BVH triangles, read-only storage
                 binding_types::storage_buffer_read_only_sized(false, None),
             ),
         ),
@@ -638,19 +643,44 @@ fn prepare_gpu_bake_jobs(
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
-        // Upload hull triangles ONCE (use a 1-float dummy if empty to satisfy the binding).
-        let hull_data: &[f32] = if chunk_job.hull_tri_bytes.is_empty() {
-            &[0.0f32]
+        // Upload the scene BVH ONCE per chunk (dummy entries when there are
+        // no occluders, so the bindings are valid; `num_bvh_nodes == 0`
+        // short-circuits traversal).
+        let node_data: &[BvhNode] = if chunk_job.bvh.nodes.is_empty() {
+            &[bytemuck::Zeroable::zeroed()]
         } else {
-            &chunk_job.hull_tri_bytes
+            &chunk_job.bvh.nodes
         };
-        let obj_tris_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("bake_hull_tris"),
-            contents: bytemuck::cast_slice(hull_data),
+        let bvh_nodes_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("bake_bvh_nodes"),
+            contents: bytemuck::cast_slice(node_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+        let tri_data: &[BvhTriangle] = if chunk_job.bvh.tris.is_empty() {
+            &[bytemuck::Zeroable::zeroed()]
+        } else {
+            &chunk_job.bvh.tris
+        };
+        let bvh_tris_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("bake_bvh_tris"),
+            contents: bytemuck::cast_slice(tri_data),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
-        // Build one bind group per strip, sharing the heightmap + hull + output buffers.
+        // Upload the placed lights ONCE (dummy entry when there are none, so
+        // the binding is always valid; `num_lights` is what gates the loop).
+        let light_data: &[BakedLight] = if chunk_job.lights.is_empty() {
+            &[bytemuck::Zeroable::zeroed()]
+        } else {
+            &chunk_job.lights
+        };
+        let lights_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("bake_lights"),
+            contents: bytemuck::cast_slice(light_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+
+        // Build one bind group per strip, sharing the heightmap + BVH + lights + output buffers.
         for strip_uniforms in &chunk_job.strip_uniforms {
             let uniform_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("bake_uniforms"),
@@ -665,7 +695,9 @@ fn prepare_gpu_bake_jobs(
                     heightmap_buf.as_entire_buffer_binding(),
                     uniform_buf.as_entire_buffer_binding(),
                     gpu_out.buffer.as_entire_buffer_binding(),
-                    obj_tris_buf.as_entire_buffer_binding(),
+                    bvh_nodes_buf.as_entire_buffer_binding(),
+                    lights_buf.as_entire_buffer_binding(),
+                    bvh_tris_buf.as_entire_buffer_binding(),
                 )),
             );
 
@@ -680,7 +712,9 @@ fn prepare_gpu_bake_jobs(
         // Keep shared buffers alive until after dispatch.
         in_flight._shared.push(ChunkSharedBuffers {
             _heightmap_buf: heightmap_buf,
-            _obj_tris_buf: obj_tris_buf,
+            _bvh_nodes_buf: bvh_nodes_buf,
+            _bvh_tris_buf: bvh_tris_buf,
+            _lights_buf: lights_buf,
         });
     }
 }
@@ -724,49 +758,34 @@ fn handle_bake_complete(
     let raw_bytes: &[u8] = &trigger.data;
     let res = tag.resolution as usize;
 
-    // Each output entry is a u32 in [0, 255]; take the low byte as the R8Unorm value.
-    // The buffer was written as u32 values (not u8), so cast_slice to get u32s first.
-    let u32_values: &[u32] = bytemuck::cast_slice(raw_bytes);
-    let raw_pixels: Vec<u8> = u32_values.iter().map(|&v| (v & 0xFF) as u8).collect();
-
-    if raw_pixels.len() != res * res {
+    // The shader wrote one Rgba16Float texel (two packed f16 pairs) per entry.
+    let Some(raw) = LightmapBuffer::from_rgba16_bytes(res, raw_bytes) else {
         error!(
-            "GPU bake readback size mismatch for chunk ({}, {}): expected {} texels, got {}",
+            "GPU bake readback size mismatch for chunk ({}, {}): expected {} bytes, got {}",
             tag.chunk_x,
             tag.chunk_y,
-            res * res,
-            raw_pixels.len()
+            res * res * 8,
+            raw_bytes.len()
         );
         commands.entity(entity).try_despawn();
         return;
-    }
+    };
 
     // Blur to eliminate per-texel Monte Carlo variance before toon quantization.
-    let pixels = super::terrain::blur_lightmap(&raw_pixels, res, config.blur_radius);
+    let lightmap = raw.blur(config.blur_radius);
 
-    // Save PNG to disk.
-    if let Err(e) =
-        super::terrain::save_lightmap_png(&pixels, res, &tag.world_path, tag.chunk_x, tag.chunk_y)
-    {
+    // A failed write is logged but the live material still gets the result.
+    let path = terrain_lightmap_path(&tag.world_path, tag.chunk_x, tag.chunk_y);
+    if let Err(e) = lightmap.save_exr(&path) {
         error!(
-            "GPU bake: failed to save PNG for chunk ({}, {}): {e}",
-            tag.chunk_x, tag.chunk_y
+            "GPU bake: failed to save lightmap for chunk ({}, {}) to {}: {e}",
+            tag.chunk_x,
+            tag.chunk_y,
+            path.display()
         );
     }
 
-    // Insert GPU image and swap into the material.
-    let image = Image::new(
-        bevy::render::render_resource::Extent3d {
-            width: res as u32,
-            height: res as u32,
-            depth_or_array_layers: 1,
-        },
-        bevy::render::render_resource::TextureDimension::D2,
-        pixels,
-        bevy::render::render_resource::TextureFormat::R8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    let new_handle = images.add(image);
+    let new_handle = images.add(lightmap.into_image());
 
     if let Some(mat) = materials.get_mut(tag.material_handle) {
         mat.extension.lightmap = new_handle;
@@ -787,5 +806,140 @@ fn handle_bake_complete(
 
     if queue.pending.is_empty() && queue.in_flight == 0 {
         info!("GPU terrain bake: all chunks complete.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BvhNode, BvhTriangle};
+    use half::f16;
+
+    const SHADER_SRC: &str = include_str!("../../../../assets/shaders/lightmap_bake.wgsl");
+
+    /// Everything memcpy'd to the GPU must keep the WGSL-side layout.
+    #[test]
+    fn bvh_buffers_match_the_wgsl_structs() {
+        assert_eq!(std::mem::size_of::<BvhNode>(), 32);
+        assert_eq!(std::mem::size_of::<BvhTriangle>(), 48);
+    }
+
+    /// The uniform block is memcpy'd into a GPU uniform buffer, so its size
+    /// must stay a multiple of 16 or the WGSL struct silently disagrees.
+    #[test]
+    fn bake_uniforms_are_vec4_aligned() {
+        let size = std::mem::size_of::<super::BakeUniformsData>();
+        assert_eq!(size % 16, 0, "BakeUniformsData is {size} bytes");
+    }
+
+    /// The bake shader must validate with *no* optional capabilities: it is
+    /// plain WGSL (no naga_oil imports), and the GPU path has already failed
+    /// once in the field on `pack2x16float` wanting `SHADER_FLOAT16_IN_FLOAT32`.
+    #[test]
+    fn compute_shader_validates_without_optional_capabilities() {
+        let module = naga::front::wgsl::parse_str(SHADER_SRC).unwrap_or_else(|e| {
+            panic!(
+                "lightmap_bake.wgsl failed to parse: {}",
+                e.emit_to_string(SHADER_SRC)
+            )
+        });
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("lightmap_bake.wgsl failed validation: {e:?}"));
+    }
+
+    /// Line-for-line Rust transliteration of `f32_to_f16_bits` in
+    /// lightmap_bake.wgsl. Keep the two in sync; this test is what proves the
+    /// shader's hand-rolled conversion is bit-exact.
+    fn f32_to_f16_bits(value: f32) -> u32 {
+        let bits = value.to_bits();
+        let sign = (bits >> 16) & 0x8000;
+        let exp32 = ((bits >> 23) & 0xFF) as i32;
+        let mant = bits & 0x7F_FFFF;
+
+        if exp32 == 0xFF {
+            return if mant != 0 {
+                sign | 0x7E00
+            } else {
+                sign | 0x7C00
+            };
+        }
+
+        let exp16 = exp32 - 127 + 15;
+        if exp16 >= 31 {
+            return sign | 0x7C00;
+        }
+        if exp16 <= 0 {
+            if exp16 < -10 {
+                return sign;
+            }
+            let full = mant | 0x80_0000;
+            let shift = (14 - exp16) as u32;
+            let mut sub = full >> shift;
+            let rem = full & ((1u32 << shift) - 1);
+            let halfway = 1u32 << (shift - 1);
+            if rem > halfway || (rem == halfway && (sub & 1) == 1) {
+                sub += 1;
+            }
+            return sign | sub;
+        }
+
+        let mut h = sign | ((exp16 as u32) << 10) | (mant >> 13);
+        let rem = mant & 0x1FFF;
+        if rem > 0x1000 || (rem == 0x1000 && (h & 1) == 1) {
+            h += 1;
+        }
+        h
+    }
+
+    #[test]
+    fn wgsl_f16_packing_matches_half_crate() {
+        let mut values: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.25,
+            1.5,
+            // Round-to-nearest-even at the mantissa boundary.
+            1.000_976_562_5,
+            1.000_488_281_25,
+            1.001_464_843_75,
+            2049.0,
+            2051.0,
+            // Largest finite half, and the first values that round to inf.
+            65504.0,
+            65520.0,
+            65536.0,
+            70000.0,
+            // Normal/subnormal boundary and the smallest subnormals.
+            6.103_515_625e-5,
+            6.0e-5,
+            5.960_464_477_539_063e-8,
+            4.0e-8,
+            2.980_232_238_769_531_3e-8,
+            2.0e-8,
+            1e-10,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        // Dense sweep over the radiance range lightmaps actually hold.
+        let mut x = 0.0f32;
+        while x < 24.0 {
+            values.push(x);
+            x += 0.007_31;
+        }
+
+        for v in values {
+            let expected = f16::from_f32(v).to_bits() as u32;
+            let got = f32_to_f16_bits(v);
+            assert_eq!(got, expected, "value {v} ({:#010x})", v.to_bits());
+        }
+
+        let nan = f32_to_f16_bits(f32::NAN);
+        assert_eq!(nan & 0x7C00, 0x7C00, "NaN keeps an all-ones exponent");
+        assert_ne!(nan & 0x03FF, 0, "NaN keeps a non-zero mantissa");
     }
 }

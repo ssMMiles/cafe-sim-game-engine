@@ -1,69 +1,67 @@
 //! Baked lightmap generation for placed mesh instances.
 
 use bevy::{
-    asset::RenderAssetUsages,
     math::{Mat4, Vec2, Vec3, Vec4Swizzles},
     mesh::{Indices, Mesh, VertexAttributeValues},
-    pbr::ExtendedMaterial,
     prelude::*,
-    render::render_resource::TextureFormat,
 };
-use std::{collections::HashSet, fs, path::Path};
+use std::collections::HashSet;
 
-use super::raycast::{BakeHeightCache, collect_shadow_hulls};
-use super::{BakeConfig, raycast};
-use crate::game::{
-    gfx::toon_material::ToonMaterial,
-    world::{
-        objects::PlacedObject,
-        terrain::{HeightmapData, storage::TerrainWorld},
-    },
+use super::bvh::TriangleBvh;
+use super::lightmap::{BakeLighting, LightmapBuffer};
+use super::object_lightmaps::{
+    ToonMat, ToonMeshQuery, collect_toon_meshes, object_lightmap_path, unique_material,
+};
+use super::raycast::BakeHeightCache;
+use super::uv_unwrap::{LightmapUvCache, lightmap_resolution};
+use super::{BakeConfig, BakeRegion, raycast};
+use crate::game::world::{
+    objects::PlacedObject,
+    terrain::{HeightmapData, storage::TerrainWorld},
 };
 
-/// Bake lightmaps for all placed objects currently in the world.
+/// Bake lightmaps for the placed objects standing inside `region`.
 ///
-/// For each object this function:
-/// 1. Generates UV2 if the mesh doesn't already have it (via xatlas).
+/// For each toon-shaded sub-mesh of each object (see `object_lightmaps.rs`
+/// for why lightmaps are per sub-mesh) this function:
+/// 1. Ensures the mesh has non-overlapping lightmap UV2 (`uv_unwrap`), and
+///    sizes the atlas from its triangle count.
 /// 2. Rasterizes each triangle in UV2 space, interpolating world-space
 ///    position and normal from barycentric coords.
-/// 3. Casts shadow + AO rays from each texel's world position.
-/// 4. Saves the result as a PNG and applies it to the object's material.
+/// 3. Shades each texel with the shared lighting model (sun shadow rays,
+///    ambient×AO, and every placed point/spot light; no indirect bounce for
+///    objects yet). Shadow rays test the scene BVH, which includes this very
+///    object, so it shadows itself; ray origins are nudged along the *face*
+///    normal to keep a triangle from occluding its own texels.
+/// 4. Saves the result as EXR and applies it to the sub-mesh's material.
 #[allow(clippy::too_many_arguments)]
 pub fn bake_object_lightmaps(
+    commands: &mut Commands,
     heightmap: &HeightmapData,
     terrain_world: &TerrainWorld,
     config: &BakeConfig,
+    region: &BakeRegion,
     placed_query: &Query<(Entity, &PlacedObject, &GlobalTransform)>,
-    mesh_query: &Query<(
-        &Mesh3d,
-        &MeshMaterial3d<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
-    )>,
-    mesh_gt_query: &Query<(&Mesh3d, &GlobalTransform)>,
+    mesh_query: &ToonMeshQuery,
     children_query: &Query<&Children>,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
+    materials: &mut Assets<ToonMat>,
     images: &mut Assets<Image>,
-    baked_uv_cache: &mut HashSet<bevy::asset::AssetId<Mesh>>,
-    sun_dir: Vec3,
+    uv_cache: &mut LightmapUvCache,
+    lighting: &BakeLighting,
+    bvh: &TriangleBvh,
 ) {
-    let res = config.mesh_resolution as usize;
-
     for (root_entity, placed_obj, global_transform) in placed_query.iter() {
-        let world_mat = global_transform.to_matrix();
-
-        // Collect all mesh+material pairs in the scene hierarchy.
-        let mesh_entities = collect_mesh_entities(root_entity, mesh_query, children_query);
-
-        if mesh_entities.is_empty() {
+        if !region.contains_point(global_transform.translation()) {
             continue;
         }
-
-        // Build one lightmap image per placed object instance (all sub-meshes
-        // contribute into the same atlas; we use the object id as filename).
-        let mut pixels = vec![0u8; res * res];
-        // Track which texels have been written so we don't overwrite with
-        // later (possibly worse-sampled) triangles.
-        let mut written = vec![false; res * res];
+        // Every toon-shaded mesh entity in the scene hierarchy, in the
+        // canonical order that numbers the lightmap files. Each carries its
+        // own world transform — see `ToonMeshEntry::transform`.
+        let entries = collect_toon_meshes(root_entity, mesh_query, children_query);
+        if entries.is_empty() {
+            continue;
+        }
 
         // Compute the world-space bounding box across all sub-meshes so we can
         // build a tight heightmap cache covering the entire object + ray reach.
@@ -72,9 +70,9 @@ pub fn bake_object_lightmaps(
         let mut bbox_max = Vec3::splat(f32::MIN);
         let mut have_bounds = false;
 
-        for (mesh_handle, _) in &mesh_entities {
-            if let Some(mesh) = meshes.get(mesh_handle.id()) {
-                let (mn, mx) = world_bounds(mesh, &world_mat);
+        for entry in &entries {
+            if let Some(mesh) = meshes.get(entry.mesh.id()) {
+                let (mn, mx) = world_bounds(mesh, &entry.transform.to_matrix());
                 bbox_min = bbox_min.min(mn);
                 bbox_max = bbox_max.max(mx);
                 have_bounds = true;
@@ -84,7 +82,7 @@ pub fn bake_object_lightmaps(
         // Fall back to a generous region centred on the object's world position
         // if we couldn't derive bounds from vertices.
         if !have_bounds {
-            let centre = world_mat.w_axis.truncate();
+            let centre = global_transform.translation();
             bbox_min = centre - Vec3::splat(ray_reach * 2.0);
             bbox_max = centre + Vec3::splat(ray_reach * 2.0);
         }
@@ -97,88 +95,70 @@ pub fn bake_object_lightmaps(
             bbox_max.z + ray_reach,
         );
 
-        // Collect convex hull shadow proxies for all other placed objects
-        // overlapping this object's bake region. Exclude the current entity
-        // to prevent self-shadowing artifacts.
-        let hull_tris = collect_shadow_hulls(
-            placed_query,
-            children_query,
-            mesh_gt_query,
-            meshes,
-            bbox_min.x - ray_reach,
-            bbox_max.x + ray_reach,
-            bbox_min.z - ray_reach,
-            bbox_max.z + ray_reach,
-            Some(root_entity),
-        );
+        // Materials claimed so far for this object; sub-meshes that share one
+        // get a private clone so their lightmaps don't overwrite each other.
+        let mut seen_materials = HashSet::new();
 
-        for (mesh_handle, _mat_handle) in &mesh_entities {
-            // Ensure the mesh has UV2; generate if absent.
-            let mesh_id = mesh_handle.id();
-            let has_uv2 = meshes
-                .get(mesh_id)
-                .map(|m| m.attribute(Mesh::ATTRIBUTE_UV_1).is_some())
-                .unwrap_or(false);
-
-            if !has_uv2 && !baked_uv_cache.contains(&mesh_id) {
-                if let Some(mesh) = meshes.get_mut(mesh_id) {
-                    super::uv_unwrap::generate_lightmap_uvs(mesh);
-                }
-                baked_uv_cache.insert(mesh_id);
-            }
+        for (k, entry) in entries.iter().enumerate() {
+            // Unwrap the mesh (once per asset) and size this sub-mesh's atlas
+            // from its triangle count.
+            let mesh_id = entry.mesh.id();
+            let Some(tri_count) = uv_cache.ensure(meshes, mesh_id) else {
+                continue;
+            };
+            let res = lightmap_resolution(
+                tri_count,
+                config.mesh_texels_per_triangle,
+                config.mesh_resolution_max,
+            ) as usize;
 
             let Some(mesh) = meshes.get(mesh_id) else {
                 continue;
             };
 
+            let mut lightmap = LightmapBuffer::new(res);
+            // Texels a triangle actually covered: later triangles don't
+            // overwrite earlier ones, and dilation only fills the gaps.
+            let mut written = vec![false; res * res];
+
             rasterize_mesh_lightmap(
                 mesh,
-                &world_mat,
+                &entry.transform.to_matrix(),
                 &cache,
-                &hull_tris,
+                bvh,
                 config,
-                sun_dir,
-                &mut pixels,
+                lighting,
+                &mut lightmap,
                 &mut written,
-                res,
             );
-        }
 
-        // Simple 3×3 max dilation pass to fill UV seam boundary texels.
-        dilate_lightmap(&mut pixels, res);
+            // Flood lit values into each cell's gutter so bilinear filtering
+            // at a triangle's edge never samples an empty (black) texel.
+            lightmap.dilate(&mut written, config.dilate_passes);
 
-        // Save to disk.
-        let save_result = save_object_lightmap_png(&pixels, res, terrain_world, placed_obj.id);
-        if let Err(e) = save_result {
-            error!(
-                "Failed to save object lightmap for id={}: {e}",
-                placed_obj.id
-            );
-            continue;
-        }
+            // A failed write is logged but doesn't stop the live material from
+            // picking up the result.
+            let path = object_lightmap_path(&terrain_world.world_path, placed_obj.id, k);
+            if let Err(e) = lightmap.save_exr(&path) {
+                error!(
+                    "Failed to save object lightmap for id={} sub-mesh {k} to {}: {e}",
+                    placed_obj.id,
+                    path.display()
+                );
+            }
 
-        // Create a GPU image and apply to all sub-mesh materials.
-        let image = Image::new(
-            bevy::render::render_resource::Extent3d {
-                width: res as u32,
-                height: res as u32,
-                depth_or_array_layers: 1,
-            },
-            bevy::render::render_resource::TextureDimension::D2,
-            pixels,
-            TextureFormat::R8Unorm,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        let new_handle = images.add(image);
-
-        for (_mesh_handle, mat_handle) in &mesh_entities {
+            let Some(mat_handle) = unique_material(entry, &mut seen_materials, materials, commands)
+            else {
+                continue;
+            };
             if let Some(mat) = materials.get_mut(mat_handle.id()) {
-                mat.extension.lightmap = new_handle.clone();
+                mat.extension.lightmap = images.add(lightmap.into_image());
             }
         }
 
         info!(
-            "Baked object lightmap for placed object id={}",
+            "Baked {} object lightmap(s) for placed object id={}",
+            entries.len(),
             placed_obj.id
         );
     }
@@ -187,47 +167,6 @@ pub fn bake_object_lightmaps(
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Collect all (Mesh3d, MeshMaterial3d) pairs from an entity's subtree.
-fn collect_mesh_entities<'a>(
-    root: Entity,
-    mesh_query: &'a Query<(
-        &Mesh3d,
-        &MeshMaterial3d<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
-    )>,
-    children_query: &Query<&Children>,
-) -> Vec<(
-    Handle<Mesh>,
-    Handle<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
-)> {
-    let mut result = Vec::new();
-    collect_recursive(root, mesh_query, children_query, &mut result);
-    result
-}
-
-fn collect_recursive(
-    entity: Entity,
-    mesh_query: &Query<(
-        &Mesh3d,
-        &MeshMaterial3d<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
-    )>,
-    children_query: &Query<&Children>,
-    out: &mut Vec<(
-        Handle<Mesh>,
-        Handle<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
-    )>,
-) {
-    if let Ok((mesh_handle, mat_handle)) = mesh_query.get(entity) {
-        out.push((mesh_handle.0.clone(), mat_handle.0.clone()));
-    }
-    if let Ok(children) = children_query.get(entity) {
-        // Collect child entities first to avoid borrow conflicts in recursion.
-        let child_entities: Vec<Entity> = children.to_vec();
-        for child in child_entities {
-            collect_recursive(child, mesh_query, children_query, out);
-        }
-    }
-}
 
 /// Compute the world-space axis-aligned bounding box of a mesh's vertices
 /// transformed by `world_mat`. Returns `(min, max)`.
@@ -249,18 +188,17 @@ fn world_bounds(mesh: &Mesh, world_mat: &Mat4) -> (Vec3, Vec3) {
     (mn, mx)
 }
 
-/// Rasterize a mesh's triangles in UV2 space and accumulate baked values.
+/// Rasterize a mesh's triangles in UV2 space and shade each covered texel.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_mesh_lightmap(
     mesh: &Mesh,
     world_mat: &Mat4,
     cache: &BakeHeightCache,
-    hull_tris: &[[Vec3; 3]],
+    bvh: &TriangleBvh,
     config: &BakeConfig,
-    sun_dir: Vec3,
-    pixels: &mut [u8],
+    lighting: &BakeLighting,
+    lightmap: &mut LightmapBuffer,
     written: &mut [bool],
-    res: usize,
 ) {
     let positions: &[[f32; 3]] = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(VertexAttributeValues::Float32x3(v)) => v,
@@ -280,7 +218,9 @@ fn rasterize_mesh_lightmap(
         None => return,
     };
 
+    let res = lightmap.res;
     let res_f = res as f32;
+    let sun_dir = lighting.sun_dir;
 
     // Normal matrix is constant for this world transform — compute it once
     // outside the triangle loop rather than once per triangle.
@@ -308,6 +248,19 @@ fn rasterize_mesh_lightmap(
         let uv0 = Vec2::from(uv1s[i0]);
         let uv1 = Vec2::from(uv1s[i1]);
         let uv2 = Vec2::from(uv1s[i2]);
+
+        // Ray origins are offset along the geometric (face) normal, not the
+        // interpolated vertex normal: on a smooth-shaded mesh the vertex
+        // normal can lean enough that a point nudged along it lands *under*
+        // a neighbouring triangle, which then falsely shadows it (acne). The
+        // face normal is oriented to agree with the vertex normals so an
+        // inverted winding doesn't push the origin inside the surface.
+        let mut face_normal = (wp1 - wp0).cross(wp2 - wp0).normalize_or_zero();
+        if face_normal == Vec3::ZERO {
+            face_normal = (wn0 + wn1 + wn2).normalize_or(Vec3::Y);
+        } else if face_normal.dot(wn0 + wn1 + wn2) < 0.0 {
+            face_normal = -face_normal;
+        }
 
         // Pixel-space bounding box of the triangle.
         let min_u = (uv0.x.min(uv1.x).min(uv2.x) * res_f).floor().max(0.0) as usize;
@@ -338,27 +291,43 @@ fn rasterize_mesh_lightmap(
                 let world_pos = wp0 * b0 + wp1 * b1 + wp2 * b2;
                 let world_normal = (wn0 * b0 + wn1 * b1 + wn2 * b2).normalize();
 
-                let origin = world_pos + world_normal * 0.02;
+                let origin = world_pos + face_normal * 0.02;
 
                 let shadow = raycast::cast_shadow_ray(
                     origin,
+                    origin,
                     sun_dir,
                     cache,
-                    hull_tris,
+                    bvh,
                     config.ao_radius * 4.0,
                     config.shadow_steps,
                 );
                 let ao = raycast::compute_ao(
                     origin,
+                    origin,
                     world_normal,
                     cache,
+                    bvh,
                     config.ao_radius,
                     config.ao_rays,
                     config.ao_steps,
                 );
+                let ndotl = world_normal.dot(sun_dir).max(0.0);
 
-                let combined = (shadow * 0.5 + ao * 0.5).clamp(0.0, 1.0);
-                pixels[pixel_idx] = (combined * 255.0) as u8;
+                let mut radiance = lighting.sun_and_ambient(ndotl, shadow, ao, 0.0);
+                radiance += lighting.local_lights(origin, world_normal, |dir, dist| {
+                    raycast::cast_shadow_ray_segment(
+                        origin,
+                        origin,
+                        dir,
+                        dist,
+                        cache,
+                        bvh,
+                        config.light_shadow_steps(dist),
+                    )
+                });
+
+                lightmap.texels[pixel_idx] = radiance;
                 written[pixel_idx] = true;
             }
         }
@@ -396,55 +365,4 @@ fn barycentric_uv(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> Option<(f32, f32, f32)>
     let b1 = v;
     let b0 = 1.0 - b1 - b2;
     Some((b0, b1, b2))
-}
-
-/// 3×3 max dilation: for each unwritten texel, assign the max of the 3×3
-/// neighbourhood of written texels (or leave it at 0 if no neighbours are written).
-fn dilate_lightmap(pixels: &mut Vec<u8>, res: usize) {
-    let original = pixels.clone();
-    let res_i = res as i32;
-
-    for y in 0..res_i {
-        for x in 0..res_i {
-            let idx = (y * res_i + x) as usize;
-            if original[idx] > 0 {
-                continue; // already written
-            }
-            let mut best: u8 = 0;
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    let nx = x + dx;
-                    let ny = y + dy;
-                    if nx >= 0 && ny >= 0 && nx < res_i && ny < res_i {
-                        best = best.max(original[(ny * res_i + nx) as usize]);
-                    }
-                }
-            }
-            pixels[idx] = best;
-        }
-    }
-}
-
-fn save_object_lightmap_png(
-    pixels: &[u8],
-    res: usize,
-    terrain_world: &TerrainWorld,
-    object_id: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let objects_dir = terrain_world.world_path.join("objects");
-    fs::create_dir_all(&objects_dir)?;
-    let path = object_lightmap_path(&terrain_world.world_path, object_id);
-
-    let img = image::GrayImage::from_raw(res as u32, res as u32, pixels.to_vec())
-        .ok_or("Failed to build GrayImage")?;
-    img.save(&path)?;
-
-    Ok(())
-}
-
-/// Path at which a placed-object lightmap PNG is stored.
-pub fn object_lightmap_path(world_path: &Path, object_id: u64) -> std::path::PathBuf {
-    world_path
-        .join("objects")
-        .join(format!("obj_{object_id}_lightmap.png"))
 }

@@ -96,6 +96,30 @@ impl Plugin for WorldPlugin {
 #[derive(Component)]
 pub struct SunDebugMarker;
 
+/// Conversion from lightmap units to the physical units Bevy's PBR path wants.
+///
+/// All toon surfaces (terrain, placed meshes) read baked lightmaps and ignore
+/// real-time lights entirely. The one `DirectionalLight` and the ambient
+/// resource exist only for meshes that still use `StandardMaterial` — the
+/// player character and editor previews. 1.0 sun ≙ 10 000 lux and 0.25
+/// ambient ≙ brightness 80, the values the engine historically hard-coded.
+const PBR_LUX_PER_UNIT: f32 = 10_000.0;
+const PBR_AMBIENT_BRIGHTNESS_PER_UNIT: f32 = 320.0;
+
+fn sun_light(env: &terrain::storage::EnvironmentData) -> DirectionalLight {
+    DirectionalLight {
+        color: env.sun_color(),
+        illuminance: env.sun_intensity * PBR_LUX_PER_UNIT,
+        // Shadows are baked; this light never casts any.
+        shadows_enabled: false,
+        ..default()
+    }
+}
+
+fn ambient_brightness(env: &terrain::storage::EnvironmentData) -> f32 {
+    env.ambient_intensity * PBR_AMBIENT_BRIGHTNESS_PER_UNIT
+}
+
 pub fn setup(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -113,13 +137,13 @@ pub fn setup(
 
     commands.insert_resource(GlobalAmbientLight {
         color: env.ambient_color(),
-        brightness: env.ambient_brightness,
+        brightness: ambient_brightness(&env),
         ..default()
     });
 
     let sun_transform = env.sun_transform();
 
-    commands.spawn((GameEntity, baking::BakedSun, sun_transform));
+    commands.spawn((GameEntity, baking::BakedSun, sun_light(&env), sun_transform));
 
     // Debug sun position with yellow cone
     commands.spawn((
@@ -153,12 +177,13 @@ fn sun_debug_transform(sun: &Transform) -> Transform {
 /// re-runs the terrain bootstrap) and whenever the environment is edited.
 /// Also warns about plugins the level expects but the active project does not
 /// load — by design the engine only warns and never edits the project
-/// manifest on a level's behalf.
+/// manifest on a level's behalf — and about baked lightmaps from an older
+/// format that the loaders will skip.
 fn apply_environment(
     terrain_world: Option<Res<terrain::storage::TerrainWorld>>,
     active: Option<Res<crate::projects::ActiveProject>>,
     mut ambient: ResMut<GlobalAmbientLight>,
-    mut sun_query: Query<&mut Transform, With<baking::BakedSun>>,
+    mut sun_query: Query<(&mut Transform, &mut DirectionalLight), With<baking::BakedSun>>,
     mut cone_query: Query<&mut Transform, (With<SunDebugMarker>, Without<baking::BakedSun>)>,
 ) {
     let Some(terrain_world) = terrain_world else {
@@ -171,11 +196,12 @@ fn apply_environment(
     let env = &terrain_world.metadata.environment;
 
     ambient.color = env.ambient_color();
-    ambient.brightness = env.ambient_brightness;
+    ambient.brightness = ambient_brightness(env);
 
     let sun_transform = env.sun_transform();
-    for mut t in sun_query.iter_mut() {
+    for (mut t, mut light) in sun_query.iter_mut() {
         *t = sun_transform;
+        *light = sun_light(env);
     }
     for mut t in cone_query.iter_mut() {
         *t = sun_debug_transform(&sun_transform);
@@ -183,6 +209,8 @@ fn apply_environment(
 
     if terrain_world.is_added() {
         warn_missing_plugins(&terrain_world, active.as_deref());
+        #[cfg(not(target_arch = "wasm32"))]
+        baking::lightmap::warn_stale_lightmaps(&terrain_world.world_path);
     }
 }
 

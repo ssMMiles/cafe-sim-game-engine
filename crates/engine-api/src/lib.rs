@@ -447,9 +447,9 @@ impl UserSettings {
                 current_value: if self.physics_debug { "ON" } else { "OFF" }.to_string(),
             },
             SettingInfo {
-                name: "Lightmap",
+                name: "Lighting",
                 keybind: "Shift+L",
-                current_value: if self.use_lightmap { "ON" } else { "OFF" }.to_string(),
+                current_value: if self.use_lightmap { "BAKED" } else { "UNLIT" }.to_string(),
             },
         ]
     }

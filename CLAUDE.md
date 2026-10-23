@@ -78,7 +78,7 @@ src/
 │   ├── terrain_save.rs     # Shift+S save trigger
 │   ├── baking_trigger.rs   # Shift+B bake trigger
 │   ├── debug_hud.rs        # HUD panels (FPS, keybinds, position, interaction)
-│   ├── lightmap_toggle.rs
+│   ├── lightmap_toggle.rs  # Shift+L: baked lighting vs flat unlit debug view
 │   └── physics_debug.rs    # Gizmo toggle (Shift+P)
 └── game/               # Core simulation (SimulationPlugin)
     ├── mod.rs           # Plugin orchestration, system set config
@@ -102,9 +102,10 @@ src/
         │                #   persistence, light gizmos (legacy module reads v2 files)
         ├── terrain/
         │   ├── types.rs      # TerrainChunk, HeightmapData (sparse HashMap)
-        │   ├── constants.rs  # CHUNK_SIZE=65, TILE_SIZE=1.0
-        │   ├── storage.rs    # rkyv WorldMetadata (v3: environment, required_plugins,
-        │   │                 #   plugin_data) / ChunkData, quantized heights, legacy v2 readers
+        │   ├── constants.rs  # CHUNK_SIZE=256 vertices, TILE_SIZE=0.25 → 63.75 m chunks (CHUNK_WORLD_SIZE in objects.rs)
+        │   ├── storage.rs    # rkyv WorldMetadata (v5: environment in lightmap units,
+        │   │                 #   required_plugins, plugin_data, next_entity_id) / ChunkData,
+        │   │                 #   quantized heights, legacy v2 + v4 readers
         │   ├── bootstrap.rs  # Two-stage async terrain init
         │   ├── mesh.rs       # LOD mesh generation (4 levels), skirts
         │   ├── material.rs   # TerrainMaterial (stochastic no-tile sampling)
@@ -113,11 +114,17 @@ src/
         │   └── reconcile.rs  # Mesh-to-storage consistency
         └── baking/
             ├── mod.rs        # BakeConfig, BakingPlugin (Shift+B trigger)
-            ├── raycast.rs    # CPU shadow/AO raycasting (DDA)
+            ├── bvh.rs        # Flat triangle BVH over static scenery (PlacedObject or RigidBody::Static
+            │                 #   ancestry), built once per bake, traversed on CPU + uploaded to GPU
+            ├── lightmap.rs   # BakeLighting model, LightmapBuffer (f32 RGB), EXR I/O,
+            │                 #   versioned lightmap paths, stale-bake warning
+            ├── object_lightmaps.rs  # Per-sub-mesh object lightmap paths, NeedsObjectLightmaps,
+            │                 #   apply_object_lightmaps loader system
+            ├── raycast.rs    # CPU shadow/AO rays: heightmap DDA + BVH test (dual origins)
             ├── terrain.rs    # Terrain lightmap baking
             ├── objects.rs    # Per-object lightmap baking
             ├── gpu.rs        # GPU compute pipeline (native only)
-            └── uv_unwrap.rs  # xatlas UV2 generation
+            └── uv_unwrap.rs  # Non-overlapping per-triangle lightmap UV2 + LightmapUvCache
 ```
 
 ## Dynamic Plugins & Scripts
@@ -131,25 +138,28 @@ src/
 
 ```
 worlds/{id}/
-  world.meta                   # v4 (WORLD_FORMAT_VERSION): terrain config + chunk index
-                               #   + EnvironmentData (sun/ambient) + required_plugins + plugin_data
+  world.meta                   # v5 (WORLD_FORMAT_VERSION): terrain config + chunk index
+                               #   + EnvironmentData (sun/ambient, intensities in lightmap units) + required_plugins + plugin_data
                                #   + next_entity_id (placed-entity id counter, seeds the registry on load)
   chunks/chunk_X_Y.terrain     # v2 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc
-  chunks/chunk_X_Y.objects     # v3: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty)
+  chunks/chunk_X_Y.objects     # v4: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty;
+                               #   light intensity is in lightmap units, not lumens)
                                #   + Vec<ScriptBinding> with typed PropValue props
-  chunks/chunk_X_Y_lightmap.png, objects/obj_{id}_lightmap.png
+  chunks/chunk_X_Y_lightmap.v6.exr, objects/obj_{id}_{k}_lightmap.v6.exr  (k = sub-mesh index)
+                               # HDR OpenEXR (f16 RGB, ZIP) radiance; LIGHTMAP_FORMAT_VERSION is in the
+                               #   file name, so older bakes are skipped (with a warning), never misread
 ```
 
-All rkyv; v2 files are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
+All rkyv; v2 and v4 `world.meta` (and v2/v3 `.objects` files) are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
 
 ## Shaders (`assets/shaders/`)
 
 | Shader | Purpose |
 |--------|---------|
 | `sky_dome.wgsl` | 4-band toon sky gradient |
-| `toon_lighting.wgsl` | Object fragment shader (lightmap + toon bands) |
-| `terrain_toon.wgsl` | Terrain fragment (stochastic texture + toon lighting) |
-| `lightmap_bake.wgsl` | GPU compute lightmap generation |
+| `toon_lighting.wgsl` | Object fragment: samples baked HDR lightmap, hue-preserving toon bands (no runtime lights) |
+| `terrain_toon.wgsl` | Terrain fragment: stochastic stone texture × the same baked toon shading |
+| `lightmap_bake.wgsl` | GPU compute terrain bake (sun + lights + AO + bounce; stack BVH traversal → packed f16 RGB) |
 | `edge_detection_post.wgsl` | Post-process edge detection |
 
 ## Key Systems & Keybinds
@@ -173,7 +183,8 @@ All rkyv; v2 files are read via `legacy` modules and upgraded in memory, rewritt
 | Shift+G | Toggle terrain edit mode |
 | `[` / `]` | Adjust brush size |
 | Shift+S | Save terrain |
-| Shift+B | Bake lightmaps |
+| Shift+B | Bake lightmaps (3×3 chunks around the player by default; `BakeConfig::bake_radius`) |
+| Shift+L | Toggle baked lighting / flat unlit debug view |
 | Shift+P | Toggle physics debug gizmos |
 
 ## Terrain Streaming Pipeline
@@ -189,7 +200,13 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 - Camera renders to 1920x1080 float16 HDR image, displayed via sprite on layer 1
 - Materials: `ExtendedMaterial<StandardMaterial, ToonMaterial>` for objects, `ExtendedMaterial<StandardMaterial, TerrainMaterial>` for terrain
 - Material bind group 3; use `@group(#{MATERIAL_BIND_GROUP})` in WGSL (naga_oil substitution)
-- Lightmaps baked via GPU compute (native) or CPU raycast (WASM), stored as PNG
+- **All lighting is baked** — sun, ambient, and every placed point/spot light. A lightmap texel is outgoing radiance in *lightmap units* (1.0 = full base colour); the toon shaders only sample, band (hue-preserving, 5 bands, bottom band lifted to a neutral `TOON_FLOOR` of 0.18 so nothing is pure black), and multiply by base colour — no runtime light loops, shadow maps, or clustering. Model, identical in the CPU terrain, CPU object, and GPU terrain bakers: `sun_rgb * (ndotl * shadow + bounce) + ambient_rgb * ao + Σ local lights`. Local lights use a smooth bounded range falloff (not inverse-square) and a segment shadow ray that stops at the light. See `baking/lightmap.rs`.
+- Lightmaps baked via GPU compute (native) or CPU raycast (WASM) into `Rgba16Float` textures, stored as OpenEXR. Terrain: one per chunk, decoded in the chunk's async compute task. Objects: one per toon-shaded sub-mesh entity (shared mesh assets share UVs, so a per-object atlas would collide), applied by `apply_object_lightmaps` once the scene has toon materials
+- Object lightmap UVs are generated by `uv_unwrap`: **every triangle gets its own cell** in a grid atlas, with a gutter, and the mesh is de-indexed so corners are unshared. Atlas size scales with triangle count (`BakeConfig::mesh_texels_per_triangle`, capped by `mesh_resolution_max`). Overlapping UVs are the one thing a lightmap cannot tolerate — the previous triplanar projection bucketed by *unsigned* dominant axis, so a cube's top and bottom shared texels and faces wore each other's lighting.
+- Object texels are positioned with **each sub-mesh entity's own `GlobalTransform`** (`ToonMeshEntry::transform`), never the placed root's: glTF nodes carry their own scale/offset (the rock is scaled 2.5× inside its file), and a texel placed by the root transform alone sits inside the real mesh, where self-shadowing bakes it black.
+- The one `DirectionalLight` (`BakedSun`, shadows off) and `GlobalAmbientLight` exist only for meshes still on `StandardMaterial` (player character, editor previews); `world/mod.rs` derives their PBR values from the lightmap-unit intensities
+- Placed `PointLight`/`SpotLight` entities are **bake inputs only** — `spawn_placed_entity` never attaches a bevy light component, so they cost nothing at runtime and are visualised by `draw_light_gizmos` in the editor. Consequence: baked light does not fall on dynamic objects (the player), which stay lit by the sun + ambient.
+- **Shadow casting uses real triangles**, not convex hulls: `baking/bvh.rs` builds one flat BVH per bake over every toon-shaded mesh whose ancestry includes a `PlacedObject` or a `RigidBody::Static` (so editor props and plugin scenery like the cafe shell occlude, but a plugin's moving toon mesh does not). The CPU bakers traverse it and the GPU bake traverses the same uploaded nodes. Objects shadow themselves; acne is avoided by offsetting ray origins along the *face* normal, and terrain rays use two origins (0.5 up for the coarse DDA, at the surface for the exact triangle test). AO rays also test the BVH, which yields contact shadows under furniture. Bounce rays are absorbed by scenery but only terrain re-emits.
 - Volumetric fog + distance fog for atmosphere; sky dome follows camera
 
 ## Physics (avian3d 0.5)

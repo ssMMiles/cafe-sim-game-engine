@@ -26,11 +26,13 @@ const CHUNK_MAGIC: &[u8; 4] = b"TCNK";
 /// the chunk payload itself did not change.
 const CHUNK_FORMAT_VERSION: u32 = 2;
 /// `world.meta` format version. Version 3 added [`EnvironmentData`],
-/// `required_plugins`, and `plugin_data`; version 4 adds `next_entity_id`.
-/// Version 2 is still readable and is upgraded in memory (see [`legacy`]).
-/// Version 3 was never in a release and is **not** readable — the few v3 test
-/// worlds are expected to be deleted (they fail parse and start fresh).
-const WORLD_FORMAT_VERSION: u32 = 4;
+/// `required_plugins`, and `plugin_data`; version 4 added `next_entity_id`;
+/// version 5 switched [`EnvironmentData`] from Bevy's physical light units to
+/// lightmap units (`sun_intensity` / `ambient_intensity`) for the fully baked
+/// lighting pipeline. Versions 2 and 4 are still readable and are upgraded in
+/// memory (see [`legacy`]). Version 3 was never in a release and is **not**
+/// readable — the few v3 test worlds are expected to be deleted.
+const WORLD_FORMAT_VERSION: u32 = 5;
 
 // ============================================================================
 // Serializable Data Structures
@@ -72,24 +74,28 @@ pub struct WorldMetadata {
 
 /// Global lighting saved with the level.
 ///
-/// Defaults match the values `game::world::setup` previously hard-coded, so a
-/// world with no saved environment (or a v2 world) looks exactly as before.
+/// Intensities are in *lightmap units*: the value a surface's lightmap texel
+/// receives, where 1.0 means "show the full base colour". Every light is
+/// baked (see `baking::lightmap`), so these are bake inputs, not real-time
+/// light parameters. The sun orientation and position defaults match what
+/// `game::world::setup` historically hard-coded.
 #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
 pub struct EnvironmentData {
     /// Sun orientation as a quaternion, xyzw. Drives the `BakedSun` entity's
     /// transform, which the lightmap baker reads for its sun direction.
     pub sun_rotation: [f32; 4],
     /// Sun position. Purely cosmetic (the debug cone marker sits here); the
-    /// bake and the directional light only use the rotation.
+    /// bake only uses the rotation.
     pub sun_position: [f32; 3],
     /// Linear RGB.
     pub sun_color: [f32; 3],
-    /// Illuminance for the real-time `DirectionalLight` used when baked
-    /// lightmaps are toggled off.
-    pub sun_illuminance: f32,
+    /// Radiance an unshadowed surface facing the sun receives, lightmap units.
+    pub sun_intensity: f32,
     /// Linear RGB.
     pub ambient_color: [f32; 3],
-    pub ambient_brightness: f32,
+    /// Radiance a fully unoccluded surface receives from the sky, lightmap
+    /// units. Scaled by baked ambient occlusion per texel.
+    pub ambient_intensity: f32,
 }
 
 /// The sun placement `game::world::setup` has always used: high and to one
@@ -105,9 +111,9 @@ impl Default for EnvironmentData {
             sun_rotation: [rot.x, rot.y, rot.z, rot.w],
             sun_position: DEFAULT_SUN_POSITION,
             sun_color: [1.0, 1.0, 1.0],
-            sun_illuminance: 10_000.0,
+            sun_intensity: 1.0,
             ambient_color: [0.9, 0.9, 1.0],
-            ambient_brightness: 80.0,
+            ambient_intensity: 0.25,
         }
     }
 }
@@ -136,6 +142,17 @@ impl EnvironmentData {
             self.ambient_color[1],
             self.ambient_color[2],
         )
+    }
+
+    /// Sun colour × intensity in lightmap units — the bakers' sun term.
+    pub fn sun_radiance(&self) -> Vec3 {
+        Vec3::from(self.sun_color) * self.sun_intensity
+    }
+
+    /// Ambient colour × intensity in lightmap units — the bakers' sky term
+    /// before per-texel ambient occlusion.
+    pub fn ambient_radiance(&self) -> Vec3 {
+        Vec3::from(self.ambient_color) * self.ambient_intensity
     }
 }
 
@@ -259,11 +276,13 @@ pub struct VertexMaterial {
 // Legacy (v2) world metadata
 // ============================================================================
 
-/// The v2 `world.meta` shape, retained so existing worlds keep loading.
+/// Older `world.meta` shapes, retained so existing worlds keep loading.
 /// Parsed by [`parse_world_meta_from_bytes`] and upgraded in memory; never
 /// written.
 pub mod legacy {
-    use super::{ChunkIndexEntry, EnvironmentData, TerrainConfigData, WorldMetadata};
+    use super::{
+        ChunkIndexEntry, EnvironmentData, PluginLevelData, TerrainConfigData, WorldMetadata,
+    };
     use rkyv::{Archive, Deserialize, Serialize};
 
     #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
@@ -295,6 +314,62 @@ pub mod legacy {
             // collide with them. Like v3, pre-v4 worlds are dev-era test
             // data expected to be deleted rather than migrated.
             next_entity_id: 0,
+        }
+    }
+
+    /// The v4 `EnvironmentData` shape: Bevy-physical light units (lux, ambient
+    /// brightness) that drove the since-removed real-time directional light.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct EnvironmentDataV4 {
+        pub sun_rotation: [f32; 4],
+        pub sun_position: [f32; 3],
+        pub sun_color: [f32; 3],
+        pub sun_illuminance: f32,
+        pub ambient_color: [f32; 3],
+        pub ambient_brightness: f32,
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct WorldMetadataV4 {
+        pub version: u32,
+        pub world_id: String,
+        pub terrain_config: TerrainConfigData,
+        pub chunks_x: u32,
+        pub chunks_y: u32,
+        pub chunk_index: Vec<ChunkIndexEntry>,
+        pub last_saved: u64,
+        pub environment: EnvironmentDataV4,
+        pub required_plugins: Vec<String>,
+        pub plugin_data: Vec<PluginLevelData>,
+        pub next_entity_id: u64,
+    }
+
+    /// v4 → v5: keep the sun orientation and both colours, drop the physical
+    /// intensities. Lux and Bevy ambient brightness have no meaningful mapping
+    /// into lightmap units, so upgraded worlds take the default intensities.
+    /// Nothing baked ever depended on the old values, so the baked look of a
+    /// v4 world is unchanged after a re-bake.
+    pub fn upgrade_v4(old: WorldMetadataV4) -> WorldMetadata {
+        let defaults = EnvironmentData::default();
+        WorldMetadata {
+            version: super::WORLD_FORMAT_VERSION,
+            world_id: old.world_id,
+            terrain_config: old.terrain_config,
+            chunks_x: old.chunks_x,
+            chunks_y: old.chunks_y,
+            chunk_index: old.chunk_index,
+            last_saved: old.last_saved,
+            environment: EnvironmentData {
+                sun_rotation: old.environment.sun_rotation,
+                sun_position: old.environment.sun_position,
+                sun_color: old.environment.sun_color,
+                sun_intensity: defaults.sun_intensity,
+                ambient_color: old.environment.ambient_color,
+                ambient_intensity: defaults.ambient_intensity,
+            },
+            required_plugins: old.required_plugins,
+            plugin_data: old.plugin_data,
+            next_entity_id: old.next_entity_id,
         }
     }
 }
@@ -511,7 +586,7 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != 2 && version != WORLD_FORMAT_VERSION {
+    if version != 2 && version != 4 && version != WORLD_FORMAT_VERSION {
         return Err(StorageError::VersionMismatch {
             expected: WORLD_FORMAT_VERSION,
             found: version,
@@ -539,6 +614,15 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
             rkyv::deserialize::<legacy::WorldMetadataV2, RkyvError>(archived)
                 .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         return Ok(legacy::upgrade(old));
+    }
+
+    if version == 4 {
+        let archived = rkyv::access::<legacy::ArchivedWorldMetadataV4, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::WorldMetadataV4 =
+            rkyv::deserialize::<legacy::WorldMetadataV4, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v4(old));
     }
 
     let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
@@ -646,16 +730,16 @@ mod tests {
     }
 
     #[test]
-    fn test_world_v4_environment_plugin_data_and_id_counter_roundtrip() {
+    fn test_world_v5_environment_plugin_data_and_id_counter_roundtrip() {
         let mut metadata = create_world_metadata("env".to_string(), 128, 128, 64, (1.0, 1.0), 10.0);
         metadata.next_entity_id = 77;
         metadata.environment = EnvironmentData {
             sun_rotation: [0.1, 0.2, 0.3, 0.9],
             sun_position: [1.0, 50.0, -2.0],
             sun_color: [0.9, 0.8, 0.7],
-            sun_illuminance: 12_345.0,
+            sun_intensity: 1.5,
             ambient_color: [0.1, 0.2, 0.3],
-            ambient_brightness: 42.0,
+            ambient_intensity: 0.4,
         };
         metadata.required_plugins = vec!["cafe-sim".to_string()];
         metadata.plugin_data = vec![PluginLevelData {
@@ -667,9 +751,13 @@ mod tests {
         let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
 
         assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
-        assert_eq!(loaded.environment.sun_illuminance, 12_345.0);
-        assert_eq!(loaded.environment.ambient_brightness, 42.0);
+        assert_eq!(loaded.environment.sun_intensity, 1.5);
+        assert_eq!(loaded.environment.ambient_intensity, 0.4);
         assert_eq!(loaded.environment.sun_position, [1.0, 50.0, -2.0]);
+        assert_eq!(
+            loaded.environment.sun_radiance(),
+            Vec3::new(0.9, 0.8, 0.7) * 1.5
+        );
         assert_eq!(loaded.required_plugins, vec!["cafe-sim".to_string()]);
         assert_eq!(loaded.plugin_data.len(), 1);
         assert_eq!(loaded.plugin_data[0].plugin, "cafe-sim");
@@ -722,11 +810,75 @@ mod tests {
         assert_eq!(loaded.chunk_index[0].state, ChunkState::FullyOverwritten);
         // Upgraded worlds adopt the engine's historical hard-coded lighting.
         let d = EnvironmentData::default();
-        assert_eq!(loaded.environment.ambient_brightness, d.ambient_brightness);
+        assert_eq!(loaded.environment.ambient_intensity, d.ambient_intensity);
         assert_eq!(loaded.environment.sun_position, d.sun_position);
         assert!(loaded.required_plugins.is_empty());
         assert!(loaded.plugin_data.is_empty());
         assert_eq!(loaded.next_entity_id, 0);
+    }
+
+    /// A v4 `world.meta` keeps everything except the physical light
+    /// intensities, which become the lightmap-unit defaults.
+    #[test]
+    fn test_world_v4_upgrades_to_current() {
+        let old = legacy::WorldMetadataV4 {
+            version: 4,
+            world_id: "v4".to_string(),
+            terrain_config: TerrainConfigData {
+                grid_width: 128,
+                grid_height: 128,
+                tile_size_x: 1.0,
+                tile_size_y: 1.0,
+                height_scale: 10.0,
+            },
+            chunks_x: 2,
+            chunks_y: 2,
+            chunk_index: vec![ChunkIndexEntry {
+                chunk_x: 1,
+                chunk_y: 0,
+                state: ChunkState::Modified,
+            }],
+            last_saved: 5,
+            environment: legacy::EnvironmentDataV4 {
+                sun_rotation: [0.1, 0.2, 0.3, 0.9],
+                sun_position: [1.0, 50.0, -2.0],
+                sun_color: [0.9, 0.8, 0.7],
+                sun_illuminance: 12_345.0,
+                ambient_color: [0.1, 0.2, 0.3],
+                ambient_brightness: 42.0,
+            },
+            required_plugins: vec!["cafe-sim".to_string()],
+            plugin_data: vec![PluginLevelData {
+                plugin: "cafe-sim".to_string(),
+                data: vec![9],
+            }],
+            next_entity_id: 31,
+        };
+
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(WORLD_MAGIC);
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
+        let d = EnvironmentData::default();
+
+        assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
+        assert_eq!(loaded.world_id, "v4");
+        assert_eq!(loaded.chunk_index[0].state, ChunkState::Modified);
+        assert_eq!(loaded.environment.sun_rotation, [0.1, 0.2, 0.3, 0.9]);
+        assert_eq!(loaded.environment.sun_position, [1.0, 50.0, -2.0]);
+        assert_eq!(loaded.environment.sun_color, [0.9, 0.8, 0.7]);
+        assert_eq!(loaded.environment.ambient_color, [0.1, 0.2, 0.3]);
+        assert_eq!(loaded.environment.sun_intensity, d.sun_intensity);
+        assert_eq!(loaded.environment.ambient_intensity, d.ambient_intensity);
+        assert_eq!(loaded.required_plugins, vec!["cafe-sim".to_string()]);
+        assert_eq!(loaded.plugin_data[0].data, vec![9]);
+        assert_eq!(loaded.next_entity_id, 31);
     }
 
     /// The chunk payload did not change in v3; `.terrain` files stay at

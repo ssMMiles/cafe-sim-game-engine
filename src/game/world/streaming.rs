@@ -8,8 +8,8 @@
 //!
 //! 2. `launch_chunk_tasks` checks load state every frame.
 //!    When both handles are done it patches `HeightmapData`, extracts the height array,
-//!    and spawns a background `AsyncComputeTaskPool` task to generate LOD meshes.
-//!    The chunk moves to `computing`.
+//!    and spawns a background `AsyncComputeTaskPool` task to generate LOD meshes and
+//!    decode the chunk's saved lightmap. The chunk moves to `computing`.
 //!
 //! 3. `finalize_computed_chunks` polls background tasks each frame.
 //!    When a task completes it calls `spawn_chunk_from_result` and spawns any loaded objects.
@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use crate::game::simulation::Player;
 
 use super::{
+    baking::lightmap::terrain_lightmap_path,
     chunk_assets::{ChunkDataAsset, ChunkObjectsAsset},
     objects::{
         PlacedObject, PlacedObjectRegistry, despawn_chunk_objects, spawn_chunk_objects,
@@ -365,9 +366,16 @@ pub fn launch_chunk_tasks(
     >,
     mut state: ResMut<StreamingState>,
     heightmap: Option<ResMut<HeightmapData>>,
+    terrain_world: Option<Res<TerrainWorld>>,
 ) {
     let Some(mut heightmap) = heightmap else {
         return;
+    };
+    // Where this chunk's baked lightmap lives, decoded inside the task.
+    let lightmap_path = |cx: i32, cy: i32| {
+        terrain_world
+            .as_ref()
+            .map(|w| terrain_lightmap_path(&w.world_path, cx, cy))
     };
 
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
@@ -433,8 +441,9 @@ pub fn launch_chunk_tasks(
                     asset.0.clone()
                 });
 
+            let lm_path = lightmap_path(cx, cy);
             let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE) });
+                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE, lm_path) });
 
             state.computing.insert(
                 chunk_coord,
@@ -452,8 +461,9 @@ pub fn launch_chunk_tasks(
             };
             let (cx, cy) = chunk_coord;
 
-            let task =
-                thread_pool.spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE) });
+            let lm_path = lightmap_path(cx, cy);
+            let task = thread_pool
+                .spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm_path) });
 
             state.computing.insert(
                 chunk_coord,
@@ -496,8 +506,10 @@ pub fn launch_chunk_tasks(
                 apply_chunk_to_heightmap(&mut heightmap, data);
             }
 
-            let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE) });
+            let lm_path = lightmap_path(cx, cy);
+            let task = thread_pool.spawn(async move {
+                compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm_path)
+            });
 
             state
                 .computing
@@ -523,7 +535,6 @@ pub fn finalize_computed_chunks(
     render_assets: Option<Res<TerrainRenderAssets>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
     mut images: ResMut<Assets<Image>>,
-    terrain_world: Option<Res<TerrainWorld>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     asset_server: Res<AssetServer>,
 ) {
@@ -544,8 +555,6 @@ pub fn finalize_computed_chunks(
         }
     }
 
-    let world_path = terrain_world.as_ref().map(|w| w.world_path.as_path());
-
     for chunk_coord in ready_chunks {
         let Some(mut computing) = state.computing.remove(&chunk_coord) else {
             continue;
@@ -565,7 +574,6 @@ pub fn finalize_computed_chunks(
             &render_assets,
             &mut terrain_materials,
             &mut images,
-            world_path,
             result,
         );
 

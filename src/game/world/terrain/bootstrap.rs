@@ -1,21 +1,22 @@
 use avian3d::prelude::*;
 use bevy::{
-    asset::RenderAssetUsages,
     camera::primitives::Aabb,
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     pbr::ExtendedMaterial,
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
 use super::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE,
-    material::{DefaultLightmap, TerrainMaterial, create_default_lightmap},
+    material::TerrainMaterial,
     mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::{self, ChunkData, HeightData, TerrainChunkRegistry, dequantize_heights},
 };
 
-use crate::game::{GameEntity, world::chunk_assets::WorldMetaAsset};
+use crate::game::{
+    GameEntity, gfx::toon_material::create_default_toon_lightmap,
+    world::chunk_assets::WorldMetaAsset,
+};
 
 /// Marker indicating terrain has been processed (prevents re-running setup)
 #[derive(Component)]
@@ -54,6 +55,9 @@ pub struct ChunkComputeResult {
     pub aabb: Aabb,
     pub collider: Collider,
     pub collider_offset: Vec3,
+    /// The chunk's saved lightmap, decoded off the main thread. `None` when
+    /// the chunk has never been baked (or on wasm, which has no file access).
+    pub lightmap: Option<Image>,
 }
 
 /// Reconstruct a flat height array for a chunk directly from its saved `ChunkData`,
@@ -102,10 +106,13 @@ fn heights_from_chunk_data(chunk_data: Option<&ChunkData>) -> Vec<f32> {
     heights
 }
 
-/// Pure function: compute all LOD meshes and prepare heightfield data for a chunk.
+/// Pure function: compute all LOD meshes, prepare heightfield data, and decode
+/// the saved lightmap for a chunk.
 ///
 /// `chunk_data` is the optional saved terrain data for this chunk. Heights are
 /// reconstructed from it off the main thread — no `HeightmapData` access required.
+/// `lightmap_path` is where the chunk's baked lightmap would live; decoding it
+/// here keeps the (potentially tens of MB) EXR work off the main thread.
 ///
 /// This function is designed to run off the main thread (no Bevy world access).
 pub fn compute_chunk_meshes(
@@ -113,7 +120,18 @@ pub fn compute_chunk_meshes(
     chunk_x: i32,
     chunk_y: i32,
     tile_size: (f32, f32),
+    lightmap_path: Option<std::path::PathBuf>,
 ) -> ChunkComputeResult {
+    #[cfg(not(target_arch = "wasm32"))]
+    let lightmap = lightmap_path
+        .as_deref()
+        .and_then(crate::game::world::baking::lightmap::try_load_lightmap);
+    #[cfg(target_arch = "wasm32")]
+    let lightmap = {
+        let _ = lightmap_path;
+        None
+    };
+
     let heights = heights_from_chunk_data(chunk_data.as_ref());
     let cs = (CHUNK_SIZE - 1) as i32;
     let start_x = chunk_x * cs;
@@ -175,33 +193,8 @@ pub fn compute_chunk_meshes(
         aabb: aabb_out.unwrap(),
         collider,
         collider_offset,
+        lightmap,
     }
-}
-
-/// Load a saved lightmap PNG synchronously and register it as a Bevy `Image` asset.
-///
-/// Returns `None` if the file does not exist, cannot be read, or cannot be decoded.
-/// Only available on non-wasm targets since it uses `std::fs`.
-#[cfg(not(target_arch = "wasm32"))]
-fn try_load_lightmap(path: &std::path::Path, images: &mut Assets<Image>) -> Option<Handle<Image>> {
-    if !path.exists() {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    let img = image::load_from_memory(&bytes).ok()?;
-    let gray = img.to_luma8();
-    let image = Image::new(
-        Extent3d {
-            width: gray.width(),
-            height: gray.height(),
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        gray.into_raw(),
-        TextureFormat::R8Unorm,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    Some(images.add(image))
 }
 
 /// Spawn a terrain chunk entity from pre-computed mesh data.
@@ -210,9 +203,8 @@ fn try_load_lightmap(path: &std::path::Path, images: &mut Assets<Image>) -> Opti
 /// Inserts the meshes into `Assets<Mesh>`, builds the avian heightfield collider,
 /// and registers the entity in `TerrainChunkRegistry`.
 ///
-/// Each chunk gets its own cloned material so lightmaps can differ per-chunk.
-/// If a saved lightmap PNG exists at `world_path/chunks/chunk_{cx}_{cy}_lightmap.png`,
-/// it is loaded synchronously and applied to the chunk's material.
+/// Each chunk gets its own cloned material so lightmaps can differ per-chunk;
+/// the lightmap itself was already decoded by the compute task.
 pub fn spawn_chunk_from_result(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -220,8 +212,7 @@ pub fn spawn_chunk_from_result(
     render_assets: &TerrainRenderAssets,
     terrain_materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
     images: &mut Assets<Image>,
-    world_path: Option<&std::path::Path>,
-    result: ChunkComputeResult,
+    mut result: ChunkComputeResult,
 ) -> Entity {
     let cs = (CHUNK_SIZE - 1) as i32;
     let start_x = result.chunk_x * cs;
@@ -240,15 +231,8 @@ pub fn spawn_chunk_from_result(
     // affecting other chunks.
     let chunk_material = if let Some(base) = terrain_materials.get(&render_assets.material) {
         let mut mat = base.clone();
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(wp) = world_path {
-            let lm_path = wp.join("chunks").join(format!(
-                "chunk_{}_{}_lightmap.png",
-                result.chunk_x, result.chunk_y
-            ));
-            if let Some(handle) = try_load_lightmap(&lm_path, images) {
-                mat.extension.lightmap = handle;
-            }
+        if let Some(image) = result.lightmap.take() {
+            mat.extension.lightmap = images.add(image);
         }
         terrain_materials.add(mat)
     } else {
@@ -495,9 +479,8 @@ fn finalize_terrain_setup(
             });
         });
 
-    // Create the default (1×1 white) lightmap and store it as a shared resource.
-    let default_lightmap = create_default_lightmap(images);
-    commands.insert_resource(DefaultLightmap(default_lightmap.clone()));
+    // Unbaked chunks bind the shared 1×1 white lightmap, i.e. fully lit.
+    let default_lightmap = create_default_toon_lightmap(images);
 
     let material = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
