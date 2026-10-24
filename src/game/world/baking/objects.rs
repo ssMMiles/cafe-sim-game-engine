@@ -8,6 +8,7 @@ use bevy::{
 };
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::bvh::TriangleBvh;
@@ -25,30 +26,84 @@ use crate::game::world::{
     terrain::{HeightmapData, storage::TerrainWorld},
 };
 
-/// Bake lightmaps for the placed objects standing inside `region`.
+/// A sub-mesh's bake, packaged so the work can leave the main thread.
 ///
-/// For each toon-shaded sub-mesh of each object (see `object_lightmaps.rs`
-/// for why lightmaps are per sub-mesh) this function:
-/// 1. Ensures the mesh has non-overlapping lightmap UV2 (`uv_unwrap`), and
-///    sizes the atlas from its triangle count.
-/// 2. Rasterizes each triangle in UV2 space into a per-texel surface buffer,
-///    interpolating world-space position and normal from barycentric coords
-///    ([`rasterize_geometry`]).
-/// 3. Shades every covered texel with the shared lighting model
-///    ([`shade_geometry`], in parallel): sun shadow rays, ambient×AO, and
-///    every placed point/spot light; no indirect bounce for objects yet.
-///    Shadow rays test the scene BVH, which includes this very object, so it
-///    shadows itself; ray origins are nudged along the *face* normal to keep
-///    a triangle from occluding its own texels.
-/// 4. Saves the result as EXR and applies it to the sub-mesh's material.
+/// Everything here is a copy, because the ECS is not `Send` and the whole
+/// point is to hand the job to `AsyncComputeTaskPool` and let the frame
+/// carry on. Mesh *data* is snapshotted rather than the rasterised g-buffer:
+/// a 1024² atlas of [`TexelGeom`] is ~40 MB, where the mesh it came from is
+/// usually a few KB, so rasterisation happens inside the task.
+pub struct ObjectBakeJob {
+    object_id: u64,
+    sub_mesh: usize,
+    res: usize,
+    tri_count: u32,
+    mesh: MeshSnapshot,
+    world_mat: Mat4,
+    cache: BakeHeightCache,
+    /// Resolved on the main world — `unique_material` may *add* an asset, so
+    /// it cannot run off-thread.
+    material: Handle<ToonMat>,
+    path: PathBuf,
+}
+
+/// A finished sub-mesh lightmap on its way back to the ECS.
+pub struct ObjectBakeResult {
+    pub material: Handle<ToonMat>,
+    pub image: Image,
+}
+
+/// Mesh arrays copied out of `Assets<Mesh>` so rasterisation can happen off
+/// the main thread.
+struct MeshSnapshot {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uv1: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl MeshSnapshot {
+    /// `None` if the mesh is missing anything the rasteriser needs. UV1 in
+    /// particular should always be present — `uv_unwrap` puts it there — so
+    /// its absence means the unwrap was skipped.
+    fn from_mesh(mesh: &Mesh) -> Option<Self> {
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION)? {
+            VertexAttributeValues::Float32x3(v) => v.clone(),
+            _ => return None,
+        };
+        let normals = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL)? {
+            VertexAttributeValues::Float32x3(v) => v.clone(),
+            _ => return None,
+        };
+        let uv1 = match mesh.attribute(Mesh::ATTRIBUTE_UV_1)? {
+            VertexAttributeValues::Float32x2(v) => v.clone(),
+            _ => return None,
+        };
+        let indices = match mesh.indices()? {
+            Indices::U32(v) => v.clone(),
+            Indices::U16(v) => v.iter().map(|&i| i as u32).collect(),
+        };
+        Some(Self {
+            positions,
+            normals,
+            uv1,
+            indices,
+        })
+    }
+}
+
+/// Gather one [`ObjectBakeJob`] per toon-shaded sub-mesh of every placed
+/// object standing inside `region`.
 ///
-/// Steps 2 and 3 are separate passes rather than one loop because only step 3
-/// parallelises: rasterisation resolves overlapping triangles in order, while
-/// shading is independent per texel and is where essentially all the time
-/// goes. The split is also what a GPU bake would need — step 2's buffer is
-/// what it would upload. See `docs/GPU_OBJECT_BAKE_PLAN.md`.
+/// This is the half of the object bake that *must* run on the main world:
+/// `uv_unwrap` mutates the shared `Mesh` asset, `unique_material` may add a
+/// material asset, and the heightmap lives in a resource. Everything
+/// expensive is deferred to [`run_object_bake_jobs`].
+///
+/// See `object_lightmaps.rs` for why lightmaps are per sub-mesh rather than
+/// per object.
 #[allow(clippy::too_many_arguments)]
-pub fn bake_object_lightmaps(
+pub fn collect_object_bake_jobs(
     commands: &mut Commands,
     heightmap: &HeightmapData,
     terrain_world: &TerrainWorld,
@@ -59,12 +114,9 @@ pub fn bake_object_lightmaps(
     children_query: &Query<&Children>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ToonMat>,
-    images: &mut Assets<Image>,
     uv_cache: &mut LightmapUvCache,
-    lighting: &BakeLighting,
-    bvh: &TriangleBvh,
-) {
-    let mut stats = BakeStats::default();
+) -> Vec<ObjectBakeJob> {
+    let mut jobs = Vec::new();
 
     for (root_entity, placed_obj, global_transform) in placed_query.iter() {
         if !region.contains_point(global_transform.translation()) {
@@ -102,14 +154,6 @@ pub fn bake_object_lightmaps(
             bbox_max = centre + Vec3::splat(ray_reach * 2.0);
         }
 
-        let cache = BakeHeightCache::extract(
-            heightmap,
-            bbox_min.x - ray_reach,
-            bbox_min.z - ray_reach,
-            bbox_max.x + ray_reach,
-            bbox_max.z + ray_reach,
-        );
-
         // Materials claimed so far for this object; sub-meshes that share one
         // get a private clone so their lightmaps don't overwrite each other.
         let mut seen_materials = HashSet::new();
@@ -138,82 +182,143 @@ pub fn bake_object_lightmaps(
             );
             let res = lightmap_resolution(tri_count, cell, config.mesh_resolution_max) as usize;
 
-            // Pass 1 — rasterise. Cheap: barycentric interpolation, no rays.
-            let t_raster = Instant::now();
-            let geometry = rasterize_geometry(mesh, &world_mat, res);
-            stats.rasterize += t_raster.elapsed();
-
-            // Texels a triangle actually covered. Dilation fills the rest and
-            // marks what it filled, so this has to be owned and mutable.
-            let mut written: Vec<bool> = geometry.iter().map(Option::is_some).collect();
-            let covered = written.iter().filter(|w| **w).count();
-
-            // Pass 2 — shade. This is the expensive one, and it parallelises.
-            let t_shade = Instant::now();
-            let mut lightmap = shade_geometry(&geometry, res, &cache, bvh, config, lighting);
-            stats.shade += t_shade.elapsed();
-
-            stats.sub_meshes += 1;
-            stats.texels_total += res * res;
-            stats.texels_covered += covered;
-            stats.max_res = stats.max_res.max(res);
-            debug!(
-                "  obj {} sub-mesh {k}: {res}×{res} atlas, {tri_count} tris, \
-                 {covered} texel(s) covered ({:.0}%)",
-                placed_obj.id,
-                100.0 * covered as f32 / (res * res).max(1) as f32,
-            );
-
-            let t_post = Instant::now();
-
-            // Smooth away AO's Monte Carlo variance before anything quantises
-            // it, exactly as the terrain bake does — objects were getting no
-            // blur at all, so their noise landed straight on the toon band
-            // edges as speckle. Confined to each triangle's own cell (atlas
-            // neighbours are not surface neighbours) and to covered texels
-            // (the gutter is still empty until dilation below), and capped so
-            // a small cell can't be blurred flat.
-            let cell_px = cell_texels(res as u32, tri_count) as usize;
-            let blur_radius = config.blur_radius.min((cell_px / 4) as u32);
-            lightmap = lightmap.blur_cells(blur_radius, cell_px, &written);
-
-            // Flood lit values one texel past each triangle's edge so bilinear
-            // filtering there never samples an empty (black) texel. A small
-            // constant on purpose — see `BakeConfig::dilate_passes` for why
-            // this must *not* scale with the gutter.
-            lightmap.dilate(&mut written, config.dilate_passes);
-            stats.post += t_post.elapsed();
-
-            // A failed write is logged but doesn't stop the live material from
-            // picking up the result.
-            let t_io = Instant::now();
-            let path = object_lightmap_path(&terrain_world.world_path, placed_obj.id, k);
-            if let Err(e) = lightmap.save_exr(&path) {
-                error!(
-                    "Failed to save object lightmap for id={} sub-mesh {k} to {}: {e}",
-                    placed_obj.id,
-                    path.display()
+            let Some(snapshot) = MeshSnapshot::from_mesh(mesh) else {
+                warn!(
+                    "Skipping object lightmap for id={} sub-mesh {k}: mesh is missing \
+                     positions, normals, lightmap UVs or indices",
+                    placed_obj.id
                 );
-            }
-            stats.io += t_io.elapsed();
+                continue;
+            };
 
-            let Some(mat_handle) = unique_material(entry, &mut seen_materials, materials, commands)
+            // Resolved here, not in the task: this can add a material asset.
+            let Some(material) = unique_material(entry, &mut seen_materials, materials, commands)
             else {
                 continue;
             };
-            if let Some(mat) = materials.get_mut(mat_handle.id()) {
-                mat.extension.lightmap = images.add(lightmap.into_image());
-            }
-        }
 
+            jobs.push(ObjectBakeJob {
+                object_id: placed_obj.id,
+                sub_mesh: k,
+                res,
+                tri_count,
+                mesh: snapshot,
+                world_mat,
+                cache: BakeHeightCache::extract(
+                    heightmap,
+                    bbox_min.x - ray_reach,
+                    bbox_min.z - ray_reach,
+                    bbox_max.x + ray_reach,
+                    bbox_max.z + ray_reach,
+                ),
+                material,
+                path: object_lightmap_path(&terrain_world.world_path, placed_obj.id, k),
+            });
+        }
+    }
+
+    jobs
+}
+
+/// Bake every gathered job. **Touches no ECS state** — this is what runs on
+/// `AsyncComputeTaskPool`, so that Shift+B doesn't stall the frame.
+///
+/// Per job:
+/// 1. Rasterize the triangles in UV2 space into a per-texel surface buffer
+///    ([`rasterize_geometry`]).
+/// 2. Shade every covered texel with the shared lighting model
+///    ([`shade_geometry`], in parallel): sun shadow rays, ambient×AO, and
+///    every placed point/spot light; no indirect bounce for objects yet.
+///    Shadow rays test the scene BVH, which includes this very object, so it
+///    shadows itself; ray origins are nudged along the *face* normal to keep
+///    a triangle from occluding its own texels.
+/// 3. Blur, dilate, and write the EXR.
+///
+/// Steps 1 and 2 are separate passes rather than one loop because only step 2
+/// parallelises: rasterisation resolves overlapping triangles in order, while
+/// shading is independent per texel. The split is also what a GPU bake would
+/// need — step 1's buffer is what it would upload. See
+/// `docs/GPU_OBJECT_BAKE_PLAN.md`.
+pub fn run_object_bake_jobs(
+    jobs: Vec<ObjectBakeJob>,
+    config: &BakeConfig,
+    lighting: &BakeLighting,
+    bvh: &TriangleBvh,
+) -> Vec<ObjectBakeResult> {
+    let mut stats = BakeStats::default();
+    let mut results = Vec::with_capacity(jobs.len());
+
+    for job in jobs {
+        let res = job.res;
+
+        // Pass 1 — rasterise. Cheap: barycentric interpolation, no rays.
+        let t_raster = Instant::now();
+        let geometry = rasterize_geometry(&job.mesh, &job.world_mat, res);
+        stats.rasterize += t_raster.elapsed();
+
+        // Texels a triangle actually covered. Dilation fills the rest and
+        // marks what it filled, so this has to be owned and mutable.
+        let mut written: Vec<bool> = geometry.iter().map(Option::is_some).collect();
+        let covered = written.iter().filter(|w| **w).count();
+
+        // Pass 2 — shade. This is the expensive one, and it parallelises.
+        let t_shade = Instant::now();
+        let mut lightmap = shade_geometry(&geometry, res, &job.cache, bvh, config, lighting);
+        stats.shade += t_shade.elapsed();
+
+        stats.sub_meshes += 1;
+        stats.texels_total += res * res;
+        stats.texels_covered += covered;
+        stats.max_res = stats.max_res.max(res);
         debug!(
-            "Baked {} object lightmap(s) for placed object id={}",
-            entries.len(),
-            placed_obj.id
+            "  obj {} sub-mesh {}: {res}×{res} atlas, {} tris, {covered} texel(s) covered ({:.0}%)",
+            job.object_id,
+            job.sub_mesh,
+            job.tri_count,
+            100.0 * covered as f32 / (res * res).max(1) as f32,
         );
+
+        let t_post = Instant::now();
+
+        // Smooth away AO's Monte Carlo variance before anything quantises
+        // it, exactly as the terrain bake does — objects were getting no
+        // blur at all, so their noise landed straight on the toon band
+        // edges as speckle. Confined to each triangle's own cell (atlas
+        // neighbours are not surface neighbours) and to covered texels
+        // (the gutter is still empty until dilation below), and capped so
+        // a small cell can't be blurred flat.
+        let cell_px = cell_texels(res as u32, job.tri_count) as usize;
+        let blur_radius = config.blur_radius.min((cell_px / 4) as u32);
+        lightmap = lightmap.blur_cells(blur_radius, cell_px, &written);
+
+        // Flood lit values one texel past each triangle's edge so bilinear
+        // filtering there never samples an empty (black) texel. A small
+        // constant on purpose — see `BakeConfig::dilate_passes` for why
+        // this must *not* scale with the gutter.
+        lightmap.dilate(&mut written, config.dilate_passes);
+        stats.post += t_post.elapsed();
+
+        // A failed write is logged but doesn't stop the live material from
+        // picking up the result.
+        let t_io = Instant::now();
+        if let Err(e) = lightmap.save_exr(&job.path) {
+            error!(
+                "Failed to save object lightmap for id={} sub-mesh {} to {}: {e}",
+                job.object_id,
+                job.sub_mesh,
+                job.path.display()
+            );
+        }
+        stats.io += t_io.elapsed();
+
+        results.push(ObjectBakeResult {
+            material: job.material,
+            image: lightmap.into_image(),
+        });
     }
 
     stats.report(config);
+    results
 }
 
 // ============================================================================
@@ -322,27 +427,11 @@ struct TexelGeom {
 /// interpolation, no rays. Triangles are visited in order and the first to
 /// claim a texel keeps it, which is what makes the output independent of how
 /// the triangles happen to overlap.
-fn rasterize_geometry(mesh: &Mesh, world_mat: &Mat4, res: usize) -> Vec<Option<TexelGeom>> {
+fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize) -> Vec<Option<TexelGeom>> {
     let mut geometry: Vec<Option<TexelGeom>> = vec![None; res * res];
 
-    let positions: &[[f32; 3]] = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-        Some(VertexAttributeValues::Float32x3(v)) => v,
-        _ => return geometry,
-    };
-    let normals: &[[f32; 3]] = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
-        Some(VertexAttributeValues::Float32x3(v)) => v,
-        _ => return geometry,
-    };
-    let uv1s: &[[f32; 2]] = match mesh.attribute(Mesh::ATTRIBUTE_UV_1) {
-        Some(VertexAttributeValues::Float32x2(v)) => v,
-        _ => return geometry, // no UV2 — skip (shouldn't happen after unwrap)
-    };
-    let indices: Vec<u32> = match mesh.indices() {
-        Some(Indices::U32(v)) => v.clone(),
-        Some(Indices::U16(v)) => v.iter().map(|&i| i as u32).collect(),
-        None => return geometry,
-    };
-
+    let (positions, normals, uv1s, indices) =
+        (&mesh.positions, &mesh.normals, &mesh.uv1, &mesh.indices);
     let res_f = res as f32;
 
     // Normal matrix is constant for this world transform — compute it once
@@ -535,9 +624,14 @@ mod tests {
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::PrimitiveTopology;
 
-    /// A 1×1 quad in the XZ plane, unwrapped for lightmapping so its UV1 is
-    /// what the baker actually sees rather than something hand-written.
-    fn unwrapped_quad() -> Mesh {
+    /// A 1×1 quad in the XZ plane, unwrapped for lightmapping and snapshotted
+    /// exactly as the bake does — so the tests exercise the real path from
+    /// `Assets<Mesh>` to the rasteriser, not a hand-built buffer.
+    fn unwrapped_quad() -> MeshSnapshot {
+        MeshSnapshot::from_mesh(&unwrapped_quad_mesh()).expect("quad should snapshot")
+    }
+
+    fn unwrapped_quad_mesh() -> Mesh {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -625,10 +719,10 @@ mod tests {
     }
 
     /// A mesh the unwrapper never touched has no UV1, so there is nothing to
-    /// rasterise against. It must come back empty rather than panicking on a
-    /// missing attribute.
+    /// rasterise against. Snapshotting must refuse it — the bake then logs
+    /// and skips that sub-mesh rather than producing a black lightmap.
     #[test]
-    fn a_mesh_without_lightmap_uvs_rasterizes_to_nothing() {
+    fn a_mesh_without_lightmap_uvs_cannot_be_snapshotted() {
         let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
@@ -640,8 +734,24 @@ mod tests {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 3]);
         mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
 
-        let geometry = rasterize_geometry(&mesh, &Mat4::IDENTITY, 16);
-        assert_eq!(geometry.len(), 16 * 16);
-        assert!(geometry.iter().all(Option::is_none));
+        assert!(MeshSnapshot::from_mesh(&mesh).is_none());
+    }
+
+    /// The snapshot is what crosses to the task pool, so it has to carry
+    /// everything the rasteriser reads — and `generate_lightmap_uvs`
+    /// de-indexes, so the arrays it copies are the post-unwrap ones.
+    #[test]
+    fn snapshot_carries_the_unwrapped_mesh() {
+        let mesh = unwrapped_quad_mesh();
+        let snapshot = MeshSnapshot::from_mesh(&mesh).expect("should snapshot");
+
+        assert_eq!(
+            snapshot.positions.len(),
+            6,
+            "quad de-indexed to 2 triangles"
+        );
+        assert_eq!(snapshot.normals.len(), 6);
+        assert_eq!(snapshot.uv1.len(), 6);
+        assert_eq!(snapshot.indices, vec![0, 1, 2, 3, 4, 5]);
     }
 }

@@ -125,8 +125,10 @@ src/
             │                 #   apply_object_lightmaps loader system
             ├── raycast.rs    # CPU shadow/AO rays: heightmap DDA + BVH test (dual origins)
             ├── terrain.rs    # Terrain lightmap baking
-            ├── objects.rs    # Per-object lightmap baking: rasterize_geometry (serial) →
-            │                 #   shade_geometry (rayon) → blur/dilate; BakeStats timings
+            ├── objects.rs    # Per-object lightmap baking. collect_object_bake_jobs (main world,
+            │                 #   needs Assets) → run_object_bake_jobs (AsyncComputeTaskPool, no ECS:
+            │                 #   rasterize → shade via rayon → blur/dilate → EXR) → apply_object_bake.
+            │                 #   BakeStats reports per-pass timings
             ├── gpu.rs        # GPU compute pipeline (native only)
             └── uv_unwrap.rs  # Non-overlapping per-triangle lightmap UV2 + LightmapUvCache
 ```

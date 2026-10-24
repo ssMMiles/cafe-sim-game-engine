@@ -28,7 +28,12 @@ pub mod terrain;
 pub mod uv_unwrap;
 
 use avian3d::prelude::RigidBody;
-use bevy::{ecs::system::SystemParam, pbr::ExtendedMaterial, prelude::*};
+use bevy::{
+    ecs::system::SystemParam,
+    pbr::ExtendedMaterial,
+    prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
+};
 use std::sync::Arc;
 
 use crate::game::{
@@ -45,7 +50,21 @@ use crate::game::{
 };
 use bvh::{TriangleBvh, collect_occluder_triangles};
 use lightmap::{BakeLighting, BakedLight};
+use objects::ObjectBakeResult;
 use uv_unwrap::LightmapUvCache;
+
+/// The object bake currently running on `AsyncComputeTaskPool`, if any.
+///
+/// Object baking is seconds of ray casting. Running it inline in `Update`
+/// froze the whole app for the duration of every Shift+B, so it moved to the
+/// task pool — the same thing chunk meshing (`streaming.rs`) and world saves
+/// (`terrain/save.rs`) already do. `apply_object_bake` polls this.
+///
+/// One task for the whole pass rather than one per sub-mesh: the jobs are
+/// gathered together, the results are applied together, and a single slot
+/// makes "a bake is already running" trivial to detect.
+#[derive(Resource, Default)]
+pub struct ObjectBakeTask(Option<Task<Vec<ObjectBakeResult>>>);
 
 // ============================================================================
 // Configuration
@@ -297,6 +316,7 @@ impl Plugin for BakingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BakeConfig>();
         app.init_resource::<LightmapUvCache>();
+        app.init_resource::<ObjectBakeTask>();
         app.add_message::<BakeMessage>();
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -307,6 +327,17 @@ impl Plugin for BakingPlugin {
 
         use crate::game::world::WorldSet;
         app.add_systems(Update, run_bake.in_set(WorldSet::InGame));
+
+        // Picks up whatever `run_bake` handed to the task pool. Unconditional
+        // — the object bake is the CPU path on every platform.
+        app.add_systems(
+            Update,
+            apply_object_bake.after(run_bake).in_set(WorldSet::InGame),
+        );
+        // Leaving the world abandons any bake still running: dropping the
+        // `Task` cancels it, rather than burning cores on lightmaps for a
+        // level nobody is in any more.
+        app.add_systems(OnExit(crate::AppState::InGame), cancel_object_bake);
 
         // Saved object lightmaps are applied once each placed object's scene
         // has toon materials; wasm has no synchronous file access yet.
@@ -349,6 +380,7 @@ fn run_bake(
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
     mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
     mut uv_cache: ResMut<LightmapUvCache>,
+    mut object_bake: ResMut<ObjectBakeTask>,
     scene: BakeSceneQueries,
     baked_sun_query: Query<&GlobalTransform, With<BakedSun>>,
     #[cfg(not(target_arch = "wasm32"))] mut gpu_trigger: ResMut<GpuBakeTrigger>,
@@ -452,8 +484,18 @@ fn run_bake(
         &bvh,
     );
 
-    // ── Phase 2: Placed objects (always CPU) ────────────────────────────────
-    objects::bake_object_lightmaps(
+    // ── Phase 2: Placed objects (CPU, on the task pool) ─────────────────────
+    //
+    // Gathering has to happen here — it unwraps meshes, adds material assets
+    // and reads the heightmap resource — but it is cheap. Everything
+    // expensive goes to `AsyncComputeTaskPool` so Shift+B doesn't freeze the
+    // frame; `apply_object_bake` picks the results up when they land.
+    if object_bake.0.is_some() {
+        warn!("Object bake already running — terrain re-baked, objects skipped");
+        return;
+    }
+
+    let jobs = objects::collect_object_bake_jobs(
         &mut commands,
         &heightmap,
         &terrain_world,
@@ -464,11 +506,57 @@ fn run_bake(
         &scene.children,
         &mut meshes,
         &mut toon_materials,
-        &mut images,
         &mut uv_cache,
-        &lighting,
-        &bvh,
     );
+
+    if jobs.is_empty() {
+        return;
+    }
+
+    let job_count = jobs.len();
+    let task_config = config.clone();
+    let task_lighting = lighting.clone();
+    let task_bvh = bvh.clone();
+    object_bake.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+        objects::run_object_bake_jobs(jobs, &task_config, &task_lighting, &task_bvh)
+    }));
+    info!("Object bake dispatched: {job_count} sub-mesh(es) on the task pool");
+}
+
+/// Hand finished object lightmaps back to their materials.
+///
+/// Separate from `run_bake` because the bake runs off-thread: the task owns
+/// plain data, and only here can it be turned into an `Image` asset and
+/// bound. The EXR was already written inside the task.
+fn apply_object_bake(
+    mut object_bake: ResMut<ObjectBakeTask>,
+    mut images: ResMut<Assets<Image>>,
+    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
+) {
+    let Some(task) = object_bake.0.as_mut() else {
+        return;
+    };
+    let Some(results) = check_ready(task) else {
+        return;
+    };
+    object_bake.0 = None;
+
+    let count = results.len();
+    for result in results {
+        // A material can be gone if the object was deleted mid-bake. The EXR
+        // is already on disk, so the next load picks it up regardless.
+        if let Some(mat) = toon_materials.get_mut(result.material.id()) {
+            mat.extension.lightmap = images.add(result.image);
+        }
+    }
+    info!("Object bake complete: {count} sub-mesh lightmap(s) applied");
+}
+
+/// Drop any in-flight bake when the world unloads, cancelling it.
+fn cancel_object_bake(mut object_bake: ResMut<ObjectBakeTask>) {
+    if object_bake.0.take().is_some() {
+        info!("World unloaded — cancelling the in-flight object bake");
+    }
 }
 
 /// Dispatches GPU terrain bake jobs when `GpuBakeTrigger` is set.

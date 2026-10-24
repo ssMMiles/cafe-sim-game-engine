@@ -202,10 +202,20 @@ is what `BakeConfig::dilate_passes` already was. Deleted the derived version.
 
 Consequence: a GPU object bake is now poor value — ~0.46s of a ~0.6s bake, against
 a permanent fourth copy of the lighting model (the CPU path can't be retired; WASM
-has no compute). The remaining real problem is that `run_bake` calls the object
-bake **inline in `Update`**, so Shift+B freezes the app. That wants
-`AsyncComputeTaskPool` (as `streaming.rs` and `terrain/save.rs` already use), not
-a compute shader.
+has no compute).
+
+The frame stall (bake ran inline in `Update`) is fixed **without** the GPU, via
+`AsyncComputeTaskPool`:
+- `collect_object_bake_jobs` (main world) — must be here: unwraps meshes mutating
+  `Assets<Mesh>`, `unique_material` can *add* an asset, heightmap is a resource.
+- `run_object_bake_jobs` (task) — touches **no** ECS. Rasterise → shade → blur →
+  dilate → EXR.
+- `apply_object_bake` (main world) — `images.add` + bind to the material.
+
+Jobs carry a `MeshSnapshot` (mesh arrays, a few KB) not the rasterised g-buffer
+(~40 MB per 1024² atlas), so rasterisation runs inside the task. One task for the
+whole pass → a single `ObjectBakeTask` slot makes "already running" trivial, and
+dropping it on `OnExit(AppState::InGame)` cancels the bake.
 
 ## Plugin ↔ level-entity ownership — October 2026
 

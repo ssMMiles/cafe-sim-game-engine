@@ -1,10 +1,9 @@
 # Moving the object lightmap bake to the GPU
 
-Status: **stage 1 done and measured.** Stage 2 (the GPU path itself) is **not
+Status: **stage 1 done and measured; the frame stall is fixed too.** The bake
+now runs on `AsyncComputeTaskPool`. Stage 2 (the GPU path itself) is **not
 started, and the measurements argue against it** — see "What measuring
-actually showed" below. Recommendation: if the remaining complaint is the
-frame stall rather than total time, fix that with `AsyncComputeTaskPool`,
-not a compute shader.
+actually showed" below.
 
 ## Where the time actually goes
 
@@ -278,20 +277,31 @@ So the standing figures are roughly: shade 0.46s of a ~0.6s bake.
 - **Many small atlases.** Per-job overhead could eat the win for scenes of
   small props, which is the common case.
 
-### The frame stall is the real remaining problem, and it is cheaper to fix
+### The frame stall — fixed, without the GPU
 
-`run_bake` calls the object bake inline in `Update`, so Shift+B freezes the
-app. That is independent of how fast shading is, and it does **not** need the
-GPU: move the bake onto `AsyncComputeTaskPool` and poll it, the pattern
-`streaming.rs` and `terrain/save.rs` already use. One CPU implementation,
-no shader, works on WASM too.
+`run_bake` used to call the object bake inline in `Update`, so Shift+B froze
+the app. That was independent of how fast shading is, and it did **not** need
+the GPU. The bake now runs on `AsyncComputeTaskPool`, the pattern
+`streaming.rs` and `terrain/save.rs` already use. One CPU implementation, no
+shader, works on WASM too.
 
-The inputs are already suitable — `TriangleBvh` is behind an `Arc`, and the
-height cache is explicitly documented as shared read-only across rayon
-workers. The awkward part is that the completion step touches `Assets<Mesh>`,
-`Assets<Image>` and materials, so UV unwrap has to stay on the main world
-before the task is spawned and the material swap has to happen on the polling
-side — the same split the GPU path would need anyway.
+The split is the one the GPU path would have needed anyway:
+
+| | where | why |
+|---|---|---|
+| `collect_object_bake_jobs` | main world | unwraps meshes (mutates `Assets<Mesh>`), `unique_material` can *add* an asset, heightmap is a resource |
+| `run_object_bake_jobs` | task pool | rasterise → shade → blur → dilate → EXR. Touches no ECS state |
+| `apply_object_bake` | main world | `images.add` + bind to the material |
+
+Jobs carry a `MeshSnapshot` (the mesh's arrays) rather than a rasterised
+g-buffer, so rasterisation happens inside the task: a 1024² atlas of
+`TexelGeom` is ~40 MB, where the mesh it came from is usually a few KB, and
+ten of those queued at once would be a serious memory spike.
+
+One task for the whole pass, not one per sub-mesh — jobs are gathered
+together and applied together, and a single slot makes "a bake is already
+running" trivial to detect. Leaving the world drops the `Task`, which
+cancels it.
 
 ## Suggested order
 
@@ -299,10 +309,18 @@ side — the same split the GPU path would need anyway.
 2. ~~Stage 1 split + rayon.~~ **Done.**
 3. ~~Measure.~~ **Done** — and it found the dilation bug, which was 83% of the
    bake. Fixed.
-4. **Recommended next, if the stall still bothers anyone:** move the object
-   bake to `AsyncComputeTaskPool`. *(medium)*
+4. ~~Move the object bake to `AsyncComputeTaskPool`.~~ **Done** — the stall is
+   gone.
 5. Stage 2 (GPU) — shader entry point, shared heightmap, g-buffer binding, tag
    enum, wire into the existing queue. *(large)* **Not recommended on the
    current numbers.** Revisit if object counts or atlas sizes grow by an order
    of magnitude, which would change the arithmetic.
 6. CPU/GPU agreement test, if 5 ever happens. *(small, but do not skip it)*
+
+Smaller things worth doing before 5, if the bake ever needs to be faster:
+
+- Collapse the per-object `BakeHeightCache` into one region-wide extract.
+  Objects currently each get their own (bbox + 80 m ray reach), which
+  overlap heavily — wasted work and memory in `collect_object_bake_jobs`.
+- Apply results per sub-mesh instead of all at the end, so a big bake pops in
+  progressively rather than in one go.
