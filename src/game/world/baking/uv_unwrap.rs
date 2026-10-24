@@ -5,6 +5,14 @@
 //! triangle size — but it is *guaranteed* non-overlapping, which is the one
 //! property a lightmap UV set cannot do without.
 //!
+//! Cell *size* is budgeted against world-space triangle size
+//! ([`texels_per_cell`] × [`max_world_edge`]), not against triangle count
+//! alone. Count alone is a trap: the cafe floor is one 20 m × 12 m quad, so
+//! two triangles, and a count-driven atlas gave it a 32 px texture — about
+//! half a texel per metre, against the terrain's sixteen. Bilinear-filtered
+//! up to that size and then quantised by the 5-band toon shader, every
+//! shadow boundary came out as a staircase that broke at the quad's diagonal.
+//!
 //! The previous triplanar projection was not: it bucketed vertices by their
 //! dominant normal axis ignoring sign, so a cube's top and bottom faces
 //! projected to identical XZ coordinates and shared texels. Whichever
@@ -59,12 +67,98 @@ const CORNERS: [(f32, f32); 3] = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
 
 /// Atlas side length, in texels, for a mesh of `tri_count` triangles.
 ///
-/// Sized so each cell is about `texels_per_triangle` across, rounded up to a
+/// Sized so each cell is about `texels_per_cell` across, rounded up to a
 /// power of two and clamped to `max_res`.
-pub fn lightmap_resolution(tri_count: u32, texels_per_triangle: u32, max_res: u32) -> u32 {
+pub fn lightmap_resolution(tri_count: u32, texels_per_cell: u32, max_res: u32) -> u32 {
     let grid = grid_side(tri_count);
-    let wanted = grid.saturating_mul(texels_per_triangle.max(1));
+    let wanted = grid.saturating_mul(texels_per_cell.max(1));
     wanted.next_power_of_two().clamp(32, max_res.max(32))
+}
+
+/// How many texels across a cell needs to be, for a mesh whose largest
+/// triangle spans `max_edge` metres in world space.
+///
+/// Cells are uniform, so this is driven by the *largest* triangle: anything
+/// smaller gets the same budget and some of it goes unused. That waste is the
+/// price of the uniform grid, and it is why a cuboid wall (two big faces plus
+/// ten slivers along its thickness) resolves more coarsely than a flat quad
+/// of the same size.
+///
+/// `min_texels` is a floor for dense meshes, where per-triangle world extent
+/// is tiny and the triangle count already drives the atlas size.
+pub fn texels_per_cell(max_edge: f32, texels_per_metre: f32, min_texels: u32) -> u32 {
+    if !max_edge.is_finite() || max_edge <= 0.0 || texels_per_metre <= 0.0 {
+        return min_texels.max(1);
+    }
+    let wanted = (max_edge * texels_per_metre).ceil();
+    // The atlas is capped anyway; this just keeps the cast well-defined.
+    let wanted = wanted.clamp(1.0, u16::MAX as f32) as u32;
+    wanted.max(min_texels.max(1))
+}
+
+/// Longest triangle edge in `mesh`, in world space under `world_from_local`.
+///
+/// World space, not local: a glTF node's own scale is part of how big the
+/// triangle actually is (the cafe floor is a 2 m quad scaled to 20 m × 12 m),
+/// and texel density has to be budgeted against the size you can see.
+pub fn max_world_edge(mesh: &Mesh, world_from_local: &Mat4) -> f32 {
+    use bevy::mesh::VertexAttributeValues;
+
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return 0.0;
+    };
+    let Some(indices) = mesh.indices() else {
+        return 0.0;
+    };
+
+    let world = |i: u32| -> Vec3 {
+        let p = positions[i as usize];
+        world_from_local.transform_point3(Vec3::from(p))
+    };
+
+    let mut max_edge = 0.0f32;
+    let mut consider = |a: u32, b: u32, c: u32| {
+        let (wa, wb, wc) = (world(a), world(b), world(c));
+        max_edge = max_edge
+            .max(wa.distance(wb))
+            .max(wb.distance(wc))
+            .max(wc.distance(wa));
+    };
+
+    match indices {
+        Indices::U32(v) => {
+            for t in v.chunks_exact(3) {
+                consider(t[0], t[1], t[2]);
+            }
+        }
+        Indices::U16(v) => {
+            for t in v.chunks_exact(3) {
+                consider(t[0] as u32, t[1] as u32, t[2] as u32);
+            }
+        }
+    }
+    max_edge
+}
+
+/// Dilation passes needed to flood lit values across the whole gutter of an
+/// atlas of side `res` holding `tri_count` triangles.
+///
+/// Derived rather than configured: the gutter is a *fraction* of the cell, so
+/// it grows with resolution. A fixed pass count that covered the gutter at
+/// 8 texels/cell leaves a black rim at 256 texels/cell, which bilinear
+/// filtering then smears across every triangle edge.
+pub fn dilate_passes_for_atlas(res: u32, tri_count: u32) -> u32 {
+    // +1 so the flood reaches a texel *past* the gutter, covering the
+    // half-texel a bilinear tap can reach beyond the cell boundary.
+    (cell_texels(res, tri_count) as f32 * GUTTER_FRAC).ceil() as u32 + 1
+}
+
+/// Width in texels of one triangle's cell, in an atlas of side `res` holding
+/// `tri_count` triangles.
+pub fn cell_texels(res: u32, tri_count: u32) -> u32 {
+    (res / grid_side(tri_count).max(1)).max(1)
 }
 
 /// Number of cells per atlas side for `tri_count` triangles.
@@ -263,6 +357,67 @@ mod tests {
             assert!(
                 max_v <= (cell_v + 1.0) * cell - gutter + 1e-5,
                 "triangle {t} top"
+            );
+        }
+    }
+
+    /// The cafe floor: one 20 m × 12 m quad, so two triangles. Sizing by
+    /// triangle count alone gave it a 32 px atlas — ~0.5 texels/m, which is
+    /// what turned furniture shadows into a staircase. It must now be
+    /// budgeted by world size instead.
+    #[test]
+    fn a_large_flat_quad_gets_a_usable_texel_density() {
+        let mut mesh = quad();
+        let tri_count = generate_lightmap_uvs(&mut mesh).unwrap();
+        // The unit quad scaled to the cafe floor's footprint.
+        let world = Mat4::from_scale(Vec3::new(20.0, 1.0, 12.0));
+
+        let longest = max_world_edge(&mesh, &world);
+        assert!(
+            (longest - (20.0f32.powi(2) + 12.0f32.powi(2)).sqrt()).abs() < 1e-3,
+            "longest edge should be the quad's diagonal, got {longest}"
+        );
+
+        let cell = texels_per_cell(longest, 8.0, 8);
+        let res = lightmap_resolution(tri_count, cell, 512);
+
+        // Old behaviour, for contrast: count-driven sizing bottomed out at the
+        // 32 px floor.
+        assert_eq!(lightmap_resolution(tri_count, 8, 512), 32);
+
+        let usable = (res / grid_side(tri_count)) as f32 * (1.0 - 2.0 * GUTTER_FRAC);
+        let texels_per_metre = usable / longest;
+        assert!(
+            texels_per_metre > 4.0,
+            "{res}px atlas gives only {texels_per_metre:.2} texels/m across a {longest:.1} m \
+             triangle — shadow edges will still band"
+        );
+    }
+
+    /// A dense mesh is already well served by count-driven sizing; world-space
+    /// budgeting must not shrink it below that floor.
+    #[test]
+    fn dense_small_meshes_fall_back_to_the_per_triangle_floor() {
+        // 2000 triangles spanning a 0.5 m prop: ~0.02 m per edge.
+        assert_eq!(texels_per_cell(0.02, 8.0, 8), 8);
+        // Degenerate inputs must not produce a zero-sized cell.
+        assert_eq!(texels_per_cell(0.0, 8.0, 8), 8);
+        assert_eq!(texels_per_cell(f32::NAN, 8.0, 8), 8);
+        assert_eq!(texels_per_cell(10.0, 0.0, 8), 8);
+    }
+
+    /// The gutter is a fraction of the cell, so a fixed pass count that
+    /// covered it at 8 texels/cell leaves a black rim once cells get big.
+    #[test]
+    fn dilation_covers_the_gutter_at_every_resolution() {
+        for (res, tri_count) in [(32u32, 2u32), (512, 2), (512, 12), (256, 1000)] {
+            let passes = dilate_passes_for_atlas(res, tri_count);
+            let cell = res / grid_side(tri_count);
+            let gutter = cell as f32 * GUTTER_FRAC;
+            assert!(
+                passes as f32 >= gutter,
+                "{res}px atlas, {tri_count} tris: {passes} passes cannot fill a \
+                 {gutter:.1}-texel gutter"
             );
         }
     }

@@ -13,7 +13,10 @@ use super::object_lightmaps::{
     ToonMat, ToonMeshQuery, collect_toon_meshes, object_lightmap_path, unique_material,
 };
 use super::raycast::BakeHeightCache;
-use super::uv_unwrap::{LightmapUvCache, lightmap_resolution};
+use super::uv_unwrap::{
+    LightmapUvCache, cell_texels, dilate_passes_for_atlas, lightmap_resolution, max_world_edge,
+    texels_per_cell,
+};
 use super::{BakeConfig, BakeRegion, raycast};
 use crate::game::world::{
     objects::PlacedObject,
@@ -100,21 +103,28 @@ pub fn bake_object_lightmaps(
         let mut seen_materials = HashSet::new();
 
         for (k, entry) in entries.iter().enumerate() {
-            // Unwrap the mesh (once per asset) and size this sub-mesh's atlas
-            // from its triangle count.
+            // Unwrap the mesh (once per asset), then size this sub-mesh's
+            // atlas from how big its triangles actually are in the world.
             let mesh_id = entry.mesh.id();
             let Some(tri_count) = uv_cache.ensure(meshes, mesh_id) else {
                 continue;
             };
-            let res = lightmap_resolution(
-                tri_count,
-                config.mesh_texels_per_triangle,
-                config.mesh_resolution_max,
-            ) as usize;
 
             let Some(mesh) = meshes.get(mesh_id) else {
                 continue;
             };
+
+            // Per *entry*, not per mesh asset: two placed instances of one
+            // mesh at different scales need different texel budgets, and the
+            // EXR carries its own dimensions, so nothing downstream requires
+            // instances of a shared asset to agree on resolution.
+            let world_mat = entry.transform.to_matrix();
+            let cell = texels_per_cell(
+                max_world_edge(mesh, &world_mat),
+                config.mesh_texels_per_metre,
+                config.mesh_texels_per_triangle,
+            );
+            let res = lightmap_resolution(tri_count, cell, config.mesh_resolution_max) as usize;
 
             let mut lightmap = LightmapBuffer::new(res);
             // Texels a triangle actually covered: later triangles don't
@@ -123,7 +133,7 @@ pub fn bake_object_lightmaps(
 
             rasterize_mesh_lightmap(
                 mesh,
-                &entry.transform.to_matrix(),
+                &world_mat,
                 &cache,
                 bvh,
                 config,
@@ -132,9 +142,22 @@ pub fn bake_object_lightmaps(
                 &mut written,
             );
 
+            // Smooth away AO's Monte Carlo variance before anything quantises
+            // it, exactly as the terrain bake does — objects were getting no
+            // blur at all, so their noise landed straight on the toon band
+            // edges as speckle. Confined to each triangle's own cell (atlas
+            // neighbours are not surface neighbours) and to covered texels
+            // (the gutter is still empty until dilation below), and capped so
+            // a small cell can't be blurred flat.
+            let cell_px = cell_texels(res as u32, tri_count) as usize;
+            let blur_radius = config.blur_radius.min((cell_px / 4) as u32);
+            lightmap = lightmap.blur_cells(blur_radius, cell_px, &written);
+
             // Flood lit values into each cell's gutter so bilinear filtering
-            // at a triangle's edge never samples an empty (black) texel.
-            lightmap.dilate(&mut written, config.dilate_passes);
+            // at a triangle's edge never samples an empty (black) texel. The
+            // gutter scales with the cell, so the pass count has to as well.
+            let passes = dilate_passes_for_atlas(res as u32, tri_count).max(config.dilate_passes);
+            lightmap.dilate(&mut written, passes);
 
             // A failed write is logged but doesn't stop the live material from
             // picking up the result.

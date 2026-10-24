@@ -43,23 +43,56 @@ fn luminance(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-// Quantize a scalar value into discrete toon bands
+// Quantize a scalar value into discrete toon bands, with each band boundary
+// resolved over roughly one screen pixel.
+//
+// A plain `floor(value * bands) / bands` is a hard threshold applied to a
+// bilinearly filtered texture, so the contour it traces is reconstructed at
+// *texel* granularity and then aliases against the pixel grid — the jagged
+// staircase along every shadow edge. Raising lightmap resolution only shrinks
+// the steps; there is always exactly one texel of staircase, so it stays
+// visible up close no matter how many texels you spend.
+//
+// `fwidth` is how fast the banded coordinate changes per screen pixel, so
+// ramping across it makes the transition one pixel wide regardless of
+// lightmap resolution, surface size, or viewing distance. Flat regions have
+// fwidth ~ 0 and stay perfectly flat, so the banded look survives intact —
+// only the boundary itself is resolved smoothly. At grazing angles and
+// distance a whole band can fall inside one pixel, where the clamp lets the
+// bands dissolve into smooth shading instead of shimmering.
+//
+// The ramp sits in the top of each band and ends exactly on the boundary,
+// which keeps the function continuous across it: at the top of band `f` the
+// value has already reached `(f + 1) / bands`, which is where band `f + 1`
+// starts.
+//
+// NOTE: duplicated verbatim in `terrain_toon.wgsl` — the two shaders must
+// band identically or terrain and objects disagree where they meet. These
+// are asset-path shaders with no shared import module; keep them in step by
+// hand.
 fn toon_band(value: f32, bands: f32) -> f32 {
-    return floor(clamp(value, 0.0, 1.0) * bands) / bands;
+    let x = clamp(value, 0.0, 1.0) * bands;
+    let f = floor(x);
+    let t = x - f;
+    let w = clamp(fwidth(x), 1e-5, 1.0);
+    return (f + smoothstep(1.0 - w, 1.0, t)) / bands;
 }
 
 // Quantize brightness into toon bands while preserving the hue of coloured
 // light. Banding each channel separately would shift hue at band edges.
-// Anything that lands in the bottom band is lifted to a neutral TOON_FLOOR:
-// neutral rather than hue-preserving, so a trace of tinted light reaching a
-// dark corner doesn't paint the whole corner that colour.
+// Anything in the bottom band reads as a neutral TOON_FLOOR: neutral rather
+// than hue-preserving, so a trace of tinted light reaching a dark corner
+// doesn't paint the whole corner that colour.
+//
+// That floor used to be an `if`, which is one more hard threshold and
+// aliased exactly like an un-antialiased band edge. It is a cross-fade now,
+// over a range the banded value only ever crosses inside the bottom band —
+// so above the first boundary this is bit-for-bit the old behaviour.
 fn toon_shade(radiance: vec3<f32>) -> vec3<f32> {
     let lum = luminance(radiance);
     let band = toon_band(lum, TOON_BANDS);
-    if (lum <= 0.0 || band <= TOON_FLOOR) {
-        return vec3<f32>(TOON_FLOOR);
-    }
-    return radiance * (band / lum);
+    let tinted = radiance * (band / max(lum, 1e-4));
+    return mix(vec3<f32>(TOON_FLOOR), tinted, smoothstep(0.0, TOON_FLOOR, band));
 }
 
 @fragment

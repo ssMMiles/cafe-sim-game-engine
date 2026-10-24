@@ -60,14 +60,22 @@ pub struct BakeConfig {
     /// side). The actual size scales with triangle count — see
     /// [`uv_unwrap::lightmap_resolution`].
     pub mesh_resolution_max: u32,
-    /// Roughly how many texels wide each triangle's atlas cell should be.
-    /// Every triangle gets its own cell, so this sets shadow detail across a
-    /// single triangle, not across the mesh.
+    /// Lightmap texels per world metre across a placed mesh — the object-side
+    /// counterpart of `terrain_resolution / CHUNK_WORLD_SIZE` (16 texels/m at
+    /// the defaults). Every triangle gets its own atlas cell, and this is what
+    /// sizes that cell, so a big flat quad gets a big cell instead of the
+    /// same one a thumbnail-sized triangle would get.
+    pub mesh_texels_per_metre: f32,
+    /// Floor on an atlas cell's width in texels, for dense meshes where
+    /// per-triangle world extent is tiny and `mesh_texels_per_metre` would
+    /// round down to nothing.
     pub mesh_texels_per_triangle: u32,
-    /// How far lit texels are flooded into the empty gutter around each
-    /// triangle's atlas cell. Must cover the gutter
-    /// (`mesh_texels_per_triangle × uv_unwrap::GUTTER_FRAC`, rounded up) or
-    /// bilinear filtering samples black at triangle edges.
+    /// Minimum dilation passes flooding lit texels into the empty gutter
+    /// around each atlas cell. The actual count is derived per atlas from the
+    /// cell size (`uv_unwrap::dilate_passes_for_atlas`) — the gutter is a
+    /// fraction of the cell, so it grows with resolution — and this is only a
+    /// floor. Too few passes leaves a black rim that bilinear filtering then
+    /// smears across every triangle edge.
     pub dilate_passes: u32,
     /// Number of AO hemisphere rays per texel.
     pub ao_rays: u32,
@@ -125,7 +133,16 @@ impl Default for BakeConfig {
             // this is 8 MB of VRAM per chunk; 4096 would be 128 MB each and
             // ~10 GB for a loaded streaming ring.
             terrain_resolution: 1024,
-            mesh_resolution_max: 512,
+            // 512² Rgba16Float is 2 MB of VRAM per sub-mesh. Raise to 1024
+            // for sharper shadows on large flat scenery (the cafe walls want
+            // it) at 4× the texels to bake — the object rasteriser is still
+            // single-threaded, so that is a real wall-clock cost.
+            mesh_resolution_max: 2048,
+            // Half the terrain's 16 texels/m. Objects are small and numerous,
+            // the atlas is capped, and the toon quantiser only needs enough
+            // density that a shadow edge doesn't land on a band boundary as a
+            // staircase.
+            mesh_texels_per_metre: 8.0,
             mesh_texels_per_triangle: 8,
             dilate_passes: 3,
             ao_rays: 16,

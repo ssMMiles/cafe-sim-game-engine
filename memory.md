@@ -75,11 +75,12 @@ Gap: nothing can *author* a binding until Phase 2, so `spinner` in `plugins/exam
 ### Phase 2 status (editor) — complete
 
 - Catalog strip (Tab) now lists `CatalogEntry { name, kind: PlacedKind, preset_script }`: manifest meshes + "Point Light" + "Spot Light" + one preset per plugin script with `default_mesh`. Rebuilt when `ScriptRegistry` changes. Selection is **index-based**, not path-based.
-- `PlacementConfig` is `{ kind: PlacedKind, scale, stamp_script: Option<(plugin, script)> }`. `stamp_script` is **sticky** across mesh changes by design; only the scripts panel clears it.
+- `PlacementConfig` is `{ kind: PlacedKind, scale, rotation, stamp_script: Option<(plugin, script)> }`. A stamp armed from the **scripts panel** is sticky across mesh changes by design. A stamp armed by selecting a **catalog preset** is not: `scroll_mesh_selector` clears it when you step off that preset onto a plain mesh, otherwise every later rock would also get e.g. a `cafe-shell` binding.
 - `PlacedPicker` (`editor/object_placement.rs`) is the one way to find "the placed entity under the crosshair": mesh raycast → root via `InteractableParent`, then ray/sphere fallback for mesh-less kinds. Use it rather than re-implementing raycasts — it's what makes lights deletable/attachable.
 - Scripts panel is **K** (cafe-sim owns plain B). Enter = attach, Backspace = detach (Delete still deletes the entity). Status line shows bindings + `(awaiting plugin)`.
 - Scale/stamp edits use `bypass_change_detection()` on `PlacementConfig` so they don't trigger `rebuild_preview_on_config_change`; only a `kind` change should rebuild the preview.
 - `adjust_camera_distance` (gfx/camera.rs) yields scroll when either `MeshSelectorOpen` or `ScriptPanelOpen` is set.
+- Scroll modifiers live in `editor/input.rs` (`ScrollMod` / `scroll_modifier`): none = cycle panel, Shift = scale, **Alt/Option = rotate**. Rotation is *not* on Ctrl — `freecam_movement` (gfx/camera.rs) descends on `ControlLeft`, so Ctrl+Scroll in freecam sank the camera while rotating. Every scroll consumer has its own `MessageReader`, so they must all test the modifier through this module or one notch fires two actions.
 - Sun/ambient sliders not implemented (were optional).
 
 End-to-end test recipe: add `example` plugin to a project via the pause menu → Shift+E → Tab, place a rock → K, scroll to `example/spinner`, look at the rock, Enter → it spins. Shift+S, exit, re-enter → still spins (hydrated from disk). Backspace → stops. Place a Point Light from the catalog; Delete it while looking at it.
@@ -103,9 +104,102 @@ A three-way review (persistence, script host, editor) after the v3 landing found
 3. `PlacedObjectRegistry.next_id` is seeded by `seed_placed_ids` (`objects.rs`) from `WorldMetadata::next_entity_id` — a persisted high-water counter written on every save (`save_terrain` maxes it with the registry). This bumped **`WORLD_FORMAT_VERSION` 3 → 4**; v3 was never released and is *rejected* (old test worlds are deleted, not migrated — user's explicit call, a first implementation that scanned all `.objects` files at load was dropped as overcomplicated). Placement stays gated on `registry.ids_seeded` so `alloc_id` can't reuse an id from a not-yet-streamed chunk (which collided `obj_{id}_lightmap.png` and `PropValue::EntityRef`). `seed_placed_ids` keys on `TerrainWorld::is_added()`, NOT on `!ids_seeded` — a lingering old `TerrainWorld` during a world switch must not seed the next world's fresh registry.
 4. `run_setup` failure paths now call `abort_failed_setup`: `mem::forget` the dylib (it was **dropped** → `dlclose` → dangling registry fn pointers + unmapped drop glue → segfault), remove the plugin's registry entries, despawn its orphaned `ScriptOwned` entities.
 
+## Smooth toon shadow edges — October 2026
+
+### Root cause: lightmaps were point-sampled
+
+`lib.rs` sets `ImagePlugin::default_nearest()` (deliberate, for the game's pixel-art
+look). `LightmapBuffer::into_image()` built images with `Image::new`, which leaves
+`sampler: ImageSampler::Default` → resolves to that app-wide default → **Nearest**.
+`ToonMaterial`'s `#[texture(100)] #[sampler(101)]` takes the sampler from the image, so
+*every* lightmap — terrain CPU/GPU, object bake, both EXR load paths, all five call
+sites funnel through `into_image()` — was point-sampled. `textureSample` returned a
+piecewise-constant value, so band edges snapped to square texel blocks.
+
+Nothing downstream could compensate, which is why three separate rounds of work barely
+moved it: the shader's `fwidth` band AA measures a rate of change that is **zero inside
+every texel**; the bake-side blur turns one hard edge into a staircase of flat blocks;
+extra resolution just makes the blocks smaller. Tell that the baker always assumed
+linear: `uv_unwrap`'s gutter + dilation exist *specifically* to feed bilinear taps at
+triangle edges.
+
+Fixed by setting `image.sampler = ImageSampler::linear()` explicitly in `into_image()`.
+**Do not** flip the global default — other textures want nearest. Locked in by
+`baked_lightmaps_carry_an_explicit_linear_sampler`.
+
+Checked before making the change: object texels use `(px + 0.5) / res` (cell centres,
+exactly what bilinear wants); terrain uses `tx / (res - 1)` (inclusive endpoints) against
+the sampler's `(tx + 0.5) / res`, which agree at the chunk centre and differ by ≤½ texel
+(~3 cm at 1024 over 63.75 m) at the edges. Adjacent chunks clamp to the same baked
+boundary value, so linear filtering does **not** open chunk seams.
+
+Still outstanding: `camera.rs:67` renders the scene to a fixed 1920×1080 target with
+`ImageSampler::nearest()` ("for pixelated look") and blits it to the window, so on a
+HiDPI display everything is re-quantised to that grid and point-upscaled. Deliberate art
+direction; user wants to revisit it after the scene looks right at full res.
+
+### Secondary: two problems that were real but not the cause
+
+Both of these were genuine defects and both are fixed, but neither produced a visible
+improvement on its own — the nearest sampler above was masking them. They only start
+paying off now that the lightmap is interpolated.
+
+1. **`toon_band` was a hard `floor(v * 5) / 5`.** A hard threshold on a bilinearly
+   filtered texture traces a contour reconstructed at *texel* granularity, which then
+   aliases against the pixel grid. Resolution only shrinks the steps — there is always
+   exactly one texel of staircase, so it never goes away. Fixed for good by ramping the
+   band boundary across `fwidth` of the banded coordinate: a ~1-screen-pixel transition
+   independent of lightmap resolution, surface size, and distance. Flat regions have
+   `fwidth ≈ 0` so the banded look is untouched. The `if (band <= TOON_FLOOR)` was a
+   second hard threshold and is now a `smoothstep` cross-fade.
+   - `toon_band`/`toon_shade`/`luminance` are **duplicated verbatim** in
+     `toon_lighting.wgsl` and `terrain_toon.wgsl`. There is no shared WGSL import module
+     in this project (no `#define_import_path` anywhere; shaders are referenced by asset
+     path), so they must be kept in step by hand or terrain and objects disagree where
+     they meet.
+   - Validate WGSL edits without running the app: extract the functions into a standalone
+     file with a dummy `@fragment` entry point and run them through `naga` 27 (the version
+     in `Cargo.lock`) from a scratch crate. Catches syntax *and* the uniform-control-flow
+     rule that `fwidth` depends on.
+2. **Object lightmaps got no blur at all** while terrain got `blur_radius: 4`, so 16-ray
+   AO variance landed straight on the band edges as speckle. `LightmapBuffer::blur_cells`
+   now blurs objects, confined to each triangle's atlas cell (atlas neighbours are *not*
+   surface neighbours — a plain blur smears unrelated triangles together) and masked to
+   covered texels (the gutter is empty until dilation runs, so averaging it in would draw
+   a dark rim around every triangle). Radius capped at `cell/4`.
+
+## Plugin ↔ level-entity ownership — October 2026
+
+See `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md`. Short version: the engine cleans up
+exactly two things — entities tagged `ScriptOwned`, and components a *script
+factory* inserted (recorded by archetype diff across the `hydrate` call). Anything
+a plugin **system** does to a level entity it didn't spawn is invisible to both and
+survives unload forever. Not a UAF — unloaded dylibs are `mem::forget`'d so drop
+glue stays mapped — but a leak, and the level stays visibly mutated.
+
+- Asset defaults belong in the asset. `Cafe.gltf` now carries its own materials
+  (brick `KHR_texture_transform` tiling + tinted floor); `ConvertToToon` clones the
+  whole glTF `StandardMaterial`, so textures/`uv_transform` survive into the toon
+  material and the shell looks right in the **editor** with cafe-sim stopped.
+  `dress_cafe_shell` is deleted. Bevy 0.18 reads glTF samplers → `ImageAddressMode`
+  and `KHR_texture_transform` → `StandardMaterial::uv_transform`; `baseColorFactor`
+  is **linear** (`Color::linear_rgba`), and glTF defaults metallic/roughness to 1.0,
+  so set `metallicFactor: 0.0` explicitly.
+- A "have I processed this entity" latch goes in a `Local`, never a marker component
+  on the level entity — the `PluginSchedule` is dropped on teardown so `Local`s die
+  with it. Plugin-private *resources* are NOT swept by `run_teardown`.
+- `Cafe.gltf` is hand-edited JSON now. Re-exporting from Blender will drop the
+  materials unless they're authored there too. `Cafe.glb` sits alongside and is stale.
+- Brick tiling lives in each wall material's `KHR_texture_transform.scale`: 35×6 on the
+  long walls, 21×6 on the short ones (~1.7 tiles/m, square bricks on both). Integers so
+  the pattern lands flush at the wall edges rather than wrapping mid-brick.
+
 ### Deferred findings (known, not yet fixed)
 
 - **Archetype-diff sharing**: if two bindings' factories insert the same component, only the first records it; detaching the first strips it from under the second. A factory that *replaces* a pre-existing component records nothing.
+- **No tracked-insert API** for plugin systems that must write to a level entity (rule 4 of the ownership contract), and **no detector** for violations. Deferred until a second real case appears; `dress_cafe_shell` was the only one and it's gone.
+- **Object lightmap rasteriser is single-threaded** (`baking/objects.rs::rasterize_mesh_lightmap`, plain nested loop) while terrain bakes on the GPU. Now that object atlases are world-sized, the cafe shell bakes 512² per sub-mesh instead of 32–64², so Shift+B got much slower. Parallelising is safe in principle — each triangle writes only inside its own disjoint atlas cell — but needs a restructure around the shared `written` array.
+- **Uniform atlas cells waste a cuboid's budget**: a wall is 12 triangles, two of them big faces and ten slivers down its thickness, yet every cell is sized for the biggest. The cafe's front wall lands at ~2.7 texels/m where its floor gets 7.0. Fixing it properly means area-proportional cells (rectangle packing), not a uniform grid.
 - **`PlacedPicker` picks through occluders** (`editor/object_placement.rs`): non-placed ray hits (terrain, walls) are skipped instead of terminating the ray — Delete/attach can act on hidden entities. Ray should stop at first hit of any kind.
 - **Stale armed stamp**: `PlacementConfig.stamp_script` is never cleared on plugin unload; panel shows "No stamp" while the status line and placements still use the stale stamp, seeding bindings with *empty* props (schema lookup falls back to default).
 - **Catalog highlight vs `config.kind` divergence** after registry-change rebuilds (`mesh_selector.rs` — `config.kind` only corrected when `manifest_changed`).

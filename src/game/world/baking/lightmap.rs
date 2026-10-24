@@ -15,6 +15,7 @@
 
 use bevy::{
     asset::RenderAssetUsages,
+    image::ImageSampler,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
@@ -291,9 +292,26 @@ impl LightmapBuffer {
     }
 
     /// GPU image ready to be bound as a material's lightmap.
+    ///
+    /// Every lightmap in the game — terrain CPU and GPU bakes, object bakes,
+    /// and both load-from-EXR paths — is built here, so this is the one place
+    /// the sampler has to be right.
+    ///
+    /// **The sampler is set explicitly and must stay that way.** `Image::new`
+    /// leaves it as `ImageSampler::Default`, which resolves to whatever
+    /// `ImagePlugin` was configured with, and `lib.rs` sets
+    /// `ImagePlugin::default_nearest()` for the game's pixel-art look. A
+    /// point-sampled lightmap returns a piecewise-*constant* value, so every
+    /// toon band edge snaps to square texel blocks — and nothing downstream
+    /// can recover from it: the shader's `fwidth` band antialiasing measures a
+    /// rate of change that is zero inside every texel, the bake-side blur just
+    /// produces a staircase of flat blocks instead of one hard edge, and extra
+    /// resolution only makes the blocks smaller. The gutter-and-dilation
+    /// machinery in `uv_unwrap` is likewise written for bilinear taps at
+    /// triangle edges and is pointless without them.
     pub fn into_image(self) -> Image {
         let res = self.res as u32;
-        Image::new(
+        let mut image = Image::new(
             Extent3d {
                 width: res,
                 height: res,
@@ -303,39 +321,102 @@ impl LightmapBuffer {
             self.to_rgba16_bytes(),
             TextureFormat::Rgba16Float,
             RenderAssetUsages::RENDER_WORLD,
-        )
+        );
+        image.sampler = ImageSampler::linear();
+        image
     }
 
     /// Separable box blur. Removes per-texel Monte Carlo variance so the toon
     /// band quantiser sees smooth gradients instead of "lines of light".
     /// `radius == 0` returns a copy.
+    ///
+    /// For a terrain chunk the whole texture is one continuous surface, so
+    /// the kernel may run anywhere. Object atlases are not — see
+    /// [`Self::blur_cells`].
     pub fn blur(&self, radius: u32) -> Self {
-        if radius == 0 {
+        self.blur_impl(radius, self.res, None)
+    }
+
+    /// Box blur confined to `cell` × `cell` blocks, and to texels some
+    /// triangle actually covered.
+    ///
+    /// An object atlas gives every triangle its own cell, so neighbouring
+    /// texels in the atlas are usually *not* neighbours on the surface.
+    /// [`Self::blur`] would smear one triangle's lighting into an unrelated
+    /// one across the cell boundary. Confining the kernel keeps the blur
+    /// within a single triangle, where texel adjacency does mean surface
+    /// adjacency.
+    ///
+    /// `written` masks out the gutter: it is still empty at this point
+    /// (dilation runs afterwards), and averaging black into a triangle's
+    /// edge texels would draw a dark rim around every triangle.
+    pub fn blur_cells(&self, radius: u32, cell: usize, written: &[bool]) -> Self {
+        debug_assert_eq!(written.len(), self.texels.len());
+        self.blur_impl(radius, cell, Some(written))
+    }
+
+    fn blur_impl(&self, radius: u32, cell: usize, written: Option<&[bool]>) -> Self {
+        let n = self.res;
+        if radius == 0 || cell == 0 {
             return Self {
-                res: self.res,
+                res: n,
                 texels: self.texels.clone(),
             };
         }
         let r = radius as usize;
-        let n = self.res;
+        let covered = |i: usize| written.is_none_or(|w| w[i]);
 
-        let mut temp = vec![Vec3::ZERO; n * n];
+        // Window around `i` clamped to both the kernel radius and `i`'s cell.
+        let window = |i: usize| {
+            let cell_lo = (i / cell) * cell;
+            let cell_hi = (cell_lo + cell).min(n);
+            (i.saturating_sub(r).max(cell_lo), (i + r + 1).min(cell_hi))
+        };
+
+        // Horizontal pass, then vertical. Each accumulates only over covered
+        // texels and leaves uncovered ones untouched, so the mask survives
+        // both passes.
+        let mut temp = self.texels.clone();
         for row in 0..n {
             for col in 0..n {
-                let lo = col.saturating_sub(r);
-                let hi = (col + r + 1).min(n);
-                let sum: Vec3 = (lo..hi).map(|c| self.texels[row * n + c]).sum();
-                temp[row * n + col] = sum / (hi - lo) as f32;
+                let idx = row * n + col;
+                if !covered(idx) {
+                    continue;
+                }
+                let (lo, hi) = window(col);
+                let (mut sum, mut count) = (Vec3::ZERO, 0u32);
+                for c in lo..hi {
+                    let j = row * n + c;
+                    if covered(j) {
+                        sum += self.texels[j];
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    temp[idx] = sum / count as f32;
+                }
             }
         }
 
-        let mut out = vec![Vec3::ZERO; n * n];
+        let mut out = temp.clone();
         for col in 0..n {
             for row in 0..n {
-                let lo = row.saturating_sub(r);
-                let hi = (row + r + 1).min(n);
-                let sum: Vec3 = (lo..hi).map(|r2| temp[r2 * n + col]).sum();
-                out[row * n + col] = sum / (hi - lo) as f32;
+                let idx = row * n + col;
+                if !covered(idx) {
+                    continue;
+                }
+                let (lo, hi) = window(row);
+                let (mut sum, mut count) = (Vec3::ZERO, 0u32);
+                for r2 in lo..hi {
+                    let j = r2 * n + col;
+                    if covered(j) {
+                        sum += temp[j];
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    out[idx] = sum / count as f32;
+                }
             }
         }
 
@@ -540,6 +621,29 @@ mod tests {
         }
     }
 
+    /// Lightmaps must carry their own sampler rather than inheriting the
+    /// app-wide one. `lib.rs` sets `ImagePlugin::default_nearest()`, and a
+    /// point-sampled lightmap is piecewise-constant: band edges land on
+    /// square texel blocks, and no amount of bake resolution, blur, or
+    /// shader-side antialiasing can smooth a signal that does not vary.
+    /// This is the regression that made every shadow edge pixelated.
+    #[test]
+    fn baked_lightmaps_carry_an_explicit_linear_sampler() {
+        use bevy::image::{ImageFilterMode, ImageSampler};
+
+        let image = LightmapBuffer::new(4).into_image();
+        match &image.sampler {
+            ImageSampler::Default => panic!(
+                "lightmap inherited the app default sampler — that is \
+                 `default_nearest()`, which point-samples it"
+            ),
+            ImageSampler::Descriptor(d) => {
+                assert_eq!(d.mag_filter, ImageFilterMode::Linear, "mag filter");
+                assert_eq!(d.min_filter, ImageFilterMode::Linear, "min filter");
+            }
+        }
+    }
+
     #[test]
     fn blur_zero_is_identity_and_blur_preserves_flat() {
         let buf = gradient(4);
@@ -550,6 +654,85 @@ mod tests {
         for t in flat.blur(2).texels {
             assert!((t - Vec3::splat(0.3)).abs().max_element() < 1e-6);
         }
+    }
+
+    /// An object atlas puts unrelated triangles in adjacent cells, so a blur
+    /// that crosses a cell boundary smears one triangle's lighting onto
+    /// another's. Two 2×2 cells, one fully lit and one fully dark: neither
+    /// may move.
+    #[test]
+    fn blur_cells_does_not_leak_across_cell_boundaries() {
+        let mut buf = LightmapBuffer::new(4);
+        for row in 0..4 {
+            for col in 0..4 {
+                // Left half is cell column 0, right half cell column 1.
+                buf.texels[row * 4 + col] = if col < 2 {
+                    Vec3::splat(1.0)
+                } else {
+                    Vec3::ZERO
+                };
+            }
+        }
+        let written = vec![true; 16];
+        let out = buf.blur_cells(2, 2, &written);
+
+        for row in 0..4 {
+            for col in 0..4 {
+                let expected = if col < 2 { 1.0 } else { 0.0 };
+                let got = out.texels[row * 4 + col].x;
+                assert!(
+                    (got - expected).abs() < 1e-6,
+                    "texel ({row},{col}) = {got}, expected {expected} — blur crossed a cell edge"
+                );
+            }
+        }
+    }
+
+    /// The gutter is still empty when the blur runs (dilation comes after),
+    /// so uncovered texels must neither contribute to nor receive an average
+    /// — otherwise every triangle picks up a dark rim.
+    #[test]
+    fn blur_cells_ignores_uncovered_texels() {
+        let mut buf = LightmapBuffer::new(4);
+        buf.texels.fill(Vec3::splat(1.0));
+        let mut written = vec![true; 16];
+        // Mark the last column of each 2-wide cell as gutter, and zero it.
+        for row in 0..4 {
+            for col in [1usize, 3] {
+                written[row * 4 + col] = false;
+                buf.texels[row * 4 + col] = Vec3::ZERO;
+            }
+        }
+
+        let out = buf.blur_cells(2, 2, &written);
+
+        for row in 0..4 {
+            for col in 0..4 {
+                let i = row * 4 + col;
+                if written[i] {
+                    assert!(
+                        (out.texels[i].x - 1.0).abs() < 1e-6,
+                        "covered texel ({row},{col}) was darkened to {} by the empty gutter",
+                        out.texels[i].x
+                    );
+                } else {
+                    assert_eq!(
+                        out.texels[i],
+                        Vec3::ZERO,
+                        "uncovered texel ({row},{col}) must be left for dilation"
+                    );
+                }
+            }
+        }
+    }
+
+    /// With one cell covering the whole atlas and no mask, the cell-confined
+    /// blur is the plain blur.
+    #[test]
+    fn blur_cells_matches_plain_blur_for_a_single_cell() {
+        let buf = gradient(8);
+        let written = vec![true; 64];
+        assert_eq!(buf.blur_cells(2, 8, &written).texels, buf.blur(2).texels);
     }
 
     #[test]
