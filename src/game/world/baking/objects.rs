@@ -3,9 +3,12 @@
 use bevy::{
     math::{Mat4, Vec2, Vec3, Vec4Swizzles},
     mesh::{Indices, Mesh, VertexAttributeValues},
+    platform::time::Instant,
     prelude::*,
 };
+use rayon::prelude::*;
 use std::collections::HashSet;
+use std::time::Duration;
 
 use super::bvh::TriangleBvh;
 use super::lightmap::{BakeLighting, LightmapBuffer};
@@ -29,14 +32,22 @@ use crate::game::world::{
 /// for why lightmaps are per sub-mesh) this function:
 /// 1. Ensures the mesh has non-overlapping lightmap UV2 (`uv_unwrap`), and
 ///    sizes the atlas from its triangle count.
-/// 2. Rasterizes each triangle in UV2 space, interpolating world-space
-///    position and normal from barycentric coords.
-/// 3. Shades each texel with the shared lighting model (sun shadow rays,
-///    ambient×AO, and every placed point/spot light; no indirect bounce for
-///    objects yet). Shadow rays test the scene BVH, which includes this very
-///    object, so it shadows itself; ray origins are nudged along the *face*
-///    normal to keep a triangle from occluding its own texels.
+/// 2. Rasterizes each triangle in UV2 space into a per-texel surface buffer,
+///    interpolating world-space position and normal from barycentric coords
+///    ([`rasterize_geometry`]).
+/// 3. Shades every covered texel with the shared lighting model
+///    ([`shade_geometry`], in parallel): sun shadow rays, ambient×AO, and
+///    every placed point/spot light; no indirect bounce for objects yet.
+///    Shadow rays test the scene BVH, which includes this very object, so it
+///    shadows itself; ray origins are nudged along the *face* normal to keep
+///    a triangle from occluding its own texels.
 /// 4. Saves the result as EXR and applies it to the sub-mesh's material.
+///
+/// Steps 2 and 3 are separate passes rather than one loop because only step 3
+/// parallelises: rasterisation resolves overlapping triangles in order, while
+/// shading is independent per texel and is where essentially all the time
+/// goes. The split is also what a GPU bake would need — step 2's buffer is
+/// what it would upload. See `docs/GPU_OBJECT_BAKE_PLAN.md`.
 #[allow(clippy::too_many_arguments)]
 pub fn bake_object_lightmaps(
     commands: &mut Commands,
@@ -54,6 +65,8 @@ pub fn bake_object_lightmaps(
     lighting: &BakeLighting,
     bvh: &TriangleBvh,
 ) {
+    let mut stats = BakeStats::default();
+
     for (root_entity, placed_obj, global_transform) in placed_query.iter() {
         if !region.contains_point(global_transform.translation()) {
             continue;
@@ -126,21 +139,33 @@ pub fn bake_object_lightmaps(
             );
             let res = lightmap_resolution(tri_count, cell, config.mesh_resolution_max) as usize;
 
-            let mut lightmap = LightmapBuffer::new(res);
-            // Texels a triangle actually covered: later triangles don't
-            // overwrite earlier ones, and dilation only fills the gaps.
-            let mut written = vec![false; res * res];
+            // Pass 1 — rasterise. Cheap: barycentric interpolation, no rays.
+            let t_raster = Instant::now();
+            let geometry = rasterize_geometry(mesh, &world_mat, res);
+            stats.rasterize += t_raster.elapsed();
 
-            rasterize_mesh_lightmap(
-                mesh,
-                &world_mat,
-                &cache,
-                bvh,
-                config,
-                lighting,
-                &mut lightmap,
-                &mut written,
+            // Texels a triangle actually covered. Dilation fills the rest and
+            // marks what it filled, so this has to be owned and mutable.
+            let mut written: Vec<bool> = geometry.iter().map(Option::is_some).collect();
+            let covered = written.iter().filter(|w| **w).count();
+
+            // Pass 2 — shade. This is the expensive one, and it parallelises.
+            let t_shade = Instant::now();
+            let mut lightmap = shade_geometry(&geometry, res, &cache, bvh, config, lighting);
+            stats.shade += t_shade.elapsed();
+
+            stats.sub_meshes += 1;
+            stats.texels_total += res * res;
+            stats.texels_covered += covered;
+            stats.max_res = stats.max_res.max(res);
+            debug!(
+                "  obj {} sub-mesh {k}: {res}×{res} atlas, {tri_count} tris, \
+                 {covered} texel(s) covered ({:.0}%)",
+                placed_obj.id,
+                100.0 * covered as f32 / (res * res).max(1) as f32,
             );
+
+            let t_post = Instant::now();
 
             // Smooth away AO's Monte Carlo variance before anything quantises
             // it, exactly as the terrain bake does — objects were getting no
@@ -158,9 +183,11 @@ pub fn bake_object_lightmaps(
             // gutter scales with the cell, so the pass count has to as well.
             let passes = dilate_passes_for_atlas(res as u32, tri_count).max(config.dilate_passes);
             lightmap.dilate(&mut written, passes);
+            stats.post += t_post.elapsed();
 
             // A failed write is logged but doesn't stop the live material from
             // picking up the result.
+            let t_io = Instant::now();
             let path = object_lightmap_path(&terrain_world.world_path, placed_obj.id, k);
             if let Err(e) = lightmap.save_exr(&path) {
                 error!(
@@ -169,6 +196,7 @@ pub fn bake_object_lightmaps(
                     path.display()
                 );
             }
+            stats.io += t_io.elapsed();
 
             let Some(mat_handle) = unique_material(entry, &mut seen_materials, materials, commands)
             else {
@@ -179,10 +207,70 @@ pub fn bake_object_lightmaps(
             }
         }
 
-        info!(
+        debug!(
             "Baked {} object lightmap(s) for placed object id={}",
             entries.len(),
             placed_obj.id
+        );
+    }
+
+    stats.report(config);
+}
+
+// ============================================================================
+// Instrumentation
+// ============================================================================
+
+/// Where an object bake pass spent its time, and on how many texels.
+///
+/// Exists to answer one question before anyone ports this to the GPU: is the
+/// cost actually in the ray casting, or somewhere unglamorous like the EXR
+/// writes? See `docs/GPU_OBJECT_BAKE_PLAN.md`.
+#[derive(Default)]
+struct BakeStats {
+    sub_meshes: usize,
+    /// Texels some triangle covered — the ones that cost rays.
+    texels_covered: usize,
+    /// Total atlas area, covered or not. The ratio shows how much of the
+    /// per-triangle cell layout is gutter and unused half-cell.
+    texels_total: usize,
+    max_res: usize,
+    rasterize: Duration,
+    shade: Duration,
+    /// Blur + dilate.
+    post: Duration,
+    /// EXR encode and write.
+    io: Duration,
+}
+
+impl BakeStats {
+    fn report(&self, config: &BakeConfig) {
+        if self.sub_meshes == 0 {
+            return;
+        }
+        let total = self.rasterize + self.shade + self.post + self.io;
+        // Rays per covered texel: one sun shadow ray, the AO hemisphere, and
+        // one segment ray per placed light. Objects cast no bounce rays.
+        let rays_per_texel = 1 + config.ao_rays as usize;
+        let est_rays = self.texels_covered * rays_per_texel;
+
+        info!(
+            "Object bake: {} sub-mesh(es), {} of {} texels covered ({:.0}%), \
+             largest atlas {}², ≥{:.1}M rays",
+            self.sub_meshes,
+            self.texels_covered,
+            self.texels_total,
+            100.0 * self.texels_covered as f32 / self.texels_total.max(1) as f32,
+            self.max_res,
+            est_rays as f64 / 1.0e6,
+        );
+        info!(
+            "  rasterize {:.2}s | shade {:.2}s | blur+dilate {:.2}s | exr {:.2}s | total {:.2}s",
+            self.rasterize.as_secs_f64(),
+            self.shade.as_secs_f64(),
+            self.post.as_secs_f64(),
+            self.io.as_secs_f64(),
+            total.as_secs_f64(),
         );
     }
 }
@@ -211,39 +299,52 @@ fn world_bounds(mesh: &Mesh, world_mat: &Mat4) -> (Vec3, Vec3) {
     (mn, mx)
 }
 
-/// Rasterize a mesh's triangles in UV2 space and shade each covered texel.
-#[allow(clippy::too_many_arguments)]
-fn rasterize_mesh_lightmap(
-    mesh: &Mesh,
-    world_mat: &Mat4,
-    cache: &BakeHeightCache,
-    bvh: &TriangleBvh,
-    config: &BakeConfig,
-    lighting: &BakeLighting,
-    lightmap: &mut LightmapBuffer,
-    written: &mut [bool],
-) {
+/// Per-texel surface data: the output of rasterisation, the input to shading.
+///
+/// This is also exactly what a GPU bake would upload per sub-mesh, in place
+/// of the heightmap the terrain compute shader reads — see
+/// `docs/GPU_OBJECT_BAKE_PLAN.md`.
+#[derive(Clone, Copy)]
+struct TexelGeom {
+    world_pos: Vec3,
+    /// Interpolated vertex normal — what the lighting model shades with.
+    normal: Vec3,
+    /// Geometric face normal — what ray origins are offset along, so a
+    /// triangle can't occlude its own texels on a smooth-shaded mesh.
+    face_normal: Vec3,
+}
+
+/// Rasterize a mesh's triangles in UV2 space into a per-texel surface buffer.
+///
+/// `None` means no triangle covered that texel: the atlas gutter, or the
+/// unused half of a triangle's cell. Dilation fills those in later.
+///
+/// Serial by design, and cheap enough for that not to matter — it is pure
+/// interpolation, no rays. Triangles are visited in order and the first to
+/// claim a texel keeps it, which is what makes the output independent of how
+/// the triangles happen to overlap.
+fn rasterize_geometry(mesh: &Mesh, world_mat: &Mat4, res: usize) -> Vec<Option<TexelGeom>> {
+    let mut geometry: Vec<Option<TexelGeom>> = vec![None; res * res];
+
     let positions: &[[f32; 3]] = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
         Some(VertexAttributeValues::Float32x3(v)) => v,
-        _ => return,
+        _ => return geometry,
     };
     let normals: &[[f32; 3]] = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
         Some(VertexAttributeValues::Float32x3(v)) => v,
-        _ => return,
+        _ => return geometry,
     };
     let uv1s: &[[f32; 2]] = match mesh.attribute(Mesh::ATTRIBUTE_UV_1) {
         Some(VertexAttributeValues::Float32x2(v)) => v,
-        _ => return, // no UV2 — skip (shouldn't happen after unwrap)
+        _ => return geometry, // no UV2 — skip (shouldn't happen after unwrap)
     };
     let indices: Vec<u32> = match mesh.indices() {
         Some(Indices::U32(v)) => v.clone(),
         Some(Indices::U16(v)) => v.iter().map(|&i| i as u32).collect(),
-        None => return,
+        None => return geometry,
     };
 
-    let res = lightmap.res;
     let res_f = res as f32;
-    let sun_dir = lighting.sun_dir;
 
     // Normal matrix is constant for this world transform — compute it once
     // outside the triangle loop rather than once per triangle.
@@ -298,7 +399,7 @@ fn rasterize_mesh_lightmap(
         for py in min_v..=max_v {
             for px in min_u..=max_u {
                 let pixel_idx = py * res + px;
-                if written[pixel_idx] {
+                if geometry[pixel_idx].is_some() {
                     continue;
                 }
 
@@ -310,51 +411,89 @@ fn rasterize_mesh_lightmap(
                     continue;
                 };
 
-                // Interpolate world position and normal.
-                let world_pos = wp0 * b0 + wp1 * b1 + wp2 * b2;
-                let world_normal = (wn0 * b0 + wn1 * b1 + wn2 * b2).normalize();
-
-                let origin = world_pos + face_normal * 0.02;
-
-                let shadow = raycast::cast_shadow_ray(
-                    origin,
-                    origin,
-                    sun_dir,
-                    cache,
-                    bvh,
-                    config.ao_radius * 4.0,
-                    config.shadow_steps,
-                );
-                let ao = raycast::compute_ao(
-                    origin,
-                    origin,
-                    world_normal,
-                    cache,
-                    bvh,
-                    config.ao_radius,
-                    config.ao_rays,
-                    config.ao_steps,
-                );
-                let ndotl = world_normal.dot(sun_dir).max(0.0);
-
-                let mut radiance = lighting.sun_and_ambient(ndotl, shadow, ao, 0.0);
-                radiance += lighting.local_lights(origin, world_normal, |dir, dist| {
-                    raycast::cast_shadow_ray_segment(
-                        origin,
-                        origin,
-                        dir,
-                        dist,
-                        cache,
-                        bvh,
-                        config.light_shadow_steps(dist),
-                    )
+                geometry[pixel_idx] = Some(TexelGeom {
+                    world_pos: wp0 * b0 + wp1 * b1 + wp2 * b2,
+                    normal: (wn0 * b0 + wn1 * b1 + wn2 * b2).normalize(),
+                    face_normal,
                 });
-
-                lightmap.texels[pixel_idx] = radiance;
-                written[pixel_idx] = true;
             }
         }
     }
+
+    geometry
+}
+
+/// Shade every covered texel with the baked lighting model.
+///
+/// This is where an object bake spends essentially all of its time: each
+/// covered texel casts a sun shadow ray, an AO hemisphere, and one segment
+/// ray per placed light. None of them depend on any other texel, so the pass
+/// is `par_iter` — matching what the CPU terrain bake has always done
+/// (`terrain.rs`) and what the object path was missing.
+///
+/// Uncovered texels stay black; `dilate` floods lit values into them after
+/// the blur, so nothing ever samples one.
+fn shade_geometry(
+    geometry: &[Option<TexelGeom>],
+    res: usize,
+    cache: &BakeHeightCache,
+    bvh: &TriangleBvh,
+    config: &BakeConfig,
+    lighting: &BakeLighting,
+) -> LightmapBuffer {
+    let sun_dir = lighting.sun_dir;
+
+    let texels: Vec<Vec3> = geometry
+        .par_iter()
+        .map(|slot| {
+            let Some(g) = slot else {
+                return Vec3::ZERO;
+            };
+
+            // Both ray origins are the same point, unlike the terrain bake,
+            // which lifts its DDA origin 0.5 up so the coarse march can't
+            // re-hit the ground it left. An object texel is not on the
+            // ground, so there is nothing to step off.
+            let origin = g.world_pos + g.face_normal * 0.02;
+
+            let shadow = raycast::cast_shadow_ray(
+                origin,
+                origin,
+                sun_dir,
+                cache,
+                bvh,
+                config.ao_radius * 4.0,
+                config.shadow_steps,
+            );
+            let ao = raycast::compute_ao(
+                origin,
+                origin,
+                g.normal,
+                cache,
+                bvh,
+                config.ao_radius,
+                config.ao_rays,
+                config.ao_steps,
+            );
+            let ndotl = g.normal.dot(sun_dir).max(0.0);
+
+            let mut radiance = lighting.sun_and_ambient(ndotl, shadow, ao, 0.0);
+            radiance += lighting.local_lights(origin, g.normal, |dir, dist| {
+                raycast::cast_shadow_ray_segment(
+                    origin,
+                    origin,
+                    dir,
+                    dist,
+                    cache,
+                    bvh,
+                    config.light_shadow_steps(dist),
+                )
+            });
+            radiance
+        })
+        .collect();
+
+    LightmapBuffer { res, texels }
 }
 
 /// Compute barycentric coordinates `(b0, b1, b2)` of point `p` in the triangle
@@ -388,4 +527,122 @@ fn barycentric_uv(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> Option<(f32, f32, f32)>
     let b1 = v;
     let b0 = 1.0 - b1 - b2;
     Some((b0, b1, b2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::world::baking::uv_unwrap::generate_lightmap_uvs;
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::PrimitiveTopology;
+
+    /// A 1×1 quad in the XZ plane, unwrapped for lightmapping so its UV1 is
+    /// what the baker actually sees rather than something hand-written.
+    fn unwrapped_quad() -> Mesh {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+            ],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 4]);
+        mesh.insert_indices(Indices::U32(vec![0, 1, 2, 1, 3, 2]));
+        generate_lightmap_uvs(&mut mesh).expect("quad should unwrap");
+        mesh
+    }
+
+    /// Rasterisation has to place texels using the *instance* transform, not
+    /// the mesh's local coordinates: a glTF node's own scale is part of where
+    /// the surface actually is, and a texel positioned without it lands
+    /// inside the real geometry where self-shadowing bakes it black.
+    #[test]
+    fn rasterized_texels_land_on_the_transformed_surface() {
+        let mesh = unwrapped_quad();
+        // The quad scaled 2× in X and Z, lifted 3 units.
+        let world = Mat4::from_scale_rotation_translation(
+            Vec3::new(2.0, 1.0, 2.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, 3.0, 0.0),
+        );
+
+        let res = 64;
+        let geometry = rasterize_geometry(&mesh, &world, res);
+        assert_eq!(geometry.len(), res * res);
+
+        let covered: Vec<&TexelGeom> = geometry.iter().flatten().collect();
+        assert!(!covered.is_empty(), "nothing was rasterized");
+
+        for g in &covered {
+            assert!(
+                (g.world_pos.y - 3.0).abs() < 1e-3,
+                "texel off the quad's plane: {:?}",
+                g.world_pos
+            );
+            assert!(
+                (-1e-3..=2.0 + 1e-3).contains(&g.world_pos.x)
+                    && (-1e-3..=2.0 + 1e-3).contains(&g.world_pos.z),
+                "texel outside the scaled quad: {:?}",
+                g.world_pos
+            );
+            assert!(
+                g.normal.dot(Vec3::Y) > 0.99,
+                "normal should survive the transform: {:?}",
+                g.normal
+            );
+            assert!(
+                g.face_normal.dot(Vec3::Y) > 0.99,
+                "face normal must agree with the vertex normals, not be inverted: {:?}",
+                g.face_normal
+            );
+        }
+    }
+
+    /// Two triangles land in two of a 2×2 cell grid, each filling about half
+    /// its gutter-inset cell — so roughly a tenth of the atlas. Mostly a
+    /// guard against a UV or bounding-box change silently collapsing
+    /// coverage to nothing (or to everything).
+    #[test]
+    fn coverage_matches_the_per_triangle_cell_layout() {
+        let mesh = unwrapped_quad();
+        let res = 128;
+        let geometry = rasterize_geometry(&mesh, &Mat4::IDENTITY, res);
+
+        let covered = geometry.iter().filter(|g| g.is_some()).count();
+        let fraction = covered as f32 / (res * res) as f32;
+        assert!(
+            (0.05..0.20).contains(&fraction),
+            "{covered} of {} texels covered ({:.1}%) — expected ~10% for two \
+             triangles in a 2×2 cell grid",
+            res * res,
+            fraction * 100.0
+        );
+    }
+
+    /// A mesh the unwrapper never touched has no UV1, so there is nothing to
+    /// rasterise against. It must come back empty rather than panicking on a
+    /// missing attribute.
+    #[test]
+    fn a_mesh_without_lightmap_uvs_rasterizes_to_nothing() {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 3]);
+        mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+
+        let geometry = rasterize_geometry(&mesh, &Mat4::IDENTITY, 16);
+        assert_eq!(geometry.len(), 16 * 16);
+        assert!(geometry.iter().all(Option::is_none));
+    }
 }

@@ -125,7 +125,8 @@ src/
             │                 #   apply_object_lightmaps loader system
             ├── raycast.rs    # CPU shadow/AO rays: heightmap DDA + BVH test (dual origins)
             ├── terrain.rs    # Terrain lightmap baking
-            ├── objects.rs    # Per-object lightmap baking
+            ├── objects.rs    # Per-object lightmap baking: rasterize_geometry (serial) →
+            │                 #   shade_geometry (rayon) → blur/dilate; BakeStats timings
             ├── gpu.rs        # GPU compute pipeline (native only)
             └── uv_unwrap.rs  # Non-overlapping per-triangle lightmap UV2 + LightmapUvCache
 ```

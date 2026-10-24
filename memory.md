@@ -168,6 +168,29 @@ paying off now that the lightmap is interpolated.
    covered texels (the gutter is empty until dilation runs, so averaging it in would draw
    a dark rim around every triangle). Radius capped at `cell/4`.
 
+## Object lightmap bake performance — October 2026
+
+Terrain already bakes on the GPU (`baking/gpu.rs` + `lightmap_bake.wgsl`); only
+**placed objects** are CPU-bound. They were also single-threaded, where the CPU
+*terrain* path has always been `into_par_iter()` (`terrain.rs:66`) — objects just
+never got it.
+
+`baking/objects.rs` is now split into `rasterize_geometry` (serial, cheap, pure
+interpolation → `Vec<Option<TexelGeom>>`) and `shade_geometry` (`par_iter`, where
+all the rays are). `BakeStats` prints per-pass timings and coverage at the end of
+each bake; per-sub-mesh detail is at `debug` level.
+
+The split is deliberately the same shape the GPU path needs: `TexelGeom` is the
+g-buffer it would upload, since the CPU object loop and the compute shader's
+`main()` differ *only* in how a texel derives its world position and normal —
+everything after that is the same already-written WGSL. See
+`docs/GPU_OBJECT_BAKE_PLAN.md`.
+
+Two things to remember if stage 2 happens: objects pass the **same origin twice**
+to `cast_shadow_ray` (terrain lifts its DDA origin 0.5 up so the coarse march
+can't re-hit the ground it left), and objects take **no bounce term**. Get either
+wrong and objects shade differently from the terrain they stand on.
+
 ## Plugin ↔ level-entity ownership — October 2026
 
 See `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md`. Short version: the engine cleans up
@@ -198,7 +221,7 @@ glue stays mapped — but a leak, and the level stays visibly mutated.
 
 - **Archetype-diff sharing**: if two bindings' factories insert the same component, only the first records it; detaching the first strips it from under the second. A factory that *replaces* a pre-existing component records nothing.
 - **No tracked-insert API** for plugin systems that must write to a level entity (rule 4 of the ownership contract), and **no detector** for violations. Deferred until a second real case appears; `dress_cafe_shell` was the only one and it's gone.
-- **Object lightmap rasteriser is single-threaded** (`baking/objects.rs::rasterize_mesh_lightmap`, plain nested loop) while terrain bakes on the GPU. Now that object atlases are world-sized, the cafe shell bakes 512² per sub-mesh instead of 32–64², so Shift+B got much slower. Parallelising is safe in principle — each triangle writes only inside its own disjoint atlas cell — but needs a restructure around the shared `written` array.
+- **Object bake still runs inline in `Update`**, so Shift+B stalls the frame no matter how fast shading gets. Only the GPU path (async readback) fixes that — see `docs/GPU_OBJECT_BAKE_PLAN.md` stage 2, not started.
 - **Uniform atlas cells waste a cuboid's budget**: a wall is 12 triangles, two of them big faces and ten slivers down its thickness, yet every cell is sized for the biggest. The cafe's front wall lands at ~2.7 texels/m where its floor gets 7.0. Fixing it properly means area-proportional cells (rectangle packing), not a uniform grid.
 - **`PlacedPicker` picks through occluders** (`editor/object_placement.rs`): non-placed ray hits (terrain, walls) are skipped instead of terminating the ray — Delete/attach can act on hidden entities. Ray should stop at first hit of any kind.
 - **Stale armed stamp**: `PlacementConfig.stamp_script` is never cleared on plugin unload; panel shows "No stamp" while the status line and placements still use the stale stamp, seeding bindings with *empty* props (schema lookup falls back to default).

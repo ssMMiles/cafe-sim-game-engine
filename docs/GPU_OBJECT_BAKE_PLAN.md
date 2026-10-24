@@ -1,6 +1,8 @@
 # Moving the object lightmap bake to the GPU
 
-Status: **plan only, nothing implemented.**
+Status: **stage 1 done** (instrumentation + rasterise/shade split + rayon).
+Stage 2 (the GPU path itself) is **not started, and deliberately not yet
+committed to** — run a bake, read the numbers it now prints, and decide.
 
 ## Where the time actually goes
 
@@ -75,39 +77,47 @@ Note that object rays need the terrain heightmap too (`cast_shadow_ray` takes
 a `BakeHeightCache` so objects are shadowed by hills), and that buffer is
 already part of the GPU bind group.
 
-## Stage 1 — measure, and split rasterise from shade
+## Stage 1 — measure, and split rasterise from shade — **done**
 
-Do this first, on its own. It is a prerequisite for the GPU work *and* it is
-most of the benefit for a fraction of the effort, so it is worth landing and
-living with before committing to stage 2.
-
-**Instrument.** Log per-sub-mesh atlas resolution, covered-texel count, and
-wall-clock for the bake. Without this we are optimising from arithmetic.
-
-**Restructure `rasterize_mesh_lightmap` into two passes:**
+`rasterize_mesh_lightmap` is now two passes:
 
 ```rust
 struct TexelGeom { world_pos: Vec3, normal: Vec3, face_normal: Vec3 }
 
-// Pass 1: rasterise. Cheap — barycentric interpolation, no rays.
-fn rasterize_geometry(mesh, world_mat, res) -> Vec<Option<TexelGeom>>
-
-// Pass 2: shade. Embarrassingly parallel over texels.
-fn shade_geometry(&[Option<TexelGeom>], cache, bvh, config, lighting) -> LightmapBuffer
+fn rasterize_geometry(mesh, world_mat, res) -> Vec<Option<TexelGeom>>   // serial, cheap
+fn shade_geometry(&[Option<TexelGeom>], res, cache, bvh, config, lighting)
+    -> LightmapBuffer                                                   // par_iter
 ```
 
-Pass 2 becomes `into_par_iter()` exactly like `terrain.rs`. The `written` mask
-falls out of `Option::is_some` instead of being threaded through.
+The `written` mask now falls out of `Option::is_some` instead of being
+threaded through the rasteriser. That also removed a wart: the old guard
+implied triangles might contend for texels, when in fact every triangle's
+bounding box lies inside its own disjoint atlas cell.
 
-This also removes a wart: today the `written` guard implies triangles might
-contend for texels, when in fact every triangle's bbox lies inside its own
-disjoint atlas cell, so they never do.
+`BakeStats` reports per pass at the end of each bake:
 
-Expected: 8–16× on a modern multi-core Mac, for maybe an afternoon's work.
-**It does not fix the frame stall** — the bake still blocks `Update`.
+```
+Object bake: 12 sub-mesh(es), 134217 of 1310720 texels covered (10%),
+             largest atlas 512², ≥2.3M rays
+  rasterize 0.04s | shade 11.82s | blur+dilate 0.21s | exr 0.35s | total 12.42s
+```
 
-Crucially, `Vec<Option<TexelGeom>>` *is* the g-buffer stage 2 uploads. Stage 1
-is not throwaway work.
+Per-sub-mesh detail (resolution, triangle count, coverage) is at `debug`
+level so it is available without spamming a normal run.
+
+**Read these numbers before starting stage 2.** The thing to check is that
+`shade` really does dominate. If `exr` or `blur+dilate` turns out to be a
+meaningful share, moving shading to the GPU buys proportionally less than the
+arithmetic above suggests — and the EXR writes in particular are much easier
+to fix (they are serial and synchronous, and could be moved off-thread).
+
+**This does not fix the frame stall.** The bake still runs inline in `Update`.
+Stage 2 fixes that as a side effect of going async; if the stall is the real
+complaint rather than total time, that moves stage 2 up regardless of what
+the timings say.
+
+`Vec<Option<TexelGeom>>` is the g-buffer stage 2 uploads, so none of this is
+throwaway.
 
 ## Stage 2 — GPU object bake
 
@@ -224,9 +234,11 @@ Deliberately, in the completion handler:
 
 ## Suggested order
 
-1. Instrument the existing bake; get real numbers per sub-mesh. *(small)*
-2. Stage 1 split + rayon. Land it, live with it. *(small)*
-3. Decide from the measurements whether stage 2 is still worth it. *(—)*
+1. ~~Instrument the existing bake.~~ **Done** — `BakeStats`.
+2. ~~Stage 1 split + rayon.~~ **Done.**
+3. **Next: run a bake and read the numbers.** Decide from them whether stage 2
+   is worth it, and whether the frame stall or the total time is the actual
+   complaint. *(—)*
 4. Stage 2: shader entry point, shared heightmap, g-buffer binding, tag enum,
    wire into the existing queue. *(large)*
 5. CPU/GPU agreement test. *(small, but do not skip it)*
