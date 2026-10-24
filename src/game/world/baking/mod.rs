@@ -70,12 +70,19 @@ pub struct BakeConfig {
     /// per-triangle world extent is tiny and `mesh_texels_per_metre` would
     /// round down to nothing.
     pub mesh_texels_per_triangle: u32,
-    /// Minimum dilation passes flooding lit texels into the empty gutter
-    /// around each atlas cell. The actual count is derived per atlas from the
-    /// cell size (`uv_unwrap::dilate_passes_for_atlas`) — the gutter is a
-    /// fraction of the cell, so it grows with resolution — and this is only a
-    /// floor. Too few passes leaves a black rim that bilinear filtering then
-    /// smears across every triangle edge.
+    /// How far lit texels are flooded past the edge of each triangle, so
+    /// bilinear filtering there cannot sample an empty (black) texel.
+    ///
+    /// A small constant, and deliberately **not** scaled to the width of the
+    /// atlas gutter. The gutter is dead space whose job is to *separate*
+    /// triangles so one's filtering can never reach another's texels; nothing
+    /// ever samples most of it. The shader only samples UVs inside a triangle,
+    /// and a bilinear tap reaches at most one texel beyond the sample point,
+    /// so one pass suffices and the default is already generous.
+    ///
+    /// Sizing this from the cell instead cost 94 passes over a 1024² atlas for
+    /// a two-triangle mesh — ~900M neighbour tests and a gigabyte of copying,
+    /// to fill texels no sampler can reach.
     pub dilate_passes: u32,
     /// Number of AO hemisphere rays per texel.
     pub ao_rays: u32,

@@ -191,6 +191,22 @@ to `cast_shadow_ray` (terrain lifts its DDA origin 0.5 up so the coarse march
 can't re-hit the ground it left), and objects take **no bounce term**. Get either
 wrong and objects shade differently from the terrain they stand on.
 
+**Measuring immediately found that shading was not the bottleneck.** First real
+bake: shade 0.46s, blur+dilate **2.66s**. Cause: `dilate_passes_for_atlas` sized
+the pass count to fill the whole atlas gutter — 94 passes for a two-triangle mesh
+in a 1024² atlas, ~900M neighbour tests and a GB of cloning. The premise was
+wrong: the gutter is *separation* (dead space so one triangle's filtering can't
+reach another's texels), and the shader only samples inside a triangle, where a
+bilinear tap reaches **one** texel out. So dilation needs a small constant, which
+is what `BakeConfig::dilate_passes` already was. Deleted the derived version.
+
+Consequence: a GPU object bake is now poor value — ~0.46s of a ~0.6s bake, against
+a permanent fourth copy of the lighting model (the CPU path can't be retired; WASM
+has no compute). The remaining real problem is that `run_bake` calls the object
+bake **inline in `Update`**, so Shift+B freezes the app. That wants
+`AsyncComputeTaskPool` (as `streaming.rs` and `terrain/save.rs` already use), not
+a compute shader.
+
 ## Plugin ↔ level-entity ownership — October 2026
 
 See `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md`. Short version: the engine cleans up

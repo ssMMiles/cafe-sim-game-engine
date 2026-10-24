@@ -1,8 +1,10 @@
 # Moving the object lightmap bake to the GPU
 
-Status: **stage 1 done** (instrumentation + rasterise/shade split + rayon).
-Stage 2 (the GPU path itself) is **not started, and deliberately not yet
-committed to** — run a bake, read the numbers it now prints, and decide.
+Status: **stage 1 done and measured.** Stage 2 (the GPU path itself) is **not
+started, and the measurements argue against it** — see "What measuring
+actually showed" below. Recommendation: if the remaining complaint is the
+frame stall rather than total time, fix that with `AsyncComputeTaskPool`,
+not a compute shader.
 
 ## Where the time actually goes
 
@@ -232,13 +234,75 @@ Deliberately, in the completion handler:
   as a side effect of going async; stage 1 does not. If the stall is the real
   complaint rather than total time, that reorders the priorities.
 
+## What measuring actually showed
+
+The point of instrumenting first was to avoid optimising from arithmetic. It
+paid off immediately — the first real bake, 10 sub-meshes with a 1024² atlas:
+
+```
+Object bake: 10 sub-mesh(es), 698705 of 4194304 texels covered (17%),
+             largest atlas 1024², ≥11.9M rays
+  rasterize 0.01s | shade 0.46s | blur+dilate 2.66s | exr 0.06s | total 3.19s
+```
+
+**Shading was never the bottleneck once parallelised — dilation was, and it
+was a bug.** `dilate_passes_for_atlas` sized the pass count to cover the whole
+atlas gutter, which for a two-triangle mesh in a 1024² atlas is a 512 px cell
+and **94 passes**: ~900M neighbour tests and a gigabyte of buffer cloning, to
+fill texels no sampler can ever read.
+
+The premise was wrong. The gutter is *separation* — dead space that stops one
+triangle's filtering reaching another's texels. The shader only samples UVs
+inside a triangle, and a bilinear tap reaches at most one texel past the
+sample point, so dilation only has to cover that one texel. Reverted to the
+`dilate_passes` constant (default 3, already generous). `blur_cells` and
+`dilate` are both `par_iter` now as well.
+
+So the standing figures are roughly: shade 0.46s of a ~0.6s bake.
+
+### Which makes the case for stage 2 weak
+
+- **Ceiling.** Even an infinitely fast GPU saves ~0.4s of a ~0.6s bake.
+- **A fourth copy of the lighting model.** There are already three (CPU
+  terrain, CPU object, GPU terrain) and they must agree or objects shade
+  differently from the terrain they sit on. The CPU object path cannot be
+  retired either — WASM has no compute path — so this duplication is
+  permanent, not transitional.
+- **Surface area.** `gpu.rs` is ~950 lines of render-graph node, extract,
+  bind-group and readback plumbing. Objects additionally need a g-buffer
+  upload, a generalised readback tag, and the per-object heightmap collapsed
+  into one shared region upload.
+- **Testability goes down.** The CPU path is unit-testable and is tested; a
+  compute shader is not, and the CPU/GPU agreement test it would need is
+  itself work.
+- **Many small atlases.** Per-job overhead could eat the win for scenes of
+  small props, which is the common case.
+
+### The frame stall is the real remaining problem, and it is cheaper to fix
+
+`run_bake` calls the object bake inline in `Update`, so Shift+B freezes the
+app. That is independent of how fast shading is, and it does **not** need the
+GPU: move the bake onto `AsyncComputeTaskPool` and poll it, the pattern
+`streaming.rs` and `terrain/save.rs` already use. One CPU implementation,
+no shader, works on WASM too.
+
+The inputs are already suitable — `TriangleBvh` is behind an `Arc`, and the
+height cache is explicitly documented as shared read-only across rayon
+workers. The awkward part is that the completion step touches `Assets<Mesh>`,
+`Assets<Image>` and materials, so UV unwrap has to stay on the main world
+before the task is spawned and the material swap has to happen on the polling
+side — the same split the GPU path would need anyway.
+
 ## Suggested order
 
 1. ~~Instrument the existing bake.~~ **Done** — `BakeStats`.
 2. ~~Stage 1 split + rayon.~~ **Done.**
-3. **Next: run a bake and read the numbers.** Decide from them whether stage 2
-   is worth it, and whether the frame stall or the total time is the actual
-   complaint. *(—)*
-4. Stage 2: shader entry point, shared heightmap, g-buffer binding, tag enum,
-   wire into the existing queue. *(large)*
-5. CPU/GPU agreement test. *(small, but do not skip it)*
+3. ~~Measure.~~ **Done** — and it found the dilation bug, which was 83% of the
+   bake. Fixed.
+4. **Recommended next, if the stall still bothers anyone:** move the object
+   bake to `AsyncComputeTaskPool`. *(medium)*
+5. Stage 2 (GPU) — shader entry point, shared heightmap, g-buffer binding, tag
+   enum, wire into the existing queue. *(large)* **Not recommended on the
+   current numbers.** Revisit if object counts or atlas sizes grow by an order
+   of magnitude, which would change the arithmetic.
+6. CPU/GPU agreement test, if 5 ever happens. *(small, but do not skip it)*

@@ -17,8 +17,7 @@ use super::object_lightmaps::{
 };
 use super::raycast::BakeHeightCache;
 use super::uv_unwrap::{
-    LightmapUvCache, cell_texels, dilate_passes_for_atlas, lightmap_resolution, max_world_edge,
-    texels_per_cell,
+    LightmapUvCache, cell_texels, lightmap_resolution, max_world_edge, texels_per_cell,
 };
 use super::{BakeConfig, BakeRegion, raycast};
 use crate::game::world::{
@@ -178,11 +177,11 @@ pub fn bake_object_lightmaps(
             let blur_radius = config.blur_radius.min((cell_px / 4) as u32);
             lightmap = lightmap.blur_cells(blur_radius, cell_px, &written);
 
-            // Flood lit values into each cell's gutter so bilinear filtering
-            // at a triangle's edge never samples an empty (black) texel. The
-            // gutter scales with the cell, so the pass count has to as well.
-            let passes = dilate_passes_for_atlas(res as u32, tri_count).max(config.dilate_passes);
-            lightmap.dilate(&mut written, passes);
+            // Flood lit values one texel past each triangle's edge so bilinear
+            // filtering there never samples an empty (black) texel. A small
+            // constant on purpose — see `BakeConfig::dilate_passes` for why
+            // this must *not* scale with the gutter.
+            lightmap.dilate(&mut written, config.dilate_passes);
             stats.post += t_post.elapsed();
 
             // A failed write is logged but doesn't stop the live material from

@@ -142,19 +142,6 @@ pub fn max_world_edge(mesh: &Mesh, world_from_local: &Mat4) -> f32 {
     max_edge
 }
 
-/// Dilation passes needed to flood lit values across the whole gutter of an
-/// atlas of side `res` holding `tri_count` triangles.
-///
-/// Derived rather than configured: the gutter is a *fraction* of the cell, so
-/// it grows with resolution. A fixed pass count that covered the gutter at
-/// 8 texels/cell leaves a black rim at 256 texels/cell, which bilinear
-/// filtering then smears across every triangle edge.
-pub fn dilate_passes_for_atlas(res: u32, tri_count: u32) -> u32 {
-    // +1 so the flood reaches a texel *past* the gutter, covering the
-    // half-texel a bilinear tap can reach beyond the cell boundary.
-    (cell_texels(res, tri_count) as f32 * GUTTER_FRAC).ceil() as u32 + 1
-}
-
 /// Width in texels of one triangle's cell, in an atlas of side `res` holding
 /// `tri_count` triangles.
 pub fn cell_texels(res: u32, tri_count: u32) -> u32 {
@@ -404,22 +391,6 @@ mod tests {
         assert_eq!(texels_per_cell(0.0, 8.0, 8), 8);
         assert_eq!(texels_per_cell(f32::NAN, 8.0, 8), 8);
         assert_eq!(texels_per_cell(10.0, 0.0, 8), 8);
-    }
-
-    /// The gutter is a fraction of the cell, so a fixed pass count that
-    /// covered it at 8 texels/cell leaves a black rim once cells get big.
-    #[test]
-    fn dilation_covers_the_gutter_at_every_resolution() {
-        for (res, tri_count) in [(32u32, 2u32), (512, 2), (512, 12), (256, 1000)] {
-            let passes = dilate_passes_for_atlas(res, tri_count);
-            let cell = res / grid_side(tri_count);
-            let gutter = cell as f32 * GUTTER_FRAC;
-            assert!(
-                passes as f32 >= gutter,
-                "{res}px atlas, {tri_count} tris: {passes} passes cannot fill a \
-                 {gutter:.1}-texel gutter"
-            );
-        }
     }
 
     #[test]

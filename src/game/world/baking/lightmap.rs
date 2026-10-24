@@ -20,6 +20,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use half::f16;
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
 use crate::game::world::objects::PlacedKind;
@@ -255,6 +256,12 @@ pub struct LightmapBuffer {
 }
 
 impl LightmapBuffer {
+    /// A black buffer of `res × res`.
+    ///
+    /// Test-only: every bake path now builds its texels in one pass and
+    /// constructs the struct directly, so allocating zeroes first would just
+    /// be a wasted pass over the atlas.
+    #[cfg(test)]
     pub fn new(res: usize) -> Self {
         Self {
             res,
@@ -375,54 +382,38 @@ impl LightmapBuffer {
 
         // Horizontal pass, then vertical. Each accumulates only over covered
         // texels and leaves uncovered ones untouched, so the mask survives
-        // both passes.
-        let mut temp = self.texels.clone();
-        for row in 0..n {
-            for col in 0..n {
-                let idx = row * n + col;
-                if !covered(idx) {
-                    continue;
-                }
-                let (lo, hi) = window(col);
-                let (mut sum, mut count) = (Vec3::ZERO, 0u32);
-                for c in lo..hi {
-                    let j = row * n + c;
-                    if covered(j) {
-                        sum += self.texels[j];
-                        count += 1;
+        // both passes. Each output texel is a pure function of the previous
+        // buffer, so both passes parallelise the way the bakers do.
+        let blur_axis = |src: &[Vec3], horizontal: bool| -> Vec<Vec3> {
+            (0..n * n)
+                .into_par_iter()
+                .map(|idx| {
+                    if !covered(idx) {
+                        return src[idx];
                     }
-                }
-                if count > 0 {
-                    temp[idx] = sum / count as f32;
-                }
-            }
-        }
-
-        let mut out = temp.clone();
-        for col in 0..n {
-            for row in 0..n {
-                let idx = row * n + col;
-                if !covered(idx) {
-                    continue;
-                }
-                let (lo, hi) = window(row);
-                let (mut sum, mut count) = (Vec3::ZERO, 0u32);
-                for r2 in lo..hi {
-                    let j = r2 * n + col;
-                    if covered(j) {
-                        sum += temp[j];
-                        count += 1;
+                    let (row, col) = (idx / n, idx % n);
+                    let (lo, hi) = window(if horizontal { col } else { row });
+                    let (mut sum, mut count) = (Vec3::ZERO, 0u32);
+                    for k in lo..hi {
+                        let j = if horizontal { row * n + k } else { k * n + col };
+                        if covered(j) {
+                            sum += src[j];
+                            count += 1;
+                        }
                     }
-                }
-                if count > 0 {
-                    out[idx] = sum / count as f32;
-                }
-            }
-        }
+                    if count > 0 {
+                        sum / count as f32
+                    } else {
+                        src[idx]
+                    }
+                })
+                .collect()
+        };
 
+        let temp = blur_axis(&self.texels, true);
         Self {
             res: n,
-            texels: out,
+            texels: blur_axis(&temp, false),
         }
     }
 
@@ -438,18 +429,18 @@ impl LightmapBuffer {
         let n = self.res as i32;
 
         for _ in 0..passes {
-            let src = self.texels.clone();
-            // Snapshot: a texel filled by this pass must not seed this same
-            // pass, or filling would run further in +x/+y than elsewhere.
-            let was_written = written.to_vec();
-            let mut filled_any = false;
-
-            for y in 0..n {
-                for x in 0..n {
-                    let idx = (y * n + x) as usize;
-                    if was_written[idx] {
-                        continue;
+            // Each pass reads the *previous* state only — a texel filled by
+            // this pass must not seed it, or the flood would run further in
+            // +x/+y than elsewhere. Computing the whole pass into a fresh
+            // buffer gives that for free and makes it parallel, where
+            // snapshotting via clone cost two full-buffer copies per pass.
+            let filled: Vec<Option<Vec3>> = (0..(n * n) as usize)
+                .into_par_iter()
+                .map(|idx| {
+                    if written[idx] {
+                        return None;
                     }
+                    let (x, y) = ((idx as i32) % n, (idx as i32) / n);
                     let mut best = Vec3::ZERO;
                     let mut any = false;
                     for dy in -1..=1 {
@@ -459,17 +450,22 @@ impl LightmapBuffer {
                                 continue;
                             }
                             let ni = (ny * n + nx) as usize;
-                            if was_written[ni] {
-                                best = best.max(src[ni]);
+                            if written[ni] {
+                                best = best.max(self.texels[ni]);
                                 any = true;
                             }
                         }
                     }
-                    if any {
-                        self.texels[idx] = best;
-                        written[idx] = true;
-                        filled_any = true;
-                    }
+                    any.then_some(best)
+                })
+                .collect();
+
+            let mut filled_any = false;
+            for (idx, value) in filled.into_iter().enumerate() {
+                if let Some(value) = value {
+                    self.texels[idx] = value;
+                    written[idx] = true;
+                    filled_any = true;
                 }
             }
 
