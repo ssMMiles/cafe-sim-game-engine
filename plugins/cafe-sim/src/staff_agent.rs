@@ -24,7 +24,7 @@ use crate::coffee_menu::Brewing;
 use crate::customer::{Customer, CustomerState, HappyFace, ServedTimer};
 use crate::delivery::{DeliveredDrink, DeliveryAssets};
 use crate::drinks::{brew_secs_for, price_for};
-use crate::grid::{CAFE_DEPTH, CAFE_WIDTH, FLOOR_Y, HALF_D, cell_center};
+use crate::grid::{CAFE_DEPTH, CAFE_WIDTH, CafeAnchor, cell_center};
 use crate::pause_menu::GamePaused;
 use crate::placement::CoffeeMachine;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
@@ -32,9 +32,9 @@ use crate::staff::{Job, Staff};
 
 const WALK_SPEED: f32 = 1.5;
 const ARRIVE_DISTANCE: f32 = 0.1;
-const STAFF_FLOAT_Y: f32 = FLOOR_Y + 0.6;
+const STAFF_FLOAT: f32 = 0.6;
 const STAFF_SIZE: f32 = 0.4;
-const DOOR_Z: f32 = HALF_D as f32 + 1.0;
+
 const SPREAD_X: f32 = 0.6;
 /// How long a wandering staffer heads toward one spot before re-rolling a target.
 const WANDER_REPATH_SECS: f32 = 2.5;
@@ -135,6 +135,7 @@ pub fn staff_day_lifecycle(
     mut balance: ResMut<Balance>,
     mut notice: ResMut<PayrollNotice>,
     assets: Res<StaffAssets>,
+    anchor: Res<CafeAnchor>,
     mut agents_q: Query<(Entity, &Transform, &mut StaffAgent)>,
     mut was_open: Local<bool>,
 ) {
@@ -148,7 +149,14 @@ pub fn staff_day_lifecycle(
         }
         let total = staff.members.len();
         for (i, member) in staff.members.iter().enumerate() {
-            spawn_agent(&mut commands, &assets, i, member.move_speed_mod, total);
+            spawn_agent(
+                &mut commands,
+                &assets,
+                &anchor,
+                i,
+                member.move_speed_mod,
+                total,
+            );
         }
         if !notice.names.is_empty() {
             spawn_notice_toast(&mut commands, &notice.names);
@@ -173,7 +181,11 @@ pub fn staff_day_lifecycle(
         }
         for (_, transform, mut agent) in agents_q.iter_mut() {
             agent.state = AgentState::Leaving;
-            agent.target = Vec3::new(transform.translation.x, STAFF_FLOAT_Y, DOOR_Z);
+            agent.target = Vec3::new(
+                transform.translation.x,
+                staff_float_y(&anchor),
+                anchor.door_z(),
+            );
         }
     } else if open {
         // Steady state: cover mid-day hires that have no agent yet.
@@ -181,7 +193,14 @@ pub fn staff_day_lifecycle(
         let total = staff.members.len();
         for (i, member) in staff.members.iter().enumerate() {
             if !have.contains(&i) {
-                spawn_agent(&mut commands, &assets, i, member.move_speed_mod, total);
+                spawn_agent(
+                    &mut commands,
+                    &assets,
+                    &anchor,
+                    i,
+                    member.move_speed_mod,
+                    total,
+                );
             }
         }
     }
@@ -192,19 +211,24 @@ pub fn staff_day_lifecycle(
 fn spawn_agent(
     commands: &mut Commands,
     assets: &StaffAssets,
+    anchor: &CafeAnchor,
     index: usize,
     move_speed_mod: f32,
     total: usize,
 ) {
     let spread = (index as f32 - (total as f32 - 1.0) * 0.5) * SPREAD_X;
-    let pos = Vec3::new(spread, STAFF_FLOAT_Y, DOOR_Z);
+    let pos = Vec3::new(
+        anchor.origin.x + spread,
+        staff_float_y(anchor),
+        anchor.door_z(),
+    );
     let speed = WALK_SPEED * (1.0 + move_speed_mod).max(0.2);
     commands.spawn_owned((
         StaffAgent {
             roster_index: index,
             speed,
             state: AgentState::Wandering,
-            target: random_interior_target(),
+            target: random_interior_target(anchor),
             wander_cooldown: 0.0,
             carried_visual: None,
         },
@@ -226,6 +250,7 @@ pub fn tick_staff(
     cafe_open: Res<CafeOpen>,
     staff: Res<Staff>,
     delivery_assets: Res<DeliveryAssets>,
+    anchor: Res<CafeAnchor>,
     mut balance: ResMut<Balance>,
     mut agents_q: Query<(Entity, &mut Transform, &mut StaffAgent)>,
     mut customers_q: Query<(Entity, &mut Customer)>,
@@ -302,14 +327,14 @@ pub fn tick_staff(
                         machine,
                         drink,
                     };
-                    agent.target = Vec3::new(mpos.x, STAFF_FLOAT_Y, mpos.z);
+                    agent.target = Vec3::new(mpos.x, staff_float_y(&anchor), mpos.z);
                     continue;
                 }
 
                 agent.wander_cooldown -= dt;
                 let arrived = step_toward(&mut transform, agent.target, speed, dt);
                 if arrived || agent.wander_cooldown <= 0.0 {
-                    agent.target = random_interior_target();
+                    agent.target = random_interior_target(&anchor);
                     agent.wander_cooldown = WANDER_REPATH_SECS;
                 }
             }
@@ -375,7 +400,7 @@ pub fn tick_staff(
                             .id();
                         commands.entity(agent_entity).add_child(cube);
                         agent.carried_visual = Some(cube);
-                        agent.target = carry_target(counter);
+                        agent.target = carry_target(&anchor, counter);
                         agent.state = AgentState::ToCustomer {
                             customer,
                             counter,
@@ -399,6 +424,7 @@ pub fn tick_staff(
                     serve(
                         &mut commands,
                         &delivery_assets,
+                        &anchor,
                         &mut balance,
                         &staff,
                         agent.roster_index,
@@ -430,6 +456,7 @@ pub fn tick_staff(
 fn serve(
     commands: &mut Commands,
     assets: &DeliveryAssets,
+    anchor: &CafeAnchor,
     balance: &mut Balance,
     staff: &Staff,
     roster_index: usize,
@@ -456,12 +483,13 @@ fn serve(
         spawn_balance_popup(commands, price + tip);
     }
 
-    let center = cell_center(counter.0, counter.1);
+    let center = cell_center(anchor, counter.0, counter.1);
     commands.spawn_owned((
         DeliveredDrink { customer },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
-        Transform::from_xyz(center.x, FLOOR_Y + 1.0, center.z).with_scale(Vec3::splat(0.15)),
+        Transform::from_xyz(center.x, anchor.floor_y() + 1.0, center.z)
+            .with_scale(Vec3::splat(0.15)),
     ));
 
     cust.state = CustomerState::Served;
@@ -562,17 +590,21 @@ fn step_toward(transform: &mut Transform, target: Vec3, speed: f32, dt: f32) -> 
     false
 }
 
-fn random_interior_target() -> Vec3 {
+fn staff_float_y(anchor: &CafeAnchor) -> f32 {
+    anchor.floor_y() + STAFF_FLOAT
+}
+
+fn random_interior_target(anchor: &CafeAnchor) -> Vec3 {
     let mut rng = rand::thread_rng();
     let i = rng.gen_range(0..CAFE_WIDTH);
     let j = rng.gen_range(0..CAFE_DEPTH);
-    let c = cell_center(i, j);
-    Vec3::new(c.x, STAFF_FLOAT_Y, c.z)
+    let c = cell_center(anchor, i, j);
+    Vec3::new(c.x, staff_float_y(anchor), c.z)
 }
 
-fn carry_target(counter: (i32, i32)) -> Vec3 {
-    let c = cell_center(counter.0, counter.1);
-    Vec3::new(c.x, STAFF_FLOAT_Y, c.z)
+fn carry_target(anchor: &CafeAnchor, counter: (i32, i32)) -> Vec3 {
+    let c = cell_center(anchor, counter.0, counter.1);
+    Vec3::new(c.x, staff_float_y(anchor), c.z)
 }
 
 fn customer_waiting(customers_q: &Query<(Entity, &mut Customer)>, customer: Entity) -> bool {

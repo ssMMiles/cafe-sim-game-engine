@@ -14,13 +14,10 @@
 //! only edits `ScriptBindings` and re-arms `NeedsHydration`; the host's
 //! hydration pass turns that into plugin components on the next frame.
 
-use bevy::{
-    input::mouse::{MouseScrollUnit, MouseWheel},
-    prelude::*,
-    window::PrimaryWindow,
-};
+use bevy::{input::mouse::MouseWheel, prelude::*, window::PrimaryWindow};
 use engine_api::{ScriptBinding, ScriptBindings, ScriptRegistry};
 
+use super::input::{ScrollMod, scroll_delta, scroll_modifier};
 use super::mesh_selector::MeshSelectorOpen;
 use super::object_placement::PlacedPicker;
 use crate::{
@@ -324,17 +321,12 @@ pub fn scroll_script_panel(
     theme: Res<UiTheme>,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-    let mut delta = 0.0_f32;
-    for event in scroll_events.read() {
-        if shift {
-            continue;
-        }
-        delta += match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / 40.0,
-        };
+    // Unmodified scroll only: Shift scales and Alt rotates the placement.
+    if scroll_modifier(&input) != ScrollMod::None {
+        return;
     }
+
+    let delta = scroll_delta(&mut scroll_events, 40.0);
     if delta.abs() < 0.5 {
         return;
     }

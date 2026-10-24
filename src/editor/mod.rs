@@ -16,7 +16,10 @@ use crate::{
 };
 
 mod baking_trigger;
+mod controls;
 mod debug_hud;
+mod grab;
+mod input;
 mod lightmap_toggle;
 mod mesh_selector;
 mod object_placement;
@@ -29,9 +32,16 @@ pub use mesh_selector::MeshSelectorOpen;
 pub use script_binding::ScriptPanelOpen;
 
 use baking_trigger::trigger_bake;
+use controls::{
+    ControlsCache, cleanup_controls_panel, setup_controls_panel, update_controls_panel,
+};
 use debug_hud::{
     cleanup_debug_hud, setup_debug_hud, update_fps_display, update_interaction_info_display,
     update_keybinds_display, update_position_display,
+};
+use grab::{
+    GrabbedEntity, handle_grab_keys, place_grabbed_object, release_grab,
+    release_grab_on_edit_mode_exit,
 };
 use lightmap_toggle::{sync_lightmap_mode, toggle_lightmap_mode};
 use mesh_selector::{
@@ -40,8 +50,8 @@ use mesh_selector::{
     scroll_mesh_selector, setup_mesh_selector_panel, teardown_mesh_selector, toggle_mesh_selector,
 };
 use object_placement::{
-    PlacementPreviewEntity, adjust_placement_scale, cleanup_placement_preview,
-    delete_hovered_object, draw_preview_gizmo, handle_edit_mode_click,
+    PlacementPreviewEntity, adjust_placement_rotation, adjust_placement_scale,
+    cleanup_placement_preview, delete_hovered_object, draw_preview_gizmo, handle_edit_mode_click,
     rebuild_preview_on_config_change, setup_placement_preview, teardown_placement_preview,
     toggle_edit_mode, update_placement_preview,
 };
@@ -103,11 +113,32 @@ impl Plugin for EditorPlugin {
                 .in_set(EditorSet::Active)
                 .run_if(edit_mode_active),
         );
+        // ── Grab (move/rotate/rescale an already-placed entity) ─────────────
+        app.init_resource::<GrabbedEntity>();
+        // `delete_hovered_object` first: it bails while something is carried,
+        // so one Delete press can't both destroy the carried entity and
+        // delete whatever happens to be behind it.
         app.add_systems(
             Update,
-            delete_hovered_object
+            (delete_hovered_object, handle_grab_keys)
+                .chain()
                 .in_set(EditorSet::Active)
                 .run_if(edit_mode_active),
+        );
+        // Before `handle_edit_mode_click` (and clears the press) so dropping a
+        // carried entity can't also place a fresh one on the same click.
+        app.add_systems(
+            Update,
+            place_grabbed_object
+                .before(handle_edit_mode_click)
+                .in_set(EditorSet::Active)
+                .run_if(edit_mode_active),
+        );
+        // Not gated on `edit_mode_active` — this is what catches edit mode
+        // being switched off while an entity is still held.
+        app.add_systems(
+            Update,
+            release_grab_on_edit_mode_exit.in_set(EditorSet::InGame),
         );
         app.add_systems(Update, setup_placement_preview.in_set(EditorSet::InGame));
         app.add_systems(Update, cleanup_placement_preview.in_set(EditorSet::InGame));
@@ -117,7 +148,10 @@ impl Plugin for EditorPlugin {
                 .chain()
                 .in_set(EditorSet::Active),
         );
-        app.add_systems(Update, adjust_placement_scale.in_set(EditorSet::Active));
+        app.add_systems(
+            Update,
+            (adjust_placement_scale, adjust_placement_rotation).in_set(EditorSet::Active),
+        );
         app.add_systems(
             Update,
             rebuild_preview_on_config_change
@@ -204,11 +238,16 @@ impl Plugin for EditorPlugin {
 
         // HUD spawns either when the editor turns on while in-game, or when
         // entering the game while already in editor mode (the default).
+        app.init_resource::<ControlsCache>();
         app.add_systems(
             OnEnter(AppState::InGame),
-            setup_debug_hud.run_if(in_state(EditorMode::Editor)),
+            (setup_debug_hud, setup_controls_panel).run_if(in_state(EditorMode::Editor)),
         );
-        app.add_systems(OnEnter(EditorMode::Editor), setup_debug_hud);
+        app.add_systems(
+            OnEnter(EditorMode::Editor),
+            (setup_debug_hud, setup_controls_panel),
+        );
+        app.add_systems(Update, update_controls_panel.in_set(EditorSet::InGame));
         app.add_systems(Update, update_fps_display.in_set(EditorSet::InGame));
         app.add_systems(Update, update_keybinds_display.in_set(EditorSet::InGame));
         app.add_systems(Update, update_position_display.in_set(EditorSet::InGame));
@@ -220,23 +259,45 @@ impl Plugin for EditorPlugin {
         // ── Mode toggle (must work in both modes) ───────────────────────────
         app.add_systems(Update, toggle_editor_mode.in_set(SimSet::InGame));
 
+        // A plugin that was deactivated mid-menu may have left the cursor
+        // free; the editor is FPS-style, so take it back. Gated to in-game so
+        // the `OnEnter` that fires at startup can't grab the cursor on the
+        // main menu.
+        app.add_systems(
+            OnEnter(EditorMode::Editor),
+            lock_cursor_for_editor.run_if(in_state(AppState::InGame)),
+        );
+
         // ── OnExit cleanup so gameplay sees a clean screen ──────────────────
         app.add_systems(
             OnExit(EditorMode::Editor),
             (
                 cleanup_debug_hud,
+                cleanup_controls_panel,
                 teardown_mesh_selector,
                 teardown_script_panel,
+                // Before the preview teardown: a carried entity must be put
+                // back into the world, not dropped on the floor.
+                release_grab,
                 teardown_placement_preview,
                 teardown_terrain_brush_preview,
                 clear_editor_sub_modes,
-            ),
+            )
+                .chain(),
         );
     }
 }
 
 fn edit_mode_active(settings: Res<UserSettings>) -> bool {
     settings.edit_mode
+}
+
+fn lock_cursor_for_editor(cursor_options: Option<Single<&mut bevy::window::CursorOptions>>) {
+    let Some(mut cursor) = cursor_options else {
+        return;
+    };
+    cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
+    cursor.visible = false;
 }
 
 fn toggle_editor_mode(

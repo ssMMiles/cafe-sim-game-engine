@@ -3,7 +3,7 @@ use engine_api::{AutoCollider, PlayerCamera};
 use std::collections::HashMap;
 
 use crate::catalog::{PieceDef, PieceKind};
-use crate::grid::{FLOOR_Y, PIECE_SCALE, camera_floor_hit, cell_center, world_to_cell};
+use crate::grid::{CafeAnchor, PIECE_SCALE, camera_floor_hit, cell_center, world_to_cell};
 use crate::menus::ActiveMenu;
 use crate::spawn::SpawnOwnedCommands;
 
@@ -86,6 +86,7 @@ pub fn sync_preview(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     selection: Res<PlacementSelection>,
+    anchor: Res<CafeAnchor>,
     mut preview_entity: ResMut<PreviewEntity>,
 ) {
     if !selection.is_changed() {
@@ -101,7 +102,7 @@ pub fn sync_preview(
         let mut preview = commands.spawn_owned((
             PlacementPreview,
             SceneRoot(scene),
-            Transform::from_xyz(0.0, FLOOR_Y, 0.0).with_scale(Vec3::splat(PIECE_SCALE)),
+            Transform::from_translation(anchor.origin).with_scale(Vec3::splat(PIECE_SCALE)),
             Visibility::Hidden,
         ));
         if piece.tint {
@@ -170,6 +171,7 @@ pub fn update_preview_transform(
     cam_q: Query<&Transform, (With<PlayerCamera>, Without<PlacementPreview>)>,
     occupancy: Res<GridOccupancy>,
     active: Res<ActiveMenu>,
+    anchor: Res<CafeAnchor>,
 ) {
     let Some(e) = preview_entity.0 else {
         return;
@@ -188,11 +190,11 @@ pub fn update_preview_transform(
         return;
     };
 
-    let Some(hit) = camera_floor_hit(cam) else {
+    let Some(hit) = camera_floor_hit(&anchor, cam) else {
         *vis = Visibility::Hidden;
         return;
     };
-    let Some((i, j)) = world_to_cell(hit) else {
+    let Some((i, j)) = world_to_cell(&anchor, hit) else {
         *vis = Visibility::Hidden;
         return;
     };
@@ -201,7 +203,7 @@ pub fn update_preview_transform(
         return;
     }
 
-    t.translation = cell_center(i, j);
+    t.translation = cell_center(&anchor, i, j);
     *vis = Visibility::Visible;
 }
 
@@ -212,6 +214,7 @@ pub fn handle_place_click(
     selection: Res<PlacementSelection>,
     mouse: Res<ButtonInput<MouseButton>>,
     cam_q: Query<&Transform, With<PlayerCamera>>,
+    anchor: Res<CafeAnchor>,
     mut occupancy: ResMut<GridOccupancy>,
 ) {
     if active.is_open() || !mouse.just_pressed(MouseButton::Left) {
@@ -223,10 +226,10 @@ pub fn handle_place_click(
     let Ok(cam) = cam_q.single() else {
         return;
     };
-    let Some(hit) = camera_floor_hit(cam) else {
+    let Some(hit) = camera_floor_hit(&anchor, cam) else {
         return;
     };
-    let Some((i, j)) = world_to_cell(hit) else {
+    let Some((i, j)) = world_to_cell(&anchor, hit) else {
         return;
     };
     if occupancy.0.contains_key(&(i, j)) {
@@ -240,6 +243,7 @@ pub fn handle_place_click(
         indices,
         (i, j),
         &mut occupancy,
+        &anchor,
     );
 }
 
@@ -255,11 +259,12 @@ pub fn spawn_piece(
     indices: (u8, u8),
     (i, j): (i32, i32),
     occupancy: &mut GridOccupancy,
+    anchor: &CafeAnchor,
 ) -> Entity {
     let scene: Handle<Scene> = asset_server.load(piece.asset_path);
     let mut placed = commands.spawn_owned((
         SceneRoot(scene),
-        Transform::from_translation(cell_center(i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
+        Transform::from_translation(cell_center(anchor, i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
         AutoCollider,
         PlacedCell(i, j),
         CafePiece {

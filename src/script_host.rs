@@ -123,6 +123,16 @@ impl Plugin for ScriptHostPlugin {
             app.init_resource::<ReportedMissingScripts>();
             app.add_systems(OnEnter(AppState::InGame), load_active_project_plugins);
             app.add_systems(OnExit(AppState::InGame), unload_all_plugins);
+            // Plugins run only in gameplay mode. Both are no-ops outside
+            // `AppState::InGame`, where nothing is loaded to begin with.
+            app.add_systems(
+                OnEnter(crate::editor::EditorMode::Gameplay),
+                activate_all_plugins,
+            );
+            app.add_systems(
+                OnExit(crate::editor::EditorMode::Gameplay),
+                deactivate_all_plugins,
+            );
             app.add_systems(Update, run_scripts.run_if(in_state(AppState::InGame)));
             app.add_systems(
                 Update,
@@ -152,6 +162,9 @@ impl Plugin for ScriptHostPlugin {
 type PluginSetupFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
 
 #[cfg(not(target_family = "wasm"))]
+type PluginRegisterFn = unsafe extern "C" fn(*mut c_void) -> u32;
+
+#[cfg(not(target_family = "wasm"))]
 type PluginTeardownFn = unsafe extern "C" fn(*mut c_void) -> u32;
 
 #[cfg(not(target_family = "wasm"))]
@@ -174,6 +187,13 @@ struct LoadedPlugin {
     loaded_mtime: Option<SystemTime>,
     /// Counter for generating unique copy filenames per plugin.
     reload_count: u32,
+    /// Whether the plugin's `setup` has run and its schedule is installed.
+    ///
+    /// Loading and activation are independent: a plugin is loaded whenever
+    /// the project declares it, but only *active* in `EditorMode::Gameplay`.
+    /// While inactive its scripts stay in the registry (so the editor can
+    /// still list and attach them) but none of its systems run.
+    active: bool,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -233,19 +253,12 @@ fn copy_dll(source: &Path, n: u32) -> std::io::Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// A dylib that's been loaded, ABI-checked, and had all its symbols resolved.
-/// No world state has been touched yet — call [`run_setup`] to commit.
+/// No world state has been touched yet — call [`run_register`] to commit.
 #[cfg(not(target_family = "wasm"))]
 struct PreparedLibrary {
     library: libloading::Library,
     plugin_name: String,
-    setup_fn: PluginSetupFn,
-}
-
-/// A dylib whose `plugin_setup` has run successfully.
-#[cfg(not(target_family = "wasm"))]
-struct LoadedDylib {
-    library: libloading::Library,
-    plugin_name: String,
+    register_fn: PluginRegisterFn,
 }
 
 /// Phase 1 of loading: copy the DLL, map it, verify the ABI, and resolve
@@ -325,15 +338,22 @@ fn prepare_library(
         }
     };
 
-    let setup_fn: PluginSetupFn = unsafe {
-        match library.get::<PluginSetupFn>(b"plugin_setup") {
+    let register_fn: PluginRegisterFn = unsafe {
+        match library.get::<PluginRegisterFn>(b"plugin_register") {
             Ok(sym) => *sym,
             Err(e) => {
-                bevy::log::error!("[scripts] '{plugin_id}' missing plugin_setup symbol: {e}");
+                bevy::log::error!("[scripts] '{plugin_id}' missing plugin_register symbol: {e}");
                 return None;
             }
         }
     };
+
+    // Resolved up front so a dylib missing either symbol is rejected in this
+    // phase, while rolling back is still free.
+    if let Err(e) = unsafe { library.get::<PluginSetupFn>(b"plugin_setup") } {
+        bevy::log::error!("[scripts] '{plugin_id}' missing plugin_setup symbol: {e}");
+        return None;
+    }
 
     if let Err(e) = unsafe { library.get::<PluginTeardownFn>(b"plugin_teardown") } {
         bevy::log::error!("[scripts] '{plugin_id}' missing plugin_teardown symbol: {e}");
@@ -343,16 +363,73 @@ fn prepare_library(
     Some(PreparedLibrary {
         library,
         plugin_name,
-        setup_fn,
+        register_fn,
     })
 }
 
-/// Phase 2 of loading: run the plugin's `setup` and install its schedule.
-/// Touches world state — only call this once you're committed to swapping
-/// in the new dylib (i.e. after the old one's teardown has run).
+/// Phase 2 of loading: run the plugin's `register`.
+///
+/// Registration is mode-independent — it only populates the script registry —
+/// so this runs on every load and hot-reload, in both editor and gameplay
+/// mode. Returns `false` if the dylib reported an error or panicked, in which
+/// case the caller must roll the load back.
 #[cfg(not(target_family = "wasm"))]
-fn run_setup(world: &mut World, plugin_id: &str, prepared: PreparedLibrary) -> Option<LoadedDylib> {
+fn run_register(world: &mut World, plugin_id: &str, register_fn: PluginRegisterFn) -> bool {
     // Make sure Time is registered host-side before the dylib touches it.
+    let _ = world.register_resource::<bevy::time::Time>();
+
+    let world_ptr = world as *mut World as *mut c_void;
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { register_fn(world_ptr) }));
+
+    match result {
+        Ok(0) => true,
+        Ok(code) => {
+            bevy::log::error!("[scripts] '{plugin_id}' plugin_register returned error code {code}");
+            false
+        }
+        Err(_) => {
+            bevy::log::error!("[scripts] '{plugin_id}' plugin_register panicked");
+            false
+        }
+    }
+}
+
+/// Start a loaded plugin's gameplay systems: run `setup` and install its
+/// schedule. No-op if the plugin isn't loaded or is already active.
+///
+/// The entry is lifted out of `LoadedPlugins` for the duration so the dylib
+/// gets an unaliased `&mut World`, and put back either way.
+#[cfg(not(target_family = "wasm"))]
+fn activate_plugin(world: &mut World, plugin_id: &str) {
+    let Some(mut entry) = world
+        .resource_mut::<LoadedPlugins>()
+        .plugins
+        .remove(plugin_id)
+    else {
+        return;
+    };
+    if entry.active {
+        world
+            .resource_mut::<LoadedPlugins>()
+            .plugins
+            .insert(plugin_id.to_owned(), entry);
+        return;
+    }
+
+    let setup_fn: PluginSetupFn = unsafe {
+        match entry.library.get::<PluginSetupFn>(b"plugin_setup") {
+            Ok(sym) => *sym,
+            Err(e) => {
+                bevy::log::error!("[scripts] '{plugin_id}' missing plugin_setup symbol: {e}");
+                world
+                    .resource_mut::<LoadedPlugins>()
+                    .plugins
+                    .insert(plugin_id.to_owned(), entry);
+                return;
+            }
+        }
+    };
+
     let _ = world.register_resource::<bevy::time::Time>();
 
     let mut new_schedule = Schedule::new(PluginSchedule(plugin_id.to_owned()));
@@ -360,7 +437,7 @@ fn run_setup(world: &mut World, plugin_id: &str, prepared: PreparedLibrary) -> O
     let world_ptr = world as *mut World as *mut c_void;
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
-        (prepared.setup_fn)(world_ptr, schedule_ptr)
+        setup_fn(world_ptr, schedule_ptr)
     }));
 
     let failed = match result {
@@ -382,61 +459,139 @@ fn run_setup(world: &mut World, plugin_id: &str, prepared: PreparedLibrary) -> O
             true
         }
     };
+
     if failed {
-        abort_failed_setup(world, plugin_id, prepared.library);
-        return None;
+        // A partial setup may have spawned ScriptOwned entities; sweep them
+        // so the next activation starts clean. Registry entries stay — they
+        // came from `register`, which succeeded.
+        despawn_owned_entities(world, plugin_id);
+        world
+            .resource_mut::<LoadedPlugins>()
+            .plugins
+            .insert(plugin_id.to_owned(), entry);
+        return;
     }
 
-    // Replaces any prior schedule with the same label. The dropped schedule's
-    // systems hold function pointers into the old DLL, but those pages are
-    // either still mapped (reload case: caller mem::forgets the old library)
-    // or this is the first load for this id.
-    let mut schedules = world.resource_mut::<bevy::ecs::schedule::Schedules>();
-    schedules.insert(new_schedule);
+    // Replaces any prior schedule with the same label.
+    world
+        .resource_mut::<bevy::ecs::schedule::Schedules>()
+        .insert(new_schedule);
 
-    bevy::log::info!(
-        "[scripts] '{plugin_id}' set up successfully (reports name: '{}')",
-        prepared.plugin_name
-    );
-    Some(LoadedDylib {
-        library: prepared.library,
-        plugin_name: prepared.plugin_name,
-    })
+    // Level data is applied once per (world, plugin). Setup has just
+    // re-inserted this plugin's resources at their defaults, so the saved
+    // blob has to be re-applied on top — clearing the record is what makes
+    // `apply_plugin_level_data` do that on the next frame. Must happen
+    // *after* setup, or the defaults would land on top of the save.
+    world
+        .resource_mut::<AppliedPluginData>()
+        .plugins
+        .remove(plugin_id);
+
+    entry.active = true;
+    world
+        .resource_mut::<LoadedPlugins>()
+        .plugins
+        .insert(plugin_id.to_owned(), entry);
+
+    bevy::log::info!("[scripts] '{plugin_id}' activated");
 }
 
-/// Clean up after a `plugin_setup` that failed or panicked partway through.
+/// Stop a plugin's gameplay systems: run `teardown` (which sweeps its
+/// `ScriptOwned` entities) and drop its schedule. The dylib stays mapped and
+/// its registry entries stay put, so the editor keeps working.
 ///
-/// A failed setup may already have mutated the world: registered script
-/// factories and level hooks (fn pointers into the dylib) and spawned
-/// `ScriptOwned` entities whose component drop glue lives in the dylib's
-/// pages. Dropping the library here would `dlclose` those pages and turn any
-/// later registry call or despawn into a jump into unmapped memory. So, like
-/// every other unload path, the library is `mem::forget`'d (pages stay mapped
-/// forever), the plugin's registry entries are removed, and its orphaned
-/// entities are despawned — safe precisely because the pages stay mapped.
+/// No-op if the plugin isn't loaded or is already inactive.
 #[cfg(not(target_family = "wasm"))]
-fn abort_failed_setup(world: &mut World, plugin_id: &str, library: libloading::Library) {
-    std::mem::forget(library);
+fn deactivate_plugin(world: &mut World, plugin_id: &str) {
+    let Some(mut entry) = world
+        .resource_mut::<LoadedPlugins>()
+        .plugins
+        .remove(plugin_id)
+    else {
+        return;
+    };
+    if !entry.active {
+        world
+            .resource_mut::<LoadedPlugins>()
+            .plugins
+            .insert(plugin_id.to_owned(), entry);
+        return;
+    }
 
+    run_teardown(world, &entry.library, plugin_id);
+
+    // Dropped while the dylib is still mapped, so the systems' drop glue is
+    // safe to run.
+    if let Some(mut schedules) = world.get_resource_mut::<bevy::ecs::schedule::Schedules>() {
+        schedules.remove(PluginSchedule(plugin_id.to_owned()));
+    }
+
+    // Re-applied on the next activation (setup resets resources to defaults).
     world
-        .resource_mut::<ScriptRegistry>()
-        .remove_plugin(plugin_id);
+        .resource_mut::<AppliedPluginData>()
+        .plugins
+        .remove(plugin_id);
 
+    // A plugin that was holding input when it stopped (an open menu, say)
+    // would otherwise leave the editor unable to move the camera. Its holder
+    // string points into dylib pages, so release it by id.
+    if let Some(mut lock) = world.get_resource_mut::<engine_api::InputLock>() {
+        lock.unlock_id(plugin_id);
+    }
+
+    entry.active = false;
+    world
+        .resource_mut::<LoadedPlugins>()
+        .plugins
+        .insert(plugin_id.to_owned(), entry);
+
+    bevy::log::info!("[scripts] '{plugin_id}' deactivated");
+}
+
+/// Despawn every entity tagged `ScriptOwned` for `plugin_id`.
+///
+/// Normally the dylib's own teardown shim does this; the host needs it for
+/// the one case where that shim can't be trusted to have run — a `setup` that
+/// failed or panicked partway through.
+#[cfg(not(target_family = "wasm"))]
+fn despawn_owned_entities(world: &mut World, plugin_id: &str) {
     let orphans: Vec<Entity> = world
         .query::<(Entity, &engine_api::ScriptOwned)>()
         .iter(world)
         .filter(|(_, owned)| owned.plugin == plugin_id)
         .map(|(entity, _)| entity)
         .collect();
-    if !orphans.is_empty() {
-        bevy::log::warn!(
-            "[scripts] '{plugin_id}' left {} entity(ies) behind in its failed setup; despawning",
-            orphans.len()
-        );
-        for entity in orphans {
-            world.despawn(entity);
-        }
+    if orphans.is_empty() {
+        return;
     }
+    bevy::log::warn!(
+        "[scripts] '{plugin_id}' left {} entity(ies) behind in its failed setup; despawning",
+        orphans.len()
+    );
+    for entity in orphans {
+        world.despawn(entity);
+    }
+}
+
+/// Clean up after a `plugin_register` that failed or panicked partway through.
+///
+/// A failed registration may already have mutated the world: registered
+/// script factories and level hooks (fn pointers into the dylib) and, if the
+/// plugin ignored the contract, spawned entities. Dropping the library here
+/// would `dlclose` those pages and turn any later registry call or despawn
+/// into a jump into unmapped memory. So, like every other unload path, the
+/// library is `mem::forget`'d (pages stay mapped forever), the plugin's
+/// registry entries are removed, and its orphaned entities are despawned —
+/// safe precisely because the pages stay mapped.
+#[cfg(not(target_family = "wasm"))]
+fn abort_failed_load(world: &mut World, plugin_id: &str, library: libloading::Library) {
+    std::mem::forget(library);
+
+    world
+        .resource_mut::<ScriptRegistry>()
+        .remove_plugin(plugin_id);
+
+    despawn_owned_entities(world, plugin_id);
 }
 
 /// Call `plugin_teardown` on a still-loaded library. Used during hot-reload
@@ -540,20 +695,22 @@ fn unload_all_plugins(world: &mut World) {
 /// No-op if the id isn't currently loaded.
 #[cfg(not(target_family = "wasm"))]
 fn unload_one(world: &mut World, id: &str) {
+    if !world.resource::<LoadedPlugins>().plugins.contains_key(id) {
+        return;
+    }
+
+    // Strip hydrated components first: their drop glue lives in this dylib,
+    // which is still mapped here but whose pages we leak below. This also
+    // clears the plugin's registry entries, which a plain deactivation
+    // deliberately leaves alone.
+    dehydrate_plugin(world, id);
+
+    // Runs teardown and drops the schedule, but only if it was active.
+    deactivate_plugin(world, id);
+
     let Some(loaded) = world.resource_mut::<LoadedPlugins>().plugins.remove(id) else {
         return;
     };
-
-    // Strip hydrated components first: their drop glue lives in this dylib,
-    // which is still mapped here but whose pages we leak below.
-    dehydrate_plugin(world, id);
-
-    run_teardown(world, &loaded.library, id);
-
-    if let Some(mut schedules) = world.get_resource_mut::<bevy::ecs::schedule::Schedules>() {
-        schedules.remove(PluginSchedule(id.to_owned()));
-    }
-
     std::mem::forget(loaded.library);
     refresh_loaded_plugin_ids(world);
     bevy::log::info!("[scripts] '{id}' unloaded");
@@ -617,25 +774,39 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
         state.failed_mtimes.insert(plugin_id.to_owned(), mtime);
         return;
     };
-    let Some(loaded) = run_setup(world, plugin_id, prepared) else {
+    let PreparedLibrary {
+        library,
+        plugin_name,
+        register_fn,
+    } = prepared;
+
+    if !run_register(world, plugin_id, register_fn) {
+        abort_failed_load(world, plugin_id, library);
         let mut state = world.resource_mut::<LoadedPlugins>();
         state.failed_mtimes.insert(plugin_id.to_owned(), mtime);
         return;
-    };
+    }
 
     let mut state = world.resource_mut::<LoadedPlugins>();
     state.failed_mtimes.remove(plugin_id);
     state.plugins.insert(
         plugin_id.to_owned(),
         LoadedPlugin {
-            library: loaded.library,
-            plugin_name: loaded.plugin_name,
+            library,
+            plugin_name,
             source_path,
             loaded_mtime: mtime,
             reload_count: copy_index,
+            active: false,
         },
     );
     refresh_loaded_plugin_ids(world);
+
+    // Gameplay mode wants it running immediately; the editor leaves it
+    // registered but idle.
+    if in_gameplay(world) {
+        activate_plugin(world, plugin_id);
+    }
 
     // Say what the plugin actually contributed — "loaded successfully" alone
     // doesn't tell you whether its scripts reached the registry.
@@ -656,6 +827,18 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
             ""
         }
     );
+}
+
+/// Ids of every plugin whose systems are currently running.
+#[cfg(not(target_family = "wasm"))]
+fn active_plugin_ids(world: &World) -> Vec<String> {
+    world
+        .resource::<LoadedPlugins>()
+        .plugins
+        .iter()
+        .filter(|(_, p)| p.active)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// Mirror `LoadedPlugins`' keys into the editor-visible [`LoadedPluginIds`].
@@ -688,14 +871,68 @@ fn run_scripts(world: &mut World) {
     // fully-hydrated entities on the very first tick after a load.
     hydrate_script_bindings(world);
 
+    // Only active plugins tick. In editor mode every plugin is loaded and
+    // registered but inactive, so none of their systems run and they can't
+    // fight the editor over keybinds, HUD panels, or the cursor.
     let labels: Vec<PluginSchedule> = world
         .resource::<LoadedPlugins>()
         .plugins
-        .keys()
-        .map(|id| PluginSchedule(id.clone()))
+        .iter()
+        .filter(|(_, plugin)| plugin.active)
+        .map(|(id, _)| PluginSchedule(id.clone()))
         .collect();
     for label in labels {
         let _ = world.try_run_schedule(label);
+    }
+}
+
+/// Whether plugins should be running right now.
+#[cfg(not(target_family = "wasm"))]
+fn in_gameplay(world: &World) -> bool {
+    world
+        .get_resource::<State<crate::editor::EditorMode>>()
+        .is_some_and(|state| *state.get() == crate::editor::EditorMode::Gameplay)
+}
+
+/// `OnEnter(EditorMode::Gameplay)`: start every loaded plugin.
+#[cfg(not(target_family = "wasm"))]
+fn activate_all_plugins(world: &mut World) {
+    let ids: Vec<String> = world
+        .resource::<LoadedPlugins>()
+        .plugins
+        .iter()
+        .filter(|(_, p)| !p.active)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in ids {
+        activate_plugin(world, &id);
+    }
+}
+
+/// `OnExit(EditorMode::Gameplay)`: stop every running plugin.
+///
+/// Every plugin's teardown runs, so this resets the gameplay session —
+/// returning to gameplay starts the plugin from scratch.
+#[cfg(not(target_family = "wasm"))]
+fn deactivate_all_plugins(world: &mut World) {
+    let ids: Vec<String> = world
+        .resource::<LoadedPlugins>()
+        .plugins
+        .iter()
+        .filter(|(_, p)| p.active)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    for id in ids {
+        deactivate_plugin(world, &id);
+    }
+
+    // Belt and braces over the per-plugin `unlock_id`: nothing is running now,
+    // so nothing has any business holding the player's input.
+    if let Some(mut lock) = world.get_resource_mut::<engine_api::InputLock>() {
+        lock.clear();
     }
 }
 
@@ -801,50 +1038,59 @@ fn reload_plugin(world: &mut World, plugin_id: &str) {
         return;
     };
 
+    // Whether to bring the replacement back up at the end. A reload in editor
+    // mode re-registers and stops there.
+    let was_active = prev.active;
+
     // Remove the old dylib's hydrated components while its code (and so its
     // drop glue) is still mapped, and clear its registry entries so the new
-    // dylib's `setup` re-registers into a clean slot. The bindings themselves
-    // survive, re-armed with `NeedsHydration`.
+    // dylib's `register` re-registers into a clean slot. The bindings
+    // themselves survive, re-armed with `NeedsHydration`.
     dehydrate_plugin(world, plugin_id);
 
     // Tear down OLD before NEW spawns its entities — otherwise the old
     // teardown's plugin-name match would catch the new plugin's entities.
-    run_teardown(world, &prev.library, plugin_id);
+    // Put the entry back first so `deactivate_plugin` can find it; it also
+    // drops the old schedule while the old library is still mapped, so the
+    // systems' drop glue runs safely.
+    world
+        .resource_mut::<LoadedPlugins>()
+        .plugins
+        .insert(plugin_id.to_owned(), prev);
+    deactivate_plugin(world, plugin_id);
+    let mut prev = world
+        .resource_mut::<LoadedPlugins>()
+        .plugins
+        .remove(plugin_id)
+        .expect("entry was just re-inserted");
 
-    // Phase 2: setup the new dylib.
-    let Some(new_dylib) = run_setup(world, plugin_id, prepared) else {
-        bevy::log::error!(
-            "[scripts] '{plugin_id}' new plugin_setup failed after old teardown — \
-             plugin state is empty until next successful reload"
-        );
-        // Keep the old library mapped so a subsequent reload has something
-        // valid to operate on (its teardown just ran, so it's a no-op).
-        // Same reasoning as above: bank the mtime so we retry on the next
-        // rebuild rather than on the next frame.
-        prev.loaded_mtime = new_mtime;
-        world
-            .resource_mut::<LoadedPlugins>()
-            .plugins
-            .insert(plugin_id.to_owned(), prev);
-        refresh_loaded_plugin_ids(world);
-        return;
-    };
-
-    // Leak old code pages. The old schedule was dropped inside run_setup
-    // (Schedules::insert returns and drops the prior entry) while the old
-    // library was still mapped, so its system drop glue ran safely. Keep
-    // pages mapped permanently for any other stray vtable pointers.
-    let old_library = std::mem::replace(&mut prev.library, new_dylib.library);
+    // Leak old code pages: stray vtable pointers may still reference them.
+    let old_library = std::mem::replace(&mut prev.library, prepared.library);
     std::mem::forget(old_library);
 
-    prev.plugin_name = new_dylib.plugin_name;
+    prev.plugin_name = prepared.plugin_name;
     prev.loaded_mtime = new_mtime;
     prev.reload_count = new_count;
+    prev.active = false;
 
     world
         .resource_mut::<LoadedPlugins>()
         .plugins
         .insert(plugin_id.to_owned(), prev);
+
+    // Phase 2: register the new dylib's scripts.
+    if !run_register(world, plugin_id, prepared.register_fn) {
+        bevy::log::error!(
+            "[scripts] '{plugin_id}' new plugin_register failed after old teardown — \
+             plugin state is empty until next successful reload"
+        );
+        refresh_loaded_plugin_ids(world);
+        return;
+    }
+
+    if was_active {
+        activate_plugin(world, plugin_id);
+    }
 
     refresh_loaded_plugin_ids(world);
 
@@ -1122,12 +1368,9 @@ fn apply_plugin_level_data(world: &mut World) {
         }
     }
 
-    let loaded: Vec<String> = world
-        .resource::<LoadedPlugins>()
-        .plugins
-        .keys()
-        .cloned()
-        .collect();
+    // Active plugins only: the hooks target resources that `setup` creates,
+    // which don't exist while the plugin is idle.
+    let loaded: Vec<String> = active_plugin_ids(world);
 
     for plugin_id in loaded {
         if world
@@ -1206,12 +1449,11 @@ fn collect_plugin_level_data(
         return;
     }
 
-    let loaded: Vec<String> = world
-        .resource::<LoadedPlugins>()
-        .plugins
-        .keys()
-        .cloned()
-        .collect();
+    // Active plugins only, matching `apply_plugin_level_data`. Saving from
+    // editor mode therefore leaves existing blobs untouched rather than
+    // overwriting them with the state of a plugin that isn't running: the
+    // loop below only rewrites slots for plugins it actually visits.
+    let loaded: Vec<String> = active_plugin_ids(world);
 
     for plugin_id in loaded {
         let Some(hooks) = world.resource::<ScriptRegistry>().level_hooks(&plugin_id) else {

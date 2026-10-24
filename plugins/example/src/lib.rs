@@ -36,16 +36,9 @@ struct ExampleLevelData {
 }
 
 impl DynamicPlugin for ExamplePlugin {
-    fn setup(&self, world: &mut World, schedule: &mut Schedule) {
-        let entity = world
-            .spawn((ScriptCounter::default(), ScriptOwned::new(PLUGIN_NAME)))
-            .id();
-        info!("[{PLUGIN_NAME}] spawned counter entity {entity:?}");
-
-        world.init_resource::<ExampleLevelData>();
-
-        let mut registry = world.resource_mut::<ScriptRegistry>();
-
+    /// Registration only — runs in editor mode too, so the scripts panel can
+    /// list `spinner` and attach it while the plugin's systems are stopped.
+    fn register(&self, _world: &mut World, registry: &mut ScriptRegistry) {
         registry.register_script(
             PLUGIN_NAME,
             ScriptSchema::new("spinner").with_props(SPINNER_PROPS),
@@ -59,6 +52,15 @@ impl DynamicPlugin for ExamplePlugin {
                 load: load_level_data,
             },
         );
+    }
+
+    fn setup(&self, world: &mut World, schedule: &mut Schedule) {
+        let entity = world
+            .spawn((ScriptCounter::default(), ScriptOwned::new(PLUGIN_NAME)))
+            .id();
+        info!("[{PLUGIN_NAME}] spawned counter entity {entity:?}");
+
+        world.init_resource::<ExampleLevelData>();
 
         schedule.add_systems((typeid_sanity_check, hello_tick, tick_counter, spin));
     }

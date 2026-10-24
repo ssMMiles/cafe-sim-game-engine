@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
 use crate::catalog;
+use crate::grid::CafeAnchor;
 use crate::placement::{CafePiece, GridOccupancy, PlacedCell, spawn_piece};
 use crate::shop_overview::ShopState;
 use crate::staff::{Staff, StaffMember};
@@ -134,6 +135,7 @@ pub fn apply_save(
     time: &mut GameTime,
     cafe_open: &mut CafeOpen,
     staff: &mut Staff,
+    anchor: &CafeAnchor,
 ) {
     shop.name = file.shop_name.clone();
     balance.0 = file.balance;
@@ -165,6 +167,7 @@ pub fn apply_save(
             (rec.category_idx, rec.piece_idx),
             (rec.cell_x, rec.cell_z),
             occupancy,
+            anchor,
         );
     }
 }

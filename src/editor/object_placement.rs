@@ -11,11 +11,12 @@
 //! scripts panel work on lights even though nothing can be raycast there.
 
 use bevy::ecs::system::SystemParam;
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::input::mouse::MouseWheel;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
 use bevy::{log, prelude::*};
 use engine_api::{ScriptBinding, ScriptRegistry};
 
+use crate::editor::input::{ScrollMod, scroll_delta, scroll_modifier};
 use crate::game::GameEntity;
 use crate::game::gfx::camera::PlayerCamera;
 use crate::game::gltf_loading::{InteractableParent, PendingMaterial, spawn_interactable_scene};
@@ -30,6 +31,8 @@ use crate::settings::UserSettings;
 const LIGHT_PLACEMENT_HEIGHT: f32 = 2.5;
 /// Pick radius for mesh-less placed entities.
 const PICK_SPHERE_RADIUS: f32 = 0.5;
+/// Yaw applied per notch of Alt+Scroll.
+const ROTATION_STEP: f32 = std::f32::consts::FRAC_PI_2 / 6.0; // 15°
 
 #[derive(Component)]
 pub struct PlacementPreview;
@@ -144,7 +147,9 @@ pub fn handle_edit_mode_click(
 
     let chunk = world_pos_to_chunk(pos.x, pos.z);
     let id = registry.alloc_id();
-    let transform = Transform::from_translation(pos).with_scale(config.effective_scale());
+    let transform = Transform::from_translation(pos)
+        .with_rotation(config.rotation)
+        .with_scale(config.effective_scale());
 
     let mut record = PlacedEntityRecord::new(id, config.kind.clone(), &transform);
 
@@ -178,8 +183,9 @@ pub fn setup_placement_preview(
         return;
     }
 
-    let transform =
-        Transform::from_translation(Vec3::new(0.0, 0.05, 0.0)).with_scale(config.effective_scale());
+    let transform = Transform::from_translation(Vec3::new(0.0, 0.05, 0.0))
+        .with_rotation(config.rotation)
+        .with_scale(config.effective_scale());
 
     let entity = match &config.kind {
         PlacedKind::Mesh { asset_path, .. } => {
@@ -345,19 +351,12 @@ pub fn adjust_placement_scale(
         scroll_events.clear();
         return;
     }
-
-    let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-
-    let mut delta = 0.0_f32;
-    for event in scroll_events.read() {
-        let y = match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / 53.0,
-        };
-        delta += y;
+    if scroll_modifier(&input) != ScrollMod::Shift {
+        return;
     }
 
-    if !shift || delta == 0.0 || !config.kind.is_mesh() {
+    let delta = scroll_delta(&mut scroll_events, 53.0);
+    if delta == 0.0 || !config.kind.is_mesh() {
         return;
     }
 
@@ -374,16 +373,61 @@ pub fn adjust_placement_scale(
     }
 }
 
+/// Alt/Option + scroll wheel yaws the placement in fixed steps.
+///
+/// Snapped rather than continuous so repeated placements line up with each
+/// other — freehand rotation makes a row of fence posts impossible to match.
+pub fn adjust_placement_rotation(
+    settings: Res<UserSettings>,
+    input: Res<ButtonInput<KeyCode>>,
+    mut scroll_events: MessageReader<MouseWheel>,
+    mut config: ResMut<PlacementConfig>,
+    preview_entity: Res<PlacementPreviewEntity>,
+    mut preview_query: Query<&mut Transform, With<PlacementPreview>>,
+) {
+    if !settings.edit_mode {
+        scroll_events.clear();
+        return;
+    }
+    if scroll_modifier(&input) != ScrollMod::Alt {
+        return;
+    }
+
+    let delta = scroll_delta(&mut scroll_events, 53.0);
+    if delta.abs() < 0.5 {
+        return;
+    }
+
+    let steps = delta.round();
+    let yaw = Quat::from_rotation_y(steps * ROTATION_STEP);
+    // Same reasoning as `adjust_placement_scale`: bypass change detection so
+    // a rotation tweak doesn't respawn the preview scene every notch.
+    let config = config.bypass_change_detection();
+    config.rotation = (yaw * config.rotation).normalize();
+
+    if let Some(entity) = preview_entity.0
+        && let Ok(mut transform) = preview_query.get_mut(entity)
+    {
+        transform.rotation = config.rotation;
+    }
+}
+
 /// Delete key while looking at a placed entity in edit mode. Works on lights
 /// too, via the picker's sphere fallback.
 pub fn delete_hovered_object(
     mut commands: Commands,
     settings: Res<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
+    grabbed: Res<crate::editor::grab::GrabbedEntity>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut picker: PlacedPicker,
     placed_query: Query<&PlacedObject>,
 ) {
+    // While carrying, Delete destroys the carried entity (see
+    // `grab::destroy_grabbed_object`) rather than whatever is behind it.
+    if grabbed.0.is_some() {
+        return;
+    }
     if !settings.edit_mode || !input.just_pressed(KeyCode::Delete) {
         return;
     }

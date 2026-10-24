@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
+use crate::grid::CafeAnchor;
 use crate::main_menu::{CafePhase, SlotPickerMode};
 use crate::placement::GridOccupancy;
 use crate::saves::{self, SLOT_COUNT, SlotMetadataCache, SlotStatus};
@@ -190,6 +191,7 @@ pub fn handle_slot_picker_buttons(
     mut time: ResMut<GameTime>,
     mut cafe_open: ResMut<CafeOpen>,
     mut staff: ResMut<Staff>,
+    anchor: Res<CafeAnchor>,
 ) {
     for interaction in &back_interactions {
         if *interaction == Interaction::Pressed {
@@ -224,6 +226,7 @@ pub fn handle_slot_picker_buttons(
                         &mut time,
                         &mut cafe_open,
                         &mut staff,
+                        &anchor,
                     );
                     *phase = CafePhase::Playing { slot };
                     info!("Loaded cafe-sim slot {slot}");

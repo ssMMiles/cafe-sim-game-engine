@@ -20,7 +20,7 @@ Phase 3 (cafe-sim migration) is the next work.
 
 Constraints the design must respect:
 
-- Plugins are dylibs (`DynamicPlugin::setup/teardown`). Component `TypeId`s
+- Plugins are dylibs (`DynamicPlugin::register/setup/teardown`). Component `TypeId`s
   declared inside a dylib change on every rebuild, so the host can never name
   a plugin component. Old dylib pages are `mem::forget`'d (never unmapped), so
   calling drop fns of old components is safe.

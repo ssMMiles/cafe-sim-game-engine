@@ -21,24 +21,58 @@ pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_l
 ///
 /// - 3: added the [`script`] module — [`ScriptRegistry`], [`ScriptBindings`],
 ///   and the level-data hooks.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 3;
+/// - 4: split registration out of setup ([`DynamicPlugin::register`]) so a
+///   plugin's scripts stay visible to the editor while its gameplay systems
+///   are stopped. Added `plugin_register` to the generated FFI surface.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 4;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
-/// Lifecycle: the host calls [`setup`](Self::setup) on load and
-/// [`teardown`](Self::teardown) immediately before the dylib is replaced on
-/// hot-reload. Setup populates the dedicated `ScriptUpdate` schedule and may
-/// spawn entities/insert resources. Teardown is for any custom cleanup —
-/// entities tagged with [`ScriptOwned`] are despawned automatically by the
-/// generated FFI shim *after* `teardown` runs, so plugin-private components
-/// (defined in the dylib) get their drop fns called while the old code pages
-/// are still mapped.
+/// # Lifecycle
+///
+/// Two independent axes: *loaded* (the dylib is mapped) and *active* (its
+/// gameplay systems are running). A plugin is loaded whenever the active
+/// project declares it, but only active in [`EditorMode::Gameplay`] — so the
+/// editor isn't fighting a plugin's keybinds and HUD panels while authoring.
+///
+/// ```text
+///   load ──▶ register ──┬──▶ setup ──▶ (schedule ticks) ──▶ teardown ──┐
+///                       │                                              │
+///                       └──────────◀── deactivate / activate ──────────┘
+/// ```
+///
+/// - [`register`](Self::register) runs on every load and hot-reload, in
+///   **both** modes. Register scripts and level-data hooks here and nothing
+///   else: nothing it does is undone until the plugin fully unloads.
+/// - [`setup`](Self::setup) runs when the plugin becomes active. It populates
+///   the plugin's schedule and may spawn entities and insert resources.
+/// - [`teardown`](Self::teardown) runs when the plugin becomes inactive, and
+///   before a hot-reload of an active plugin. Entities tagged with
+///   [`ScriptOwned`] are despawned automatically by the generated FFI shim
+///   *after* `teardown` returns, so plugin-private components get their drop
+///   fns called while the old code pages are still mapped.
+///
+/// Because deactivation runs the full teardown, switching back to the editor
+/// **resets** a running gameplay session; re-entering gameplay starts the
+/// plugin from scratch.
+///
+/// Script bindings hydrated onto level entities are *not* affected by
+/// activation — they stay live in both modes, so placed plugin objects still
+/// look right in the editor. Only a hot-reload dehydrates them.
 ///
 /// Implementors are constructed via [`Default::default`] each time the host
 /// invokes a lifecycle method, so don't store state on `self` — use Bevy
 /// resources instead.
 pub trait DynamicPlugin {
+    /// Declare this plugin's scripts and level-data hooks.
+    ///
+    /// Runs in both editor and gameplay mode. Do not spawn entities or insert
+    /// gameplay resources here — use [`setup`](Self::setup), which is paired
+    /// with a teardown.
+    fn register(&self, _world: &mut bevy::prelude::World, _registry: &mut script::ScriptRegistry) {}
+
     fn setup(&self, world: &mut bevy::prelude::World, schedule: &mut bevy::ecs::schedule::Schedule);
+
     fn teardown(&self, _world: &mut bevy::prelude::World) {}
 }
 
@@ -105,6 +139,34 @@ macro_rules! add {
         #[unsafe(no_mangle)]
         pub extern "C" fn plugin_name() -> *const ::std::os::raw::c_char {
             __PLUGIN_NAME_C.as_ptr() as *const ::std::os::raw::c_char
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn plugin_register(
+            world_ptr: *mut ::std::ffi::c_void,
+        ) -> u32 {
+            let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                let world = unsafe {
+                    &mut *(world_ptr as *mut $crate::bevy::prelude::World)
+                };
+                let plugin = <$plugin_type as ::std::default::Default>::default();
+                // `resource_scope` lifts the registry out of the world for the
+                // call, so `register` can take both without aliasing it.
+                world.resource_scope(
+                    |world, mut registry: $crate::bevy::prelude::Mut<$crate::ScriptRegistry>| {
+                        <$plugin_type as $crate::DynamicPlugin>::register(
+                            &plugin,
+                            world,
+                            &mut registry,
+                        );
+                    },
+                );
+                0
+            }));
+            match result {
+                Ok(code) => code,
+                Err(_) => 1,
+            }
         }
 
         #[unsafe(no_mangle)]
@@ -287,6 +349,21 @@ impl InputLock {
 
     pub fn unlock(&mut self, holder: &'static str) {
         self.holders.remove(holder);
+    }
+
+    /// Release a hold by name, for callers that only have a runtime string.
+    ///
+    /// The host needs this: holders are `&'static str` pointing into dylib
+    /// pages, so when it deactivates a plugin it has only the plugin id to go
+    /// on, never the original pointer.
+    pub fn unlock_id(&mut self, holder: &str) {
+        self.holders.remove(holder);
+    }
+
+    /// Drop every hold. Used when leaving gameplay mode, where all plugins
+    /// deactivate at once.
+    pub fn clear(&mut self) {
+        self.holders.clear();
     }
 
     pub fn is_locked(&self) -> bool {
@@ -497,5 +574,55 @@ impl UserSettings {
 
     pub fn toggle_use_lightmap(&mut self) {
         self.use_lightmap = !self.use_lightmap;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_lock_composes_multiple_holders() {
+        let mut lock = InputLock::default();
+        assert!(!lock.is_locked());
+
+        lock.lock("cafe-sim");
+        lock.lock("cutscene");
+        assert!(lock.is_locked());
+
+        lock.unlock("cafe-sim");
+        assert!(
+            lock.is_locked(),
+            "one holder releasing must not free input for the others"
+        );
+
+        lock.unlock("cutscene");
+        assert!(!lock.is_locked());
+    }
+
+    #[test]
+    fn unlock_id_releases_a_hold_taken_by_pointer() {
+        // The host only ever has the plugin id as a runtime string: the
+        // `&'static str` the plugin locked with points into dylib pages it
+        // can't reconstruct. Removal therefore has to match on contents, not
+        // on pointer identity.
+        let mut lock = InputLock::default();
+        lock.lock("cafe-sim");
+
+        let id_from_manifest = String::from("cafe-sim");
+        lock.unlock_id(&id_from_manifest);
+
+        assert!(!lock.is_locked());
+    }
+
+    #[test]
+    fn clear_drops_every_holder() {
+        let mut lock = InputLock::default();
+        lock.lock("cafe-sim");
+        lock.lock("example");
+
+        lock.clear();
+
+        assert!(!lock.is_locked());
     }
 }

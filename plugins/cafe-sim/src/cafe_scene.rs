@@ -1,156 +1,76 @@
-//! Spawns the cafe glTF scene and overrides materials on its named nodes.
+//! The cafe shell: a placed level entity this plugin reads.
 //!
-//! The Cafe.gltf file ships geometry only — no materials — so without
-//! intervention every surface ends up with bevy's default white material and
-//! never enters the toon shading pipeline. We attach a one-shot
-//! `SceneInstanceReady` observer that walks the top-level nodes and assigns
-//! `ExtendedMaterial<StandardMaterial, ToonMaterial>` to each, picking the
-//! base color/texture from the node's name (`Floor` / `*Wall`).
+//! The shell used to be spawned here, by plugin code, every time gameplay
+//! started. That stopped working once plugins became inactive in editor mode
+//! — the shell would simply be absent while authoring, including from
+//! lightmap bakes, where it is the main occluder in the scene.
+//!
+//! It is a level entity now. Place it from the editor's catalog (Tab →
+//! `cafe-sim/cafe-shell`), which attaches a `cafe-shell` script binding; the
+//! host hydrates that into a [`CafeShell`] marker, in both modes.
+//!
+//! **The level owns the shell outright** — geometry, collider, *and*
+//! materials. `Cafe.gltf` carries its own default materials (brick walls, a
+//! tiled floor), so the engine's `ConvertToToon` dresses it as the scene
+//! loads and it looks right in the editor with this plugin stopped.
+//!
+//! This module used to hold a `dress_cafe_shell` system that assigned those
+//! materials at runtime, because the glTF shipped geometry only. That was
+//! wrong twice over: the shell stayed white until gameplay started, and a
+//! gameplay plugin was writing plugin-private state onto a level entity it
+//! does not own — which nothing unwinds on unload. See
+//! `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md`.
+//!
+//! All that is left is [`sync_cafe_anchor`], which reads the shell's
+//! transform into [`CafeAnchor`] so the furniture grid follows wherever the
+//! shell was placed. It only ever *reads* the level entity.
+//!
+//! Re-skinnable wallpaper is still on the table as a gameplay feature — it
+//! just has to be a deliberate, revertible override of the asset default
+//! rather than the only thing that makes the room look right.
 
-use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
-use bevy::math::Affine2;
-use bevy::pbr::ExtendedMaterial;
-use bevy::scene::SceneInstanceReady;
 use bevy::{log, prelude::*};
-use engine_api::AutoCollider;
-use engine_api::toon_material::{DefaultToonLightmap, ToonMaterial};
 
-use crate::grid::FLOOR_Y;
-use crate::spawn::SpawnOwnedCommands;
+use crate::grid::CafeAnchor;
 
-/// Stashes the brick texture handle on the SceneRoot so the scene-ready
-/// observer can read it without needing a global resource.
-#[derive(Component)]
-pub struct CafeWallTexture(pub Handle<Image>);
+/// Marker hydrated onto the placed shell entity by the `cafe-shell` script.
+#[derive(Component, Debug)]
+pub struct CafeShell;
 
-pub fn spawn_cafe_scene(commands: &mut Commands, asset_server: &AssetServer) {
-    let cafe: Handle<Scene> = asset_server.load("cafe-sim/Cafe.gltf#Scene0");
-
-    let bricks: Handle<Image> = asset_server.load_with_settings(
-        "cafe-sim/brick-wall.png",
-        |s: &mut ImageLoaderSettings| {
-            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
-                ..ImageSamplerDescriptor::default()
-            });
-        },
-    );
-
-    commands
-        .spawn_owned((
-            SceneRoot(cafe),
-            Transform::from_xyz(0.0, FLOOR_Y, 0.0),
-            AutoCollider,
-            CafeWallTexture(bricks),
-        ))
-        .observe(on_cafe_scene_ready);
-}
-
-// Interior lighting used to be four hand-spawned `PointLight`s here. All
-// lighting is baked now — the toon shaders read a lightmap and ignore runtime
-// lights entirely — so those did nothing but cost cluster assignment. Light
-// the room by placing lights in the editor (Tab) and baking with Shift+B.
-
-fn on_cafe_scene_ready(
-    trigger: On<SceneInstanceReady>,
-    mut commands: Commands,
-    root_q: Query<&CafeWallTexture>,
-    name_q: Query<(&Name, &Transform)>,
-    children_q: Query<&Children>,
-    mesh_q: Query<Entity, With<Mesh3d>>,
-    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
-    default_lightmap: Option<Res<DefaultToonLightmap>>,
+/// Mirror the placed shell's world position into [`CafeAnchor`].
+///
+/// Runs every frame rather than once: the shell can be grabbed and moved in
+/// the editor, and it may stream in after gameplay has already started.
+pub fn sync_cafe_anchor(
+    mut anchor: ResMut<CafeAnchor>,
+    shell_q: Query<&GlobalTransform, With<CafeShell>>,
+    mut warned_missing: Local<bool>,
+    mut warned_rotation: Local<bool>,
 ) {
-    let root = trigger.entity;
-    log::info!("[cafe-sim] on_cafe_scene_ready fired for {root:?}");
-
-    let Ok(brick_tex) = root_q.get(root) else {
-        log::warn!("[cafe-sim] cafe scene ready but no CafeWallTexture on {root:?}");
+    let Some(gt) = shell_q.iter().next() else {
+        if !*warned_missing {
+            *warned_missing = true;
+            log::warn!(
+                "[cafe-sim] no cafe shell placed in this level — falling back to the world \
+                 origin. Place one from the editor catalog (Tab → cafe-sim/cafe-shell) and \
+                 save with Shift+S."
+            );
+        }
         return;
     };
-    let brick = brick_tex.0.clone();
-    let lightmap = default_lightmap
-        .as_ref()
-        .map(|d| d.0.clone())
-        .unwrap_or_default();
+    *warned_missing = false;
 
-    // Walk the whole spawned subtree — the glTF loader can wrap nodes under
-    // intermediate parents, so don't assume our named nodes are direct
-    // children of the SceneRoot.
-    let mut stack: Vec<Entity> = match children_q.get(root) {
-        Ok(c) => c.iter().collect(),
-        Err(_) => {
-            log::warn!("[cafe-sim] SceneRoot {root:?} has no children");
-            return;
-        }
-    };
-    let mut named_seen = 0u32;
-    let mut meshes_assigned = 0u32;
+    let (_, rotation, translation) = gt.to_scale_rotation_translation();
 
-    while let Some(node) = stack.pop() {
-        if let Ok(c) = children_q.get(node) {
-            stack.extend(c.iter());
-        }
-
-        let Ok((name, tf)) = name_q.get(node) else {
-            continue;
-        };
-        let n = name.as_str();
-        named_seen += 1;
-        log::info!("[cafe-sim] saw named node {n:?}");
-
-        let material = if n.ends_with("Wall") {
-            // Walls are unit cubes whose UVs run 0..1 per face; the node
-            // scale stretches the face to world size, so we tile in
-            // proportion. Tweak the multipliers to taste.
-            let tiles = Vec2::new(tf.scale.x * 12.0, tf.scale.y * 12.0);
-            toon_materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    base_color_texture: Some(brick.clone()),
-                    perceptual_roughness: 0.9,
-                    uv_transform: Affine2::from_scale(tiles),
-                    ..default()
-                },
-                extension: ToonMaterial {
-                    lightmap: lightmap.clone(),
-                    use_lightmap: 1,
-                },
-            })
-        } else if n == "Floor" {
-            toon_materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    base_color: Color::srgb(0.55, 0.3, 0.35),
-                    perceptual_roughness: 0.95,
-                    ..default()
-                },
-                extension: ToonMaterial {
-                    lightmap: lightmap.clone(),
-                    use_lightmap: 1,
-                },
-            })
-        } else {
-            continue;
-        };
-
-        // Recurse only this node's subtree to find every Mesh3d that
-        // belongs to it.
-        let mut sub: Vec<Entity> = vec![node];
-        while let Some(e) = sub.pop() {
-            if mesh_q.get(e).is_ok() {
-                commands
-                    .entity(e)
-                    .remove::<MeshMaterial3d<StandardMaterial>>()
-                    .insert(MeshMaterial3d(material.clone()));
-                meshes_assigned += 1;
-            }
-            if let Ok(c) = children_q.get(e) {
-                sub.extend(c.iter());
-            }
-        }
+    if !*warned_rotation && rotation.angle_between(Quat::IDENTITY) > 1e-3 {
+        *warned_rotation = true;
+        log::warn!(
+            "[cafe-sim] the placed cafe shell is rotated; the furniture grid ignores rotation \
+             and stays axis-aligned. Place it unrotated to keep the grid inside the walls."
+        );
     }
 
-    log::info!(
-        "[cafe-sim] cafe scene processed: {named_seen} named node(s), {meshes_assigned} mesh(es) assigned"
-    );
+    if anchor.origin != translation {
+        anchor.origin = translation;
+    }
 }

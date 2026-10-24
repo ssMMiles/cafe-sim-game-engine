@@ -361,11 +361,18 @@ impl PlacedObjectRegistry {
 }
 
 /// What the editor places on the next click.
-#[derive(Resource)]
+///
+/// `Clone` so the grab tool can stash the current settings while it borrows
+/// this resource to preview a lifted entity, and put them back afterwards.
+#[derive(Resource, Clone)]
 pub struct PlacementConfig {
     /// Kind (and kind-specific defaults) of the next placed entity.
     pub kind: PlacedKind,
     pub scale: Vec3,
+    /// Yaw-only in practice (Alt+Scroll steps it), but stored as a full
+    /// quaternion because that is what the record persists and what a grabbed
+    /// entity hands back.
+    pub rotation: Quat,
     /// Stamp mode: a `(plugin, script)` binding attached to every newly placed
     /// entity, seeded with the script's schema defaults. Sticky across mesh
     /// changes so a run of different meshes can share one script; cleared
@@ -378,6 +385,7 @@ impl Default for PlacementConfig {
         Self {
             kind: PlacedKind::mesh("meshes/rock/bigrock.gltf#Scene0"),
             scale: Vec3::splat(0.75),
+            rotation: Quat::IDENTITY,
             stamp_script: None,
         }
     }

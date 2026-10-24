@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use engine_api::{DynamicPlugin, Player, add};
+use engine_api::{DynamicPlugin, Player, ScriptBinding, ScriptRegistry, ScriptSchema, add};
 
 mod balance;
 mod cafe;
@@ -30,7 +30,7 @@ use balance::{
     Balance, DayStartBalance, spawn_balance_hud, tick_balance_popups, update_balance_text,
 };
 use cafe::{CafeOpen, enforce_closing_time};
-use cafe_scene::spawn_cafe_scene;
+use cafe_scene::{CafeShell, sync_cafe_anchor};
 use coffee_menu::{
     ActiveCoffeeMachine, handle_drink_click, handle_machine_click, manage_brew_popups,
     position_brew_popups, sync_active_coffee_machine, sync_coffee_menu_ui, tick_brewing,
@@ -46,7 +46,7 @@ use delivery::{
     handle_pickup_click, init_delivery_assets, manage_carried_visual, manage_ready_drinks,
     tick_served_timer,
 };
-use grid::{PLAYER_SPAWN, draw_floor_grid};
+use grid::{CafeAnchor, draw_floor_grid};
 use main_menu::{
     CafePhase, MainMenuRoot, build_main_menu, handle_main_menu_buttons, in_main_menu, in_playing,
     in_slot_picker,
@@ -80,7 +80,22 @@ use ui::{UiTheme, update_interactive_visuals};
 #[derive(Default)]
 pub struct CafeSimPlugin;
 
+/// Asset the editor offers when placing the `cafe-shell` script, so the
+/// shell is a one-click "mesh + binding" entry in the placement catalog.
+const CAFE_SHELL_MESH: &str = "cafe-sim/Cafe.gltf#Scene0";
+
 impl DynamicPlugin for CafeSimPlugin {
+    /// Registration only — runs in editor mode too, which is what puts
+    /// `cafe-sim/cafe-shell` in the placement catalog while the plugin's
+    /// gameplay systems are stopped.
+    fn register(&self, _world: &mut World, registry: &mut ScriptRegistry) {
+        registry.register_script(
+            PLUGIN_NAME,
+            ScriptSchema::new("cafe-shell").with_default_mesh(CAFE_SHELL_MESH),
+            hydrate_cafe_shell,
+        );
+    }
+
     fn setup(&self, world: &mut World, schedule: &mut Schedule) {
         // Resources are inserted unconditionally so they exist while the
         // menu phases run; the slot picker overwrites them when a save is
@@ -103,6 +118,7 @@ impl DynamicPlugin for CafeSimPlugin {
         world.insert_resource(HireCandidates::default());
         world.insert_resource(AssignJobOpenFor::default());
         world.insert_resource(PayrollNotice::default());
+        world.init_resource::<CafeAnchor>();
 
         // Start every load with the pause flag cleared — stale `true` from a
         // prior session would pop the menu open the instant the plugin runs.
@@ -134,6 +150,10 @@ impl DynamicPlugin for CafeSimPlugin {
         schedule.add_systems((
             update_interactive_visuals,
             manage_cursor,
+            // The shell is a level entity, so it is there in every phase —
+            // keep the anchor tracking it regardless. Its materials are the
+            // level's business, not ours: they ship inside `Cafe.gltf`.
+            sync_cafe_anchor,
             handle_main_menu_buttons.run_if(in_main_menu),
             handle_slot_picker_buttons.run_if(in_slot_picker),
         ));
@@ -241,10 +261,10 @@ fn apply_phase_transitions(
     phase: Res<CafePhase>,
     mut commands: Commands,
     theme: Res<UiTheme>,
-    asset_server: Res<AssetServer>,
     mut cache: ResMut<SlotMetadataCache>,
     balance: Res<Balance>,
     time: Res<GameTime>,
+    anchor: Res<CafeAnchor>,
     main_menu_q: Query<Entity, With<MainMenuRoot>>,
     slot_picker_q: Query<Entity, With<SlotPickerRoot>>,
     mut player_q: Query<&mut Transform, With<Player>>,
@@ -282,8 +302,8 @@ fn apply_phase_transitions(
         CafePhase::Playing { .. } => {
             // The slot-picker click handler has already applied save data
             // (or new-game defaults) by the time we get here; we just
-            // bring up the cafe scene and the gameplay HUDs.
-            spawn_cafe_scene(&mut commands, &asset_server);
+            // bring up the gameplay HUDs. The cafe shell itself is a placed
+            // level entity now, not something this plugin spawns.
             spawn_balance_hud(&mut commands, &balance);
             spawn_time_hud(&mut commands, &time);
 
@@ -291,10 +311,16 @@ fn apply_phase_transitions(
             // don't end up clipping into furniture that was loaded from a
             // save (or placed by `apply_save` in the slot picker handler).
             if let Ok(mut player_tf) = player_q.single_mut() {
-                player_tf.translation = PLAYER_SPAWN;
+                player_tf.translation = anchor.player_spawn();
             }
         }
     }
+}
+
+/// Turn a `cafe-shell` binding into the marker the anchor and dressing
+/// systems look for.
+fn hydrate_cafe_shell(entity: &mut bevy::ecs::world::EntityWorldMut, _binding: &ScriptBinding) {
+    entity.insert(CafeShell);
 }
 
 add!(CafeSimPlugin, "cafe-sim");

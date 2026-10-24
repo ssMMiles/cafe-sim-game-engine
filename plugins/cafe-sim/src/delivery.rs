@@ -13,10 +13,10 @@ use engine_api::PlayerCamera;
 use crate::balance::{Balance, spawn_balance_popup};
 use crate::coffee_menu::Brewing;
 use crate::customer::{
-    AngryFace, CUSTOMER_FLOAT_Y, Customer, CustomerState, HappyFace, ServedTimer,
+    AngryFace, Customer, CustomerState, HappyFace, ServedTimer, customer_float_y,
 };
 use crate::drinks::price_for;
-use crate::grid::{FLOOR_Y, HALF_D, cell_center};
+use crate::grid::{CafeAnchor, cell_center};
 use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
 use crate::placement::{CoffeeMachine, Countertop, GarbageCan, PlacedCell, PlacementSelection};
@@ -130,6 +130,7 @@ pub fn handle_delivery_click(
     mut carried: ResMut<CarriedDrink>,
     mut balance: ResMut<Balance>,
     assets: Res<DeliveryAssets>,
+    anchor: Res<CafeAnchor>,
     cam_q: Query<&GlobalTransform, With<PlayerCamera>>,
     counter_q: Query<&PlacedCell, With<Countertop>>,
     parent_q: Query<&ChildOf>,
@@ -187,15 +188,19 @@ pub fn handle_delivery_click(
         spawn_balance_popup(&mut commands, price);
     }
 
-    let center = cell_center(cell.0, cell.1);
+    let center = cell_center(&anchor, cell.0, cell.1);
     commands.spawn_owned((
         DeliveredDrink {
             customer: customer_entity,
         },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
-        Transform::from_xyz(center.x, FLOOR_Y + COUNTER_DRINK_Y_OFFSET, center.z)
-            .with_scale(Vec3::splat(COUNTER_DRINK_SCALE)),
+        Transform::from_xyz(
+            center.x,
+            anchor.floor_y() + COUNTER_DRINK_Y_OFFSET,
+            center.z,
+        )
+        .with_scale(Vec3::splat(COUNTER_DRINK_SCALE)),
     ));
 
     customer.state = CustomerState::Served;
@@ -308,6 +313,7 @@ pub fn tick_served_timer(
     mut commands: Commands,
     time: Res<Time>,
     paused: Res<GamePaused>,
+    anchor: Res<CafeAnchor>,
     mut customers_q: Query<(Entity, &mut Customer, &mut ServedTimer)>,
     drinks_q: Query<(Entity, &DeliveredDrink)>,
 ) {
@@ -327,7 +333,11 @@ pub fn tick_served_timer(
             }
         }
 
-        customer.target = Vec3::new(customer.target.x, CUSTOMER_FLOAT_Y, HALF_D as f32 + 1.0);
+        customer.target = Vec3::new(
+            customer.target.x,
+            customer_float_y(&anchor),
+            anchor.door_z(),
+        );
         customer.state = CustomerState::Leaving;
         commands.entity(entity).remove::<ServedTimer>();
     }
@@ -340,6 +350,7 @@ pub fn tick_served_timer(
 pub fn manage_ready_drinks(
     mut commands: Commands,
     assets: Res<DeliveryAssets>,
+    anchor: Res<CafeAnchor>,
     machines_q: Query<(Entity, &Brewing, &GlobalTransform), With<CoffeeMachine>>,
     ready_q: Query<(Entity, &ReadyDrink)>,
 ) {
@@ -367,7 +378,7 @@ pub fn manage_ready_drinks(
             ReadyDrink { machine },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
-            Transform::from_xyz(pos.x, FLOOR_Y + MACHINE_DRINK_Y_OFFSET, pos.z)
+            Transform::from_xyz(pos.x, anchor.floor_y() + MACHINE_DRINK_Y_OFFSET, pos.z)
                 .with_scale(Vec3::splat(COUNTER_DRINK_SCALE)),
         ));
     }

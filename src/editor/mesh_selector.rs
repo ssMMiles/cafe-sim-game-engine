@@ -12,13 +12,14 @@
 
 use bevy::{
     asset::{AssetLoader, LoadContext, io::Reader},
-    input::mouse::{MouseScrollUnit, MouseWheel},
+    input::mouse::MouseWheel,
     prelude::*,
     window::PrimaryWindow,
 };
 use engine_api::ScriptRegistry;
 
 use crate::{
+    editor::input::{ScrollMod, scroll_delta, scroll_modifier},
     game::{
         GameEntity,
         world::objects::{PlacedKind, PlacementConfig},
@@ -446,20 +447,12 @@ pub fn scroll_mesh_selector(
         return;
     }
 
-    let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-
-    let mut delta = 0.0_f32;
-    for event in scroll_events.read() {
-        if shift {
-            continue;
-        }
-        let y = match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / 40.0,
-        };
-        delta += y;
+    // Unmodified scroll only: Shift scales and Alt rotates the placement.
+    if scroll_modifier(&input) != ScrollMod::None {
+        return;
     }
 
+    let delta = scroll_delta(&mut scroll_events, 40.0);
     if delta.abs() < 0.5 {
         return;
     }
@@ -472,14 +465,25 @@ pub fn scroll_mesh_selector(
         return;
     }
 
+    let outgoing_preset = catalog
+        .entries
+        .get(selector_index.0)
+        .and_then(|e| e.preset_script.clone());
+
     selector_index.0 = new_index;
     let entry = &catalog.entries[new_index];
     config.kind = entry.kind.clone();
     config.scale = Vec3::splat(1.0);
-    // A preset arms stamp mode; a plain entry leaves whatever the scripts
-    // panel last set, so stamping is sticky across mesh changes.
-    if let Some(preset) = &entry.preset_script {
-        config.stamp_script = Some(preset.clone());
+    // A preset owns the stamp for as long as it is the selected card.
+    // Stepping off it disarms the stamp it armed — otherwise every later
+    // plain mesh would keep stamping that script, so a rock placed after the
+    // cafe shell would come up as a second `CafeShell`. A stamp armed from
+    // the scripts panel is left alone, and so stays sticky across mesh
+    // changes.
+    if entry.preset_script.is_some() {
+        config.stamp_script = entry.preset_script.clone();
+    } else if config.stamp_script.is_some() && config.stamp_script == outgoing_preset {
+        config.stamp_script = None;
     }
 
     for (button, mut bg, mut node) in card_query.iter_mut() {

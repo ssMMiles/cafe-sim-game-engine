@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use crate::cafe::CafeOpen;
 use crate::drinks::DRINKS;
-use crate::grid::{CAFE_DEPTH, CAFE_WIDTH, FLOOR_Y, HALF_D, cell_center};
+use crate::grid::{CAFE_DEPTH, CAFE_WIDTH, CafeAnchor, cell_center};
 use crate::pause_menu::GamePaused;
 use crate::placement::{CoffeeMachine, Countertop, GridOccupancy, PlacedCell};
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
@@ -23,7 +23,12 @@ const MAX_CUSTOMERS: usize = 3;
 const SPAWN_COOLDOWN_SECS: f32 = 3.0;
 const WALK_SPEED: f32 = 1.5;
 const ARRIVE_DISTANCE: f32 = 0.1;
-pub const CUSTOMER_FLOAT_Y: f32 = FLOOR_Y + 0.6;
+/// How high a customer's body floats above the cafe floor.
+pub const CUSTOMER_FLOAT: f32 = 0.6;
+
+pub fn customer_float_y(anchor: &CafeAnchor) -> f32 {
+    anchor.floor_y() + CUSTOMER_FLOAT
+}
 const CUSTOMER_SIZE: f32 = 0.4;
 const POPUP_OFFSET_Y: f32 = 0.9;
 const POPUP_FONT_SIZE: f32 = 16.0;
@@ -165,6 +170,7 @@ pub fn spawn_customers(
     cafe_open: Res<CafeOpen>,
     assets: Res<CustomerAssets>,
     occupancy: Res<GridOccupancy>,
+    anchor: Res<CafeAnchor>,
     mut timer: ResMut<CustomerSpawnTimer>,
     customers_q: Query<&Customer>,
     counters_q: Query<&PlacedCell, With<Countertop>>,
@@ -211,13 +217,13 @@ pub fn spawn_customers(
 
     let mut rng = rand::thread_rng();
     let (counter_cell, queue_cell) = *candidates.choose(&mut rng).expect("candidates non-empty");
-    let queue_world = cell_center(queue_cell.0, queue_cell.1);
-    let target = Vec3::new(queue_world.x, CUSTOMER_FLOAT_Y, queue_world.z);
+    let queue_world = cell_center(&anchor, queue_cell.0, queue_cell.1);
+    let target = Vec3::new(queue_world.x, customer_float_y(&anchor), queue_world.z);
     let order = DRINKS.choose(&mut rng).map(|d| d.name).unwrap_or("Coffee");
 
     // Spawn just outside the front edge, X-aligned with the queue cell so the
     // straight-line walk is least likely to clip other furniture.
-    let spawn_pos = Vec3::new(target.x, CUSTOMER_FLOAT_Y, HALF_D as f32 + 1.0);
+    let spawn_pos = Vec3::new(target.x, customer_float_y(&anchor), anchor.door_z());
 
     commands.spawn_owned((
         Customer {
