@@ -39,6 +39,20 @@ const DOLLY_STEP: f32 = 1.5;
 /// so dragging a splitter doesn't reallocate the texture every frame.
 const RESIZE_SETTLE_PASSES: u8 = 2;
 
+/// Fly mode without holding the right button: toggled by the viewport's
+/// overlay button, cleared by Escape (`tool::escape_cancels`, first in its
+/// back-out order) and on leaving the editor. While set, the viewport tab
+/// reports `look_active`, so the cursor lock, the fly camera, and
+/// `pointer_free()` all behave exactly as during a right-drag look.
+#[derive(Resource, Default, Debug)]
+pub struct FlyLock(pub bool);
+
+/// `OnExit(EditorMode::Editor)`: a stale lock must not re-grab the cursor the
+/// moment the editor comes back.
+pub fn release_fly_lock(mut lock: ResMut<FlyLock>) {
+    lock.0 = false;
+}
+
 #[derive(Resource, Debug)]
 pub struct EditorCameraSettings {
     /// Fly speed in m/s while looking (Shift multiplies by 4).

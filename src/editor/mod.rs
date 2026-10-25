@@ -25,6 +25,7 @@ mod camera;
 mod catalog;
 mod controls;
 mod edits;
+mod gizmo;
 mod grab;
 mod input;
 mod lightmap_toggle;
@@ -40,8 +41,8 @@ mod ui;
 use actions::{EditorAction, apply_level_actions, apply_selection_actions};
 use baking_trigger::trigger_bake;
 use camera::{
-    EditorCameraSettings, editor_fly_camera, free_cursor_for_editor, init_editor_camera,
-    restore_render_target, sync_look_cursor, sync_render_target,
+    EditorCameraSettings, FlyLock, editor_fly_camera, free_cursor_for_editor, init_editor_camera,
+    release_fly_lock, restore_render_target, sync_look_cursor, sync_render_target,
 };
 use catalog::{
     MeshCatalog, MeshManifestAsset, MeshManifestLoader, populate_mesh_catalog,
@@ -50,6 +51,10 @@ use catalog::{
 use edits::{
     LightingState, PlacedEdited, RespawnPlaced, ScriptEdit, apply_script_edits,
     clear_lighting_stale_on_bake, commit_placed_edits, respawn_placed,
+};
+use gizmo::{
+    EditorGizmoGroup, GizmoInteraction, configure_editor_gizmos, draw_transform_gizmo,
+    gizmo_pointer_free, reset_gizmo, update_transform_gizmo,
 };
 use grab::{GrabbedEntity, handle_grab_keys, place_grabbed_object, release_grab};
 use input::keyboard_free;
@@ -62,8 +67,8 @@ use object_placement::{
 use physics_debug::{sync_physics_debug, toggle_physics_debug};
 use picking::{EditorRay, ViewportInput, compute_editor_ray, viewport_pointer_free};
 use selection::{
-    Selection, delete_selected, draw_selection_gizmos, focus_selection, select_on_click,
-    update_hover, validate_selection,
+    Selection, clear_hover, delete_selected, draw_selection_gizmos, focus_selection,
+    select_on_click, update_hover, validate_selection,
 };
 use terrain_edit::{
     BrushSettings, TerrainBrushHit, adjust_brush_size, apply_terrain_brush, finalize_terrain_lod,
@@ -149,6 +154,7 @@ impl Plugin for EditorPlugin {
 
         // ── Camera, cursor, render target ────────────────────────────────────
         app.init_resource::<EditorCameraSettings>();
+        app.init_resource::<FlyLock>();
         app.add_systems(
             Update,
             (init_editor_camera, sync_look_cursor, sync_render_target).in_set(EditorSet::InGame),
@@ -163,17 +169,38 @@ impl Plugin for EditorPlugin {
             free_cursor_for_editor.run_if(in_state(EditorMode::Editor)),
         );
 
-        // ── Selection ────────────────────────────────────────────────────────
+        // ── Selection + transform gizmo ──────────────────────────────────────
+        // Hover and the selection/hover boxes are Select-tool-only: a gizmo
+        // box under the placement preview or the terrain brush is just noise.
+        // The transform gizmo runs first (chained) so a click on a handle is
+        // a drag, never a (de)select — `gizmo_pointer_free` reads the state
+        // it just computed.
+        app.init_resource::<GizmoInteraction>();
+        app.init_gizmo_group::<EditorGizmoGroup>();
+        app.add_systems(Startup, configure_editor_gizmos);
         app.add_systems(
             Update,
             (
-                select_on_click.run_if(select.clone().and(viewport_pointer_free)),
-                update_hover,
+                update_transform_gizmo.run_if(select.clone()),
+                select_on_click.run_if(
+                    select
+                        .clone()
+                        .and(viewport_pointer_free)
+                        .and(gizmo_pointer_free),
+                ),
+                update_hover.run_if(select.clone()),
                 focus_selection.run_if(keyboard_free),
             )
+                .chain()
                 .in_set(EditorSet::Active),
         );
-        app.add_systems(Update, draw_selection_gizmos.in_set(EditorSet::InGame));
+        app.add_systems(
+            Update,
+            (draw_selection_gizmos, draw_transform_gizmo)
+                .in_set(EditorSet::InGame)
+                .run_if(select.clone()),
+        );
+        app.add_systems(OnExit(EditorTool::Select), (clear_hover, reset_gizmo));
 
         // ── Placement (Place tool) ───────────────────────────────────────────
         app.init_resource::<PlacementPreviewEntity>();
@@ -273,6 +300,7 @@ impl Plugin for EditorPlugin {
                 teardown_placement_preview,
                 teardown_terrain_brush_preview,
                 restore_render_target,
+                release_fly_lock,
             )
                 .chain(),
         );
@@ -317,7 +345,10 @@ mod tests {
         initializes("sync_render_target", sync_render_target);
         initializes("apply_terrain_brush", apply_terrain_brush);
         initializes("raycast_terrain_hit", raycast_terrain_hit);
+        initializes("update_brush_preview", terrain_edit::update_brush_preview);
         initializes("compute_editor_ray", compute_editor_ray);
+        initializes("update_transform_gizmo", update_transform_gizmo);
+        initializes("draw_transform_gizmo", draw_transform_gizmo);
         initializes("editor_ui", ui::editor_ui);
     }
 }

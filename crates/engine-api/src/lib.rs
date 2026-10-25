@@ -24,7 +24,7 @@ pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_l
 /// - 4: split registration out of setup ([`DynamicPlugin::register`]) so a
 ///   plugin's scripts stay visible to the editor while its gameplay systems
 ///   are stopped. Added `plugin_register` to the generated FFI surface.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 5;
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 6;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -429,7 +429,6 @@ pub struct UserSettings {
     pub edge_detection_enabled: bool,
     pub edge_depth_sensitivity: f32,
     pub edge_normal_sensitivity: f32,
-    pub brush_radius: f32,
     pub physics_debug: bool,
     pub use_lightmap: bool,
 }
@@ -447,7 +446,6 @@ impl Default for UserSettings {
             edge_detection_enabled: true,
             edge_depth_sensitivity: 2.0,
             edge_normal_sensitivity: 0.1,
-            brush_radius: 5.0,
             physics_debug: false,
             use_lightmap: true,
         }

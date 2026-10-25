@@ -9,6 +9,8 @@
 use bevy::prelude::*;
 
 use super::EditorSet;
+use super::camera::FlyLock;
+use super::gizmo::GizmoInteraction;
 use super::grab::GrabbedEntity;
 use super::input::keyboard_free;
 use super::picking::ViewportInput;
@@ -96,20 +98,28 @@ fn tool_hotkeys(
     }
 }
 
-/// Escape backs out one level: a carried entity goes back (by leaving the
-/// Place tool, whose `OnExit` restores it), then a non-Select tool returns to
-/// Select, then the selection clears.
+/// Escape backs out one level: fly lock releases first (the cursor must come
+/// back before anything else makes sense), then an in-flight gizmo drag is
+/// cancelled (the gizmo system restores the start transform), then a carried
+/// entity goes back (by leaving the Place tool, whose `OnExit` restores it),
+/// then a non-Select tool returns to Select, then the selection clears.
 fn escape_cancels(
     input: Res<ButtonInput<KeyCode>>,
     grabbed: Res<GrabbedEntity>,
     current: Res<State<EditorTool>>,
     mut next: ResMut<NextState<EditorTool>>,
     mut selection: ResMut<Selection>,
+    mut fly_lock: ResMut<FlyLock>,
+    mut gizmo: ResMut<GizmoInteraction>,
 ) {
     if !input.just_pressed(KeyCode::Escape) {
         return;
     }
-    if grabbed.0.is_some() || *current.get() != EditorTool::Select {
+    if fly_lock.0 {
+        fly_lock.0 = false;
+    } else if gizmo.drag.is_some() {
+        gizmo.cancel_requested = true;
+    } else if grabbed.0.is_some() || *current.get() != EditorTool::Select {
         next.set(EditorTool::Select);
     } else {
         selection.primary = None;

@@ -1,7 +1,10 @@
 //! Terrain tool: sculpt the heightmap under the cursor.
 //!
-//! LMB raises, Ctrl+LMB lowers (RMB is the editor's look-drag). The brush
-//! follows [`EditorRay`], so it lands wherever the cursor is on the viewport.
+//! Three modes ([`BrushMode`]): sculpt (LMB raises, Ctrl+LMB lowers — RMB is
+//! the editor's look-drag), flatten (pull heights toward the height sampled
+//! under the cursor when the stroke began), and smooth (pull each tile toward
+//! its neighbourhood average). The brush follows [`EditorRay`], so it lands
+//! wherever the cursor is on the viewport.
 
 use std::collections::HashSet;
 
@@ -18,18 +21,53 @@ use crate::game::world::terrain::{
     mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::TerrainChunkRegistry,
 };
-use crate::settings::UserSettings;
 
-/// Brush parameters that don't live on `UserSettings`.
+pub const BRUSH_RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1.0..=50.0;
+pub const BRUSH_STRENGTH_RANGE: std::ops::RangeInclusive<f32> = 5.0..=200.0;
+
+/// How the brush modifies the heightmap.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum BrushMode {
+    /// LMB raises, Ctrl+LMB lowers.
+    #[default]
+    Sculpt,
+    /// Pull heights toward the height under the cursor at stroke start.
+    Flatten,
+    /// Pull each tile toward the average of its neighbours.
+    Smooth,
+}
+
+impl BrushMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            BrushMode::Sculpt => "Sculpt",
+            BrushMode::Flatten => "Flatten",
+            BrushMode::Smooth => "Smooth",
+        }
+    }
+}
+
 #[derive(Resource, Debug)]
 pub struct BrushSettings {
-    /// Height change per second at falloff=1, in pre-scaled world units.
+    pub mode: BrushMode,
+    /// Brush radius in metres.
+    pub radius: f32,
+    /// Height change per second at full weight, in pre-scaled world units.
+    /// For flatten/smooth this caps how fast heights approach their target.
     pub strength: f32,
+    /// Fraction of the radius over which influence eases to zero at the rim
+    /// (0 = hard-edged, 1 = fades from the centre).
+    pub falloff: f32,
 }
 
 impl Default for BrushSettings {
     fn default() -> Self {
-        Self { strength: 50.0 }
+        Self {
+            mode: BrushMode::default(),
+            radius: 5.0,
+            strength: 50.0,
+            falloff: 1.0,
+        }
     }
 }
 
@@ -38,19 +76,35 @@ pub struct TerrainBrushHit {
     pub hit: Option<Vec3>,
     pub pending_full_lod: HashSet<(i32, i32)>,
     pub was_painting: bool,
+    /// Flatten target, sampled under the cursor at stroke start.
+    pub flatten_target: f32,
+}
+
+/// Influence of the brush at `dist` from its centre: 1 inside the flat core,
+/// easing (smoothstep) to 0 at the rim. `falloff` is the faded fraction.
+fn brush_weight(dist: f32, radius: f32, falloff: f32) -> f32 {
+    let inner = radius * (1.0 - falloff.clamp(0.0, 1.0));
+    if dist <= inner {
+        return 1.0;
+    }
+    if dist >= radius {
+        return 0.0;
+    }
+    let s = 1.0 - (dist - inner) / (radius - inner);
+    s * s * (3.0 - 2.0 * s)
 }
 
 pub fn adjust_brush_size(
-    mut settings: ResMut<UserSettings>,
+    mut brush: ResMut<BrushSettings>,
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
     if input.pressed(KeyCode::BracketLeft) {
-        settings.brush_radius = (settings.brush_radius - 10.0 * dt).max(1.0);
+        brush.radius = (brush.radius - 10.0 * dt).max(*BRUSH_RADIUS_RANGE.start());
     }
     if input.pressed(KeyCode::BracketRight) {
-        settings.brush_radius = (settings.brush_radius + 10.0 * dt).min(50.0);
+        brush.radius = (brush.radius + 10.0 * dt).min(*BRUSH_RADIUS_RANGE.end());
     }
 }
 
@@ -74,12 +128,13 @@ pub fn raycast_terrain_hit(
 pub struct BrushPreviewMarker;
 
 pub fn update_brush_preview(
-    settings: Res<UserSettings>,
+    brush: Res<BrushSettings>,
     brush_hit: Res<TerrainBrushHit>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut preview_query: Query<(&mut Transform, &mut Visibility), With<BrushPreviewMarker>>,
+    mut gizmos: Gizmos,
 ) {
     if preview_query.is_empty() {
         commands.spawn((
@@ -108,7 +163,20 @@ pub fn update_brush_preview(
         Some(hit) => {
             *visibility = Visibility::Visible;
             transform.translation = hit + Vec3::Y * 0.05;
-            transform.scale = Vec3::splat(settings.brush_radius);
+            transform.scale = Vec3::splat(brush.radius);
+
+            // Ring where the falloff starts, so the flat core is visible.
+            let inner = brush.radius * (1.0 - brush.falloff.clamp(0.0, 1.0));
+            if inner > 0.05 && brush.falloff > 0.01 {
+                gizmos.circle(
+                    Isometry3d::new(
+                        hit + Vec3::Y * 0.06,
+                        Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                    ),
+                    inner,
+                    Color::srgba(0.4, 0.85, 1.0, 0.6),
+                );
+            }
         }
         None => {
             *visibility = Visibility::Hidden;
@@ -129,8 +197,9 @@ pub fn teardown_terrain_brush_preview(
     }
 }
 
-/// Which way the brush is pushing this frame, if the button is down over the
-/// viewport. Ctrl lowers; plain LMB raises.
+/// Which way the sculpt brush is pushing this frame, if the button is down
+/// over the viewport. Ctrl lowers; plain LMB raises. Flatten/smooth ignore
+/// the sign but share the "is the brush painting" test.
 fn brush_sign(mouse: &ButtonInput<MouseButton>, keys: &ButtonInput<KeyCode>) -> Option<f32> {
     if !mouse.pressed(MouseButton::Left) {
         return None;
@@ -144,7 +213,6 @@ pub fn apply_terrain_brush(
     mouse_input: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     viewport: Res<ViewportInput>,
-    settings: Res<UserSettings>,
     brush: Res<BrushSettings>,
     mut brush_hit: ResMut<TerrainBrushHit>,
     heightmap: Option<ResMut<HeightmapData>>,
@@ -167,12 +235,38 @@ pub fn apply_terrain_brush(
         return;
     };
 
-    let radius = settings.brush_radius;
+    let radius = brush.radius;
     let dt = time.delta_secs();
 
     let center_tx = (hit_point.x / TILE_SIZE.0) as i32;
     let center_ty = (hit_point.z / TILE_SIZE.1) as i32;
     let extent = (radius / TILE_SIZE.0.min(TILE_SIZE.1)) as i32 + 1;
+
+    // Flatten pulls toward where the terrain was when the stroke began, so a
+    // moving brush spreads one plateau instead of chasing its own output.
+    if !brush_hit.was_painting {
+        brush_hit.flatten_target = heightmap.get_tile(center_tx, center_ty);
+    }
+
+    // Smooth reads neighbour averages from a snapshot taken before any write
+    // this frame — a half-updated map would skew the average directionally.
+    // One tile of margin so the rim tiles have a full 3×3 neighbourhood.
+    let snap_extent = extent + 1;
+    let snap_w = (2 * snap_extent + 1) as usize;
+    let snapshot: Option<Vec<f32>> = (brush.mode == BrushMode::Smooth).then(|| {
+        let mut v = Vec::with_capacity(snap_w * snap_w);
+        for dy in -snap_extent..=snap_extent {
+            for dx in -snap_extent..=snap_extent {
+                v.push(heightmap.get_tile(center_tx + dx, center_ty + dy));
+            }
+        }
+        v
+    });
+    let snap = |v: &[f32], tx: i32, ty: i32| -> f32 {
+        let lx = (tx - (center_tx - snap_extent)) as usize;
+        let ly = (ty - (center_ty - snap_extent)) as usize;
+        v[ly * snap_w + lx]
+    };
 
     let mut affected: HashSet<(i32, i32)> = HashSet::new();
 
@@ -188,10 +282,32 @@ pub fn apply_terrain_brush(
                 continue;
             }
 
-            let falloff = 1.0 - dist / radius;
-            let delta = brush.strength * falloff * dt * sign;
+            // `budget` is how far this tile may move this frame: full
+            // strength in the core, fading over the falloff band.
+            let weight = brush_weight(dist, radius, brush.falloff);
+            let budget = brush.strength * weight * dt;
             let current = heightmap.get_tile(tx, ty);
-            let new_h = (current + delta).clamp(0.0, HEIGHT_SCALE);
+            let new_h = match brush.mode {
+                BrushMode::Sculpt => current + budget * sign,
+                BrushMode::Flatten => {
+                    current + (brush_hit.flatten_target - current).clamp(-budget, budget)
+                }
+                BrushMode::Smooth => {
+                    let v = snapshot.as_deref().expect("snapshot built for Smooth");
+                    let mut sum = 0.0;
+                    for ny in -1..=1 {
+                        for nx in -1..=1 {
+                            sum += snap(v, tx + nx, ty + ny);
+                        }
+                    }
+                    let avg = sum / 9.0;
+                    current + (avg - current).clamp(-budget, budget)
+                }
+            }
+            .clamp(0.0, HEIGHT_SCALE);
+            if new_h == current {
+                continue;
+            }
             heightmap.set_tile(tx, ty, new_h);
 
             let cs = (CHUNK_SIZE - 1) as i32;

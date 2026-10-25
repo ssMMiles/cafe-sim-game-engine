@@ -28,7 +28,7 @@ use engine_api::{ScriptBindings, ScriptRegistry};
 
 use super::EditorMode;
 use super::actions::EditorAction;
-use super::camera::EditorCameraSettings;
+use super::camera::{EditorCameraSettings, FlyLock};
 use super::catalog::MeshCatalog;
 use super::controls::ActiveControls;
 use super::edits::{LightingState, PlacedEdited, RespawnPlaced, ScriptEdit};
@@ -50,6 +50,7 @@ mod menu;
 mod outliner;
 mod place;
 mod terrain;
+mod tool_panel;
 mod viewport;
 
 pub use inspector::InspectorState;
@@ -87,8 +88,8 @@ pub enum EditorTab {
     Viewport,
     Outliner,
     Inspector,
-    Place,
-    Terrain,
+    /// Settings for whatever [`EditorTool`] is active.
+    Tool,
 }
 
 impl EditorTab {
@@ -97,8 +98,7 @@ impl EditorTab {
             EditorTab::Viewport => "Viewport",
             EditorTab::Outliner => "Outliner",
             EditorTab::Inspector => "Inspector",
-            EditorTab::Place => "Place",
-            EditorTab::Terrain => "Terrain",
+            EditorTab::Tool => "Tool",
         }
     }
 }
@@ -115,7 +115,7 @@ impl Default for DockLayout {
             surface.split_left(NodeIndex::root(), 0.82, vec![EditorTab::Outliner]);
         let [viewport, _inspector] =
             surface.split_right(viewport, 0.75, vec![EditorTab::Inspector]);
-        surface.split_below(viewport, 0.75, vec![EditorTab::Place, EditorTab::Terrain]);
+        surface.split_below(viewport, 0.75, vec![EditorTab::Tool]);
         Self(state)
     }
 }
@@ -152,6 +152,7 @@ pub struct Panels<'w, 's> {
     pub registry: Res<'w, PlacedObjectRegistry>,
     pub grabbed: Res<'w, GrabbedEntity>,
     pub cam_settings: Res<'w, EditorCameraSettings>,
+    pub fly_lock: ResMut<'w, FlyLock>,
     pub edits: MessageWriter<'w, PlacedEdited>,
     pub script_edits: MessageWriter<'w, ScriptEdit>,
     pub respawns: MessageWriter<'w, RespawnPlaced>,
@@ -218,7 +219,7 @@ pub(super) fn editor_ui(
 
     egui::TopBottomPanel::bottom("editor_status").show(&ctx, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for (keys, action) in controls.rows() {
+            for (keys, action) in controls.rows(panels.fly_lock.0, panels.brush.mode) {
                 ui.strong(keys);
                 ui.label(action);
                 ui.add_space(8.0);

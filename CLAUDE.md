@@ -78,21 +78,28 @@ src/
 │   │   ├── menu.rs         #   Menu bar (File/Edit/View/Tools/Plugins), toolbar, New-world dialog
 │   │   ├── outliner.rs     #   Loaded placed entities: filter, select, focus, context menu
 │   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment when nothing selected
-│   │   ├── place.rs        #   Catalog grid, placement scale/yaw, stamp script picker
-│   │   └── terrain.rs      #   Brush radius/strength
+│   │   ├── tool_panel.rs   #   "Tool" tab: shows the active tool's settings (Select: none yet)
+│   │   ├── place.rs        #   Place body: catalog grid, placement scale/yaw, stamp script picker
+│   │   └── terrain.rs      #   Terrain body: brush mode (sculpt/flatten/smooth), radius, strength, falloff
 │   ├── edits.rs            # PlacedEdited → commit_placed_edits (chunk re-derive, dirty, name sync, LightingState);
 │   │                       #   ScriptEdit (attach/detach/set props → detach_binding + NeedsHydration); RespawnPlaced
 │   ├── actions.rs          # EditorAction (save, bake, worlds, plugins, exit, selection ops) applied in Update
 │   ├── catalog.rs          # MeshCatalog: manifest meshes + lights + empty + plugin presets; select() arms stamps
 │   ├── picking.rs          # ViewportInput (pointer in texture px) → EditorRay; PlacedPicker
 │   ├── camera.rs           # Fly camera (RMB look, WASD/QE), cursor lock while looking,
+│   │                       #   FlyLock (viewport button → fly without holding RMB, Esc exits),
 │   │                       #   render-target resize to the tab, sprite hide/show
-│   ├── selection.rs        # Selection {primary, hovered, focus_requested}, click-select, gizmo box, F, Delete
+│   ├── selection.rs        # Selection {primary, hovered, focus_requested}, click-select, gizmo box
+│   │                       #   (hover + boxes are Select-tool-only), F, Delete
+│   ├── gizmo.rs            # Transform gizmo (Select tool): drag XYZ arrows to translate, Ctrl = rotation
+│   │                       #   arcs; hand-rolled ray math vs EditorRay, Esc cancels the drag.
+│   │                       #   EditorGizmoGroup (fat lines, depth_bias -1)
 │   ├── controls.rs         # ActiveControls: context-filtered key hints for the status bar
 │   ├── grab.rs             # R: lift a placed entity into the preview, drop it with its own id
 │   ├── input.rs            # keyboard_free (egui text focus), scroll modifier + notches
 │   ├── object_placement.rs # Placement preview/config, place at cursor ray (Place tool)
-│   ├── terrain_edit.rs     # Terrain brush (LMB raise, Ctrl+LMB lower), BrushSettings
+│   ├── terrain_edit.rs     # Terrain brush: BrushSettings {mode sculpt/flatten/smooth, radius, strength,
+│   │                       #   falloff}; flatten targets the stroke-start height, smooth averages a snapshot
 │   ├── terrain_save.rs     # Shift+S save trigger
 │   ├── baking_trigger.rs   # Shift+B bake trigger
 │   ├── lightmap_toggle.rs  # Shift+L: baked lighting vs flat unlit debug view
@@ -154,7 +161,7 @@ src/
 - Plugins register named *scripts* (factories) and optional `LevelDataHooks` in `ScriptRegistry`. The host hydrates `ScriptBindings` on placed entities by calling the factory and recording inserted `ComponentId`s via archetype diff; dehydration removes exactly those on unload/reload.
 - **Loaded ≠ active.** `DynamicPlugin` has three hooks: `register` (scripts + level hooks; runs on every load/reload in *both* modes), `setup` (gameplay bootstrap + schedule), `teardown`. A plugin is loaded whenever the project declares it, but only *active* in `EditorMode::Gameplay` — only active plugins' schedules tick, so plugin keybinds and HUD panels can't fight the editor. Entering the editor runs every plugin's teardown, so **switching modes resets the gameplay session**. Script bindings stay hydrated in both modes (only hot-reload dehydrates), so placed plugin objects still look right while authoring.
 - A plugin can claim a *level* entity instead of spawning its own: register a script with `with_default_mesh(...)` and it appears in the editor's placement catalog as a one-click "mesh + binding" preset; the factory inserts a marker the plugin's systems look for. `cafe-sim`'s `cafe-shell` works this way, so the cafe shell is level geometry (collider + baked lightmaps + BVH occlusion in the editor) and the plugin only *reads* it, for the furniture-grid anchor. Materials ship inside `Cafe.gltf` — see `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md` for why a plugin must not dress level geometry at runtime (nothing unwinds it on unload).
-- `ENGINE_SCRIPTS_ABI_VERSION` (currently 5) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
+- `ENGINE_SCRIPTS_ABI_VERSION` (currently 6) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
 
 ## Level Persistence (see docs/LEVEL_SAVE_DESIGN.md)
 
@@ -191,7 +198,7 @@ All rkyv; v2 and v4 `world.meta` (and v2/v3/v4 `.objects` files) are read via `l
 - **One camera, two drivers.** In `EditorMode::Editor` `editor_fly_camera` owns the transform (RMB drag look, WASD/QE while looking, scroll = fly speed while looking / dolly idle); `camera_follow`, free-cam, `character_physics`, `check_interactions` and the sprite sizing are gated to `EditorMode::Gameplay`. `WorldFocus` (game/mod.rs) is the camera in the editor and the player in gameplay; streaming and the bake read it instead of `Player`.
 - **Cursor**: free in the editor; `CursorGrabMode::Locked` + hidden only while looking, restored to where the drag began. `simulation::setup` only locks in Gameplay mode.
 - **`EditorTool` state** (Select / Place / Terrain) replaced `UserSettings.edit_mode` / `terrain_edit_mode` (ABI 5). `OnExit(Place)` releases a grab, tears down the preview and closes the catalog; `OnExit(Terrain)` removes the brush disc.
-- **`Selection { primary, hovered }`** is what the inspector, Delete, F and the outliner act on. Viewport click (Select tool) or an outliner row sets it; `validate_selection` drops dead entities each frame; placement/drop/duplicate select the new entity.
+- **`Selection { primary, hovered }`** is what the inspector, Delete, F and the outliner act on. Viewport click (Select tool) or an outliner row sets it; `validate_selection` drops dead entities each frame; placement/drop/duplicate select the new entity. A **transform gizmo** (`gizmo.rs`) draws XYZ arrows (Ctrl: rotation arcs) at the selection origin; dragging a handle writes `Transform` + `PlacedEdited` per frame (so group deltas stay correct) and suppresses click-select via `gizmo_pointer_free`. Drag state is a resource (`GizmoInteraction`), never `ViewportInput` (rebuilt every egui pass).
 - **Every level-data mutation goes through `edits.rs`.** Panels write components directly and send `PlacedEdited { entity, what }`; `commit_placed_edits` re-derives `PlacedObject.chunk` from the transform (dirtying both chunks on a boundary crossing), syncs `Interactable.name` to the mesh children, and sets `LightingState.stale`. Script props are *drafted* in the inspector and committed as one `ScriptEdit::SetProps` when the user lets go, because applying = `detach_binding` + `NeedsHydration` (the host skips already-hydrated pairs), which rebuilds the plugin's components. Mesh asset / collider changes go through `RespawnPlaced::InPlace` (same id).
 - **Menu/toolbar commands are `EditorAction` messages** applied in `Update` (`actions.rs`): save, bake, world switch/create (with the editor camera re-seated), plugin add/remove/reload (`ReloadRequested` in script_host), exit to menu, selection ops. Panels never touch those systems directly.
 - **The engine has no pause menu any more.** `pause_menu.rs`, `PauseMenuState`, `UiAnchors` and the bevy_ui slider are gone. In the editor, Escape backs out one level (put a carried entity back → Select tool → deselect). `SimulationState::Paused` still exists for plugins. The engine never pauses on its own.
@@ -206,12 +213,14 @@ All rkyv; v2 and v4 `world.meta` (and v2/v3/v4 `.objects` files) are read via `l
 | F1 | Toggle Editor / Gameplay mode |
 | Shift+R | Force hot-reload all plugins |
 | RMB drag (viewport) | Look; WASD/QE fly while held, Shift ×4, scroll = fly speed |
+| "Fly" button (viewport corner) | Lock the cursor and fly without holding RMB (clicks suppressed); Esc exits |
 | Scroll (viewport, idle) | Dolly |
 | 1 / 2 / 3 | Select / Place / Terrain tool (viewport hovered); Shift+E / Shift+G toggle Place / Terrain |
-| LMB | Select tool: select · Place tool: place / drop grabbed · Terrain: raise |
+| LMB | Select tool: select (or drag a gizmo handle) · Place tool: place / drop grabbed · Terrain: apply brush |
 | Alt+LMB | Select the outermost group of the entity under the cursor |
-| Ctrl+LMB | Lower terrain (Terrain tool) |
-| Esc | Put a carried entity back → back to Select tool → deselect |
+| Ctrl (Select tool) | Gizmo shows rotation arcs instead of translation arrows |
+| Ctrl+LMB | Lower terrain (Terrain tool, Sculpt mode) |
+| Esc | Exit fly lock → cancel a gizmo drag (restores the start transform) → put a carried entity back → back to Select tool → deselect |
 | F | Focus camera on the selection (also outliner double-click) |
 | Delete | Delete the selection (a group keeps its members); Shift+Delete deletes a group with its members |
 | R | Grab the entity under the cursor (else the selection); again to cancel. Switches to Place while carrying |

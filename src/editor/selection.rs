@@ -115,6 +115,12 @@ pub fn update_hover(mut picker: PlacedPicker, mut selection: ResMut<Selection>) 
     }
 }
 
+/// `OnExit(EditorTool::Select)`: hover is only tracked (and drawn) in the
+/// Select tool, so it must not survive a tool switch as stale state.
+pub fn clear_hover(mut selection: ResMut<Selection>) {
+    selection.hovered = None;
+}
+
 /// Drop references to entities that no longer exist (chunk unload, delete,
 /// grab). Runs every frame, before anything reads the selection.
 pub fn validate_selection(mut selection: ResMut<Selection>, placed: Query<(), With<PlacedObject>>) {

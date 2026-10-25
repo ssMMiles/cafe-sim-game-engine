@@ -1,26 +1,13 @@
-//! Place panel: the catalog, placement scale/rotation, and the stamp picker.
+//! Place settings (shown in the Tool panel while the Place tool is active):
+//! the catalog, placement scale/rotation, and the stamp picker.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 
 use super::Panels;
-use crate::editor::actions::EditorAction;
-use crate::editor::tool::EditorTool;
 
 pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
-    let placing = *panels.tool.get() == EditorTool::Place;
-    if !placing {
-        ui.horizontal(|ui| {
-            ui.weak("Pick an entry to switch to the Place tool, or press 2.");
-            if ui.small_button("Place tool").clicked() {
-                panels
-                    .actions
-                    .write(EditorAction::SetTool(EditorTool::Place));
-            }
-        });
-    } else {
-        ui.weak("LMB places at the cursor · R grabs · Shift+Scroll scale · Alt+Scroll rotate");
-    }
+    ui.weak("LMB places at the cursor · R grabs · Shift+Scroll scale · Alt+Scroll rotate");
     ui.separator();
 
     // ── Catalog ──────────────────────────────────────────────────────────────
@@ -46,11 +33,6 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     });
     if let Some(i) = pick {
         panels.catalog.select(i, &mut panels.config);
-        if !placing {
-            panels
-                .actions
-                .write(EditorAction::SetTool(EditorTool::Place));
-        }
     }
     if panels.catalog.entries.is_empty() {
         ui.weak("Catalog is empty — the mesh manifest hasn't loaded yet.");

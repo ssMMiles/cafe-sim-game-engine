@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy_egui::egui::{self, PointerButton, Sense, load::SizedTexture};
 use egui_dock::TabViewer;
 
-use super::{EditorTab, Panels, inspector, outliner, place, terrain};
+use super::{EditorTab, Panels, inspector, outliner, tool_panel};
 use crate::editor::picking::{ViewportInput, cursor_to_texture_px};
 
 pub struct EditorTabs<'a, 'w, 's> {
@@ -60,11 +60,15 @@ impl<'a, 'w, 's> EditorTabs<'a, 'w, 's> {
             None => ui.allocate_response(size, Sense::click_and_drag()),
         };
 
+        // Fly lock means "as if the right button were held": the cursor lock,
+        // the fly camera, and pointer ownership all key off `look_active`.
+        let fly_locked = self.panels.fly_lock.0;
         let secondary_down = ui.input(|i| i.pointer.secondary_down());
-        let look = secondary_down
-            && (response.hovered()
-                || response.dragged_by(PointerButton::Secondary)
-                || self.was_looking);
+        let look = fly_locked
+            || (secondary_down
+                && (response.hovered()
+                    || response.dragged_by(PointerButton::Secondary)
+                    || self.was_looking));
 
         let rect_min = Vec2::new(response.rect.min.x, response.rect.min.y);
         let rect_size = Vec2::new(response.rect.width(), response.rect.height());
@@ -77,11 +81,20 @@ impl<'a, 'w, 's> EditorTabs<'a, 'w, 's> {
         self.viewport.hovered = response.hovered();
         self.viewport.look_active = look;
         self.viewport.cursor_px = cursor_px;
-        self.viewport.clicked_px = response
-            .clicked_by(PointerButton::Primary)
-            .then_some(cursor_px)
+        // No clicks while flying: the OS cursor is hidden and frozen where the
+        // lock began, so a click would select/place at a stale position.
+        self.viewport.clicked_px = (!fly_locked)
+            .then(|| {
+                response
+                    .clicked_by(PointerButton::Primary)
+                    .then_some(cursor_px)
+                    .flatten()
+            })
             .flatten();
-        self.viewport.scroll = if response.hovered() {
+        // `look` rather than `hovered`: while the cursor is locked (RMB look
+        // or fly lock) egui's frozen pointer may sit over an overlay widget,
+        // but the wheel still means fly speed.
+        self.viewport.scroll = if response.hovered() || look {
             // egui turns Shift+wheel into horizontal scrolling (x gets the
             // delta, y is zero). The editor's Shift+Scroll means "scale", so
             // fold it back into the vertical axis.
@@ -94,6 +107,29 @@ impl<'a, 'w, 's> EditorTabs<'a, 'w, 's> {
         } else {
             Vec2::ZERO
         };
+
+        // Overlay in the viewport's corner: enter fly mode without holding
+        // RMB (hard to hold on a trackpad). While locked only a passive hint
+        // is drawn — the frozen egui pointer could be sitting on the button,
+        // and a stray click must not toggle it.
+        let corner = egui::Rect::from_min_size(
+            egui::pos2(rect.max.x - 128.0, rect.min.y + 8.0),
+            egui::vec2(120.0, 22.0),
+        );
+        if fly_locked {
+            ui.painter().text(
+                corner.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                "Flying — Esc exits",
+                egui::FontId::proportional(13.0),
+                ui.visuals().strong_text_color(),
+            );
+        } else if ui
+            .put(corner, egui::Button::new("Fly (Esc exits)"))
+            .clicked()
+        {
+            self.panels.fly_lock.0 = true;
+        }
 
         if self.texture.is_none() {
             ui.painter().text(
@@ -128,8 +164,7 @@ impl TabViewer for EditorTabs<'_, '_, '_> {
             EditorTab::Viewport => self.viewport_tab(ui),
             EditorTab::Outliner => padded(ui, |ui| outliner::draw(ui, self.panels)),
             EditorTab::Inspector => padded(ui, |ui| inspector::draw(ui, self.panels)),
-            EditorTab::Place => padded(ui, |ui| place::draw(ui, self.panels)),
-            EditorTab::Terrain => padded(ui, |ui| terrain::draw(ui, self.panels)),
+            EditorTab::Tool => padded(ui, |ui| tool_panel::draw(ui, self.panels)),
         }
     }
 

@@ -254,3 +254,80 @@ glue stays mapped — but a leak, and the level stays visibly mutated.
 - **Catalog highlight vs `config.kind` divergence** after registry-change rebuilds (`mesh_selector.rs` — `config.kind` only corrected when `manifest_changed`).
 - **Edit mode + terrain-sculpt both active**: every LMB sculpt stroke also places an object (`handle_edit_mode_click` doesn't check the terrain-edit flag).
 - Lower: dirty sets `drain()`ed before I/O (failed write loses dirtiness); `collect_plugin_level_data` not ordered after the Shift+S trigger (one-frame window); camera zoom eats a frame of leftover panel scroll (`camera.rs` reader not drained while inactive); `last_saved` always written 0; unresolvable `NeedsHydration` entities re-scanned every frame (perf only); reload-failure leaves plugin listed as loaded but inert (log-only); `AppliedPluginData` skips re-apply on same-world reload.
+
+## Editor controls overhaul, phase 1 — October 2026
+
+Multi-phase rework of the editor controls (user-driven; phases agreed up front).
+Done in phase 1:
+
+- **One bottom "Tool" tab** (`ui/tool_panel.rs`) replaced the Place/Terrain tabs;
+  it dispatches to the active tool's settings body (`place.rs` / `terrain.rs`,
+  headers stripped — the panel follows the tool, so their "switch to this tool"
+  buttons were dead). Select shows nothing *by user decision* ("revisit later").
+  `EditorTab::{Place,Terrain}` → `EditorTab::Tool`.
+- **Selection/hover boxes are Select-tool-only**: `draw_selection_gizmos` and
+  `update_hover` gained `run_if(in_state(EditorTool::Select))`; `clear_hover` runs
+  on `OnExit(Select)` so a stale hover box can't linger. `Selection.hovered`'s only
+  consumer is the gizmo drawer, so this was safe.
+- **FlyLock** (`editor/camera.rs`): a button overlaid in the viewport tab's top-right
+  corner locks the cursor and enables RMB-free WASD/QE flight (MacBook trackpad pain).
+  Implementation: the viewport tab ORs it into `ViewportInput::look_active`, so the
+  fly camera, `sync_look_cursor` and `pointer_free()` all work unchanged; `clicked_px`
+  is suppressed while locked (frozen hidden cursor must not select/place); scroll uses
+  `hovered || look` because the frozen egui pointer can sit over the overlay. While
+  locked only a passive "Flying — Esc exits" text is painted — a live button could be
+  re-clicked by a stray LMB at the frozen pointer position. Esc releases it *first* in
+  `escape_cancels`' back-out chain; `release_fly_lock` also runs on `OnExit(Editor)`.
+  The user explicitly chose a **button over double-click** (double-click's first click
+  would fire tools/selection).
+- `ActiveControls::rows(flying: bool)` takes the flag as an argument: `editor_ui`
+  already holds `ResMut<FlyLock>` through `Panels`, and a `Res<FlyLock>` inside
+  `ActiveControls` was a B0002 conflict — caught by
+  `editor_systems_have_disjoint_parameters`, which is why that test exists.
+
+Agreed for later phases (user-confirmed decisions):
+- Terrain: move `brush_radius` out of `UserSettings` into `BrushSettings` (ABI bump),
+  add intensity/radius/falloff settings + flatten/smooth modes.
+- Select: hand-rolled XYZ translate arrows, rotation arcs while **Ctrl** held (Ctrl is
+  free in Select; the Ctrl=lower conflict is Terrain-only). No third-party gizmo crate
+  (bevy_egui 0.39 pinning). Drag state goes in its own resource, never in
+  `ViewportInput` (rebuilt every egui pass); writes go through `PlacedEdited{Transform}`.
+
+## Editor controls overhaul, phases 2+3 — October 2026
+
+Both remaining phases landed together (terrain brush expansion + transform gizmo).
+
+**Terrain brush (`terrain_edit.rs`)**
+- `brush_radius` moved from `UserSettings` (engine-api) into `BrushSettings`;
+  `ENGINE_SCRIPTS_ABI_VERSION` **5 → 6** — host and plugin dylibs must be rebuilt
+  together (`cargo build --workspace`).
+- `BrushSettings { mode, radius, strength, falloff }`. `BrushMode::{Sculpt, Flatten,
+  Smooth}`. Falloff is "fraction of the radius that fades": weight 1 inside the flat
+  core, smoothstep to 0 at the rim (`brush_weight`); default 1.0 ≈ the old full-radius
+  fade. `strength` doubles as the per-second cap for flatten/smooth
+  (`delta.clamp(±strength·weight·dt)`), so all modes share one meaning of strength.
+- Flatten targets `TerrainBrushHit.flatten_target`, sampled under the cursor when the
+  stroke begins (`!was_painting`) — a moving brush spreads one plateau instead of
+  chasing its own output. Smooth averages a 3×3 from a **snapshot** of the brush
+  region (+1 margin) taken before any write that frame. Unchanged tiles are skipped
+  (no chunk dirtying when flatten has converged). The brush preview also draws a
+  gizmo ring where the falloff starts.
+
+**Transform gizmo (`editor/gizmo.rs`)**
+- Select tool: world-axis XYZ arrows (translate); holding **Ctrl** swaps to rotation
+  arcs live. Screen-constant sizing from camera distance. Hand-rolled math:
+  `axis_ray_param` (closest-point between lines) for translate, plane-crossing +
+  `signed_angle` for rotate. `EditorGizmoGroup` config group: line width 3,
+  `depth_bias = -1` (handles draw through geometry).
+- `GizmoInteraction { hovered, drag, cancel_requested }` resource. The update system
+  is **chained before `select_on_click`**, which gained `.and(gizmo_pointer_free)` so
+  a handle click never (de)selects. Drag writes `Transform` + `PlacedEdited` per
+  frame (group member deltas stay correct); drag survives the ray dropping out
+  (LMB-held is the authority); drag end on release keeps the transform; **Esc**
+  sets `cancel_requested` (slotted into `escape_cancels` after fly lock, before
+  grab) and the gizmo system restores the drag's start transform. `reset_gizmo` on
+  `OnExit(Select)` so stale hover can't suppress clicks on re-entry.
+- `ActiveControls::rows(flying, brush_mode)` — brush mode passed as an argument for
+  the same B0002 reason as `flying` (Panels holds `ResMut<BrushSettings>`).
+  Terrain hint rows are per-mode (`Ctx::TerrainSculpt/Flatten/Smooth` + shared
+  `Ctx::Terrain` for `[ / ]`).

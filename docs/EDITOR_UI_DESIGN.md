@@ -179,8 +179,9 @@ src/editor/
     menu.rs         menu bar, toolbar, settings window, world/plugin dialogs
     outliner.rs
     inspector.rs    + prop widgets for PropValue
-    place.rs        catalog panel (replaces mesh_selector strip)
-    terrain.rs      brush panel (size, strength)
+    tool_panel.rs   "Tool" tab: dispatches to the active tool's settings
+    place.rs        Place settings body (catalog; replaces mesh_selector strip)
+    terrain.rs      Terrain settings body (brush mode, radius, strength, falloff)
     status.rs       status bar (replaces debug_hud)
   object_placement.rs, grab.rs, terrain_edit.rs, script_binding.rs, ...  (logic stays, input rewired)
 ```
@@ -207,7 +208,7 @@ in gameplay, and plugin UI are never hidden by egui.
 
 All egui systems: `EguiPrimaryContextPass`, run_if `in_state(InGame) &&
 in_state(EditorMode::Editor)`, chained in one fixed order:
-`menu → toolbar → status → dock(viewport, outliner, inspector, bottom tabs)`.
+`menu → toolbar → status → dock(viewport, outliner, inspector, tool tab)`.
 
 The `TabViewer` is a struct built per pass from `SystemParam`s (queries,
 resources). Each tab's `ui` fn lives in its own file and takes `&mut Ui`
@@ -481,14 +482,18 @@ Nothing selected: the inspector shows world environment (sun direction,
 sun/ambient colour and intensity in lightmap units) editing `EnvironmentData`
 — the same path `apply_environment` already consumes — plus the "Bake" button.
 
-### 4.12 Place panel (`ui/place.rs`)
+### 4.12 Tool panel (`ui/tool_panel.rs`, bodies in `ui/place.rs` / `ui/terrain.rs`)
 
-Replaces the Tab strip. Grid of catalog entries (`MeshCatalog`: meshes,
-lights, plugin presets), filter box, selected entry highlighted. Selecting
-sets `PlacementConfig` (kind, `stamp_script`) and switches to
-`EditorTool::Place`. Scale/rotation `DragValue`s mirror Shift/Alt+scroll.
-`MeshCatalog`, `PlacementConfig`, preview and click-to-place logic are
-reused; only `mesh_selector.rs`'s bevy_ui spawning and scroll-cycling go.
+One bottom "Tool" tab shows the active tool's settings (Select: none yet;
+Place: catalog + placement settings; Terrain: brush settings), so the dock
+never offers settings for a tool that isn't live. The Place body replaces
+the old Tab strip: grid of catalog entries (`MeshCatalog`: meshes, lights,
+plugin presets), selected entry highlighted; selecting sets
+`PlacementConfig` (kind, `stamp_script`). Scale/rotation `DragValue`s
+mirror Shift/Alt+scroll. `MeshCatalog`, `PlacementConfig`, preview and
+click-to-place logic are reused; only `mesh_selector.rs`'s bevy_ui
+spawning and scroll-cycling go. Selection/hover gizmo boxes and hover
+picking are gated to the Select tool.
 
 ### 4.13 Menu bar, toolbar, status bar (`ui/menu.rs`, `ui/status.rs`)
 
@@ -508,7 +513,11 @@ reused; only `mesh_selector.rs`'s bevy_ui spawning and scroll-cycling go.
 With these in place the editor pause menu is retired: `setup_editor_pause_menu`
 and its Settings/AddWorld/AddPlugin sub-screens stop being spawned in
 editor mode; their logic (world switch, plugin add/remove, settings) is
-called from egui. Escape in editor: cancel grab → deselect → nothing. The
+called from egui. Escape in editor: release fly lock → cancel gizmo drag
+(restoring the drag's start transform) → cancel grab → deselect → nothing. (Fly lock: the viewport's corner button captures the
+cursor so WASD/QE flight works without holding RMB — `FlyLock` in
+`editor/camera.rs`, ORed into `ViewportInput::look_active` by the viewport
+tab; clicks are suppressed while locked.) The
 `SimulationState::Paused` state remains for gameplay plugins. `handle_pause_input`
 runs only in Gameplay from then on; the engine no longer pauses in the
 editor at all. The `AddWorld` text input and `PauseMenuState` sub-states
