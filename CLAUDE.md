@@ -30,6 +30,7 @@ NEVER guess or make assumptions about the codebase or external dependencies. Alw
 ## Tech Stack
 
 - **Bevy 0.18** - Game engine (ECS)
+- **bevy_egui 0.39 + egui_dock 0.18** - Editor chrome only (docked viewport, panels). **These are the last lines for Bevy 0.18**: bevy_egui 0.40+ targets Bevy 0.19/0.20 and egui_dock must stay on the same `egui` (0.33). Never add `egui` directly; use `bevy_egui::egui`
 - **avian3d 0.5** - Physics (kinematic character controller, colliders)
 - **rkyv 0.8** - Zero-copy serialization for terrain/object persistence
 - **wasm-bindgen / web-sys** - WASM platform support (OPFS storage)
@@ -53,34 +54,47 @@ crates/engine-api/      # Shared crate linked by host AND plugin dylibs (stable 
 │   └── toon_material.rs
 plugins/                # Dynamic plugin crates (dylibs): cafe-sim, example, example2
 projects/               # Project manifests: projects/{id}/project.toml (plugins, worlds, start_world)
-docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save system, v3 format)
+docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save system; EDITOR_UI_DESIGN.md — docked editor, phased)
 src/
 ├── lib.rs              # App init, plugin registration, custom "world" asset source
 ├── main.rs             # Binary entry point
 ├── projects.rs         # Project discovery (project.toml), ActiveProject resource
 ├── script_host.rs      # Dylib loader, hot-reload (Shift+R), script hydration/dehydration,
 │                       #   plugin level-data save/load hooks
-├── settings.rs         # UserSettings resource, SliderSetting trait
+├── settings.rs         # UserSettings + InputLock resources (engine-api types)
 ├── storage/            # Platform-agnostic async file I/O (native + WASM)
-├── ui/                 # UiTheme, UiAnchors, UiExt widget trait
+├── ui/                 # bevy_ui for *player-facing* UI (main menu, plugins). Nothing editor-side uses it
 │   ├── theme.rs        # Colors, typography, spacing constants
-│   ├── anchors.rs      # Persistent screen-edge anchor entities
-│   └── widgets.rs      # ui_title, ui_button, ui_slider, ui_divider
+│   └── widgets.rs      # ui_title, ui_button (+ checkbox, dropdown, text_input modules)
 ├── menu/               # Main menu screen + navigation
 │   ├── mod.rs          # MenuPlugin, Camera2d setup
 │   └── main.rs         # Start Game / Settings buttons
-├── editor/             # EditorPlugin — all authoring-only systems (F1 toggles Editor/Gameplay)
-│   ├── mod.rs          # EditorMode state, EditorSet system sets
-│   ├── controls.rs         # Context-sensitive controls panel (rows filtered by sub-mode)
+├── editor/             # EditorPlugin — docked editor (F1 toggles Editor/Gameplay). See docs/EDITOR_UI_DESIGN.md
+│   ├── mod.rs              # EditorMode state, EditorSet {Prepare, InGame, Active}, wiring
+│   ├── tool.rs             # EditorTool state (Select/Place/Terrain): 1/2/3, Shift+E, Shift+G, Esc cancels
+│   ├── ui/                 # egui chrome (EguiPrimaryContextPass, runs in PostUpdate)
+│   │   ├── mod.rs          #   EguiPlugin bootstrap, DockLayout, `Panels` SystemParam, status bar
+│   │   ├── viewport.rs     #   TabViewer; viewport tab draws the render texture, fills ViewportInput
+│   │   ├── menu.rs         #   Menu bar (File/Edit/View/Tools/Plugins), toolbar, New-world dialog
+│   │   ├── outliner.rs     #   Loaded placed entities: filter, select, focus, context menu
+│   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment when nothing selected
+│   │   ├── place.rs        #   Catalog grid, placement scale/yaw, stamp script picker
+│   │   └── terrain.rs      #   Brush radius/strength
+│   ├── edits.rs            # PlacedEdited → commit_placed_edits (chunk re-derive, dirty, name sync, LightingState);
+│   │                       #   ScriptEdit (attach/detach/set props → detach_binding + NeedsHydration); RespawnPlaced
+│   ├── actions.rs          # EditorAction (save, bake, worlds, plugins, exit, selection ops) applied in Update
+│   ├── catalog.rs          # MeshCatalog: manifest meshes + lights + empty + plugin presets; select() arms stamps
+│   ├── picking.rs          # ViewportInput (pointer in texture px) → EditorRay; PlacedPicker
+│   ├── camera.rs           # Fly camera (RMB look, WASD/QE), cursor lock while looking,
+│   │                       #   render-target resize to the tab, sprite hide/show
+│   ├── selection.rs        # Selection {primary, hovered, focus_requested}, click-select, gizmo box, F, Delete
+│   ├── controls.rs         # ActiveControls: context-filtered key hints for the status bar
 │   ├── grab.rs             # R: lift a placed entity into the preview, drop it with its own id
-│   ├── input.rs            # Shared scroll handling (none=cycle, Shift=scale, Alt=rotate)
-│   ├── mesh_selector.rs    # Placement catalog (Tab): meshes + lights + plugin presets
-│   ├── object_placement.rs # Placement preview/config, PlacedPicker, place/delete under crosshair
-│   ├── script_binding.rs   # Scripts panel (K): attach/detach script bindings, stamp mode
-│   ├── terrain_edit.rs     # Terrain brush (raise/lower, Shift+G toggle)
+│   ├── input.rs            # keyboard_free (egui text focus), scroll modifier + notches
+│   ├── object_placement.rs # Placement preview/config, place at cursor ray (Place tool)
+│   ├── terrain_edit.rs     # Terrain brush (LMB raise, Ctrl+LMB lower), BrushSettings
 │   ├── terrain_save.rs     # Shift+S save trigger
 │   ├── baking_trigger.rs   # Shift+B bake trigger
-│   ├── debug_hud.rs        # HUD panels (FPS, keybinds, position, interaction)
 │   ├── lightmap_toggle.rs  # Shift+L: baked lighting vs flat unlit debug view
 │   └── physics_debug.rs    # Gizmo toggle (Shift+P)
 └── game/               # Core simulation (SimulationPlugin)
@@ -89,9 +103,9 @@ src/
     ├── physics.rs       # CharacterState, kinematic controller (avian3d)
     ├── animation.rs     # AnimationGraph, state machine (Idle/Run/Jump)
     ├── gltf_loading.rs  # Scene loading, toon material conversion, interactions
-    ├── pause_menu.rs    # Pause overlay, settings submenu, plugin add/remove
     ├── gfx/             # Rendering pipeline
-    │   ├── camera.rs    # PlayerCamera, render-to-texture (1920x1080 HDR)
+    │   ├── camera.rs    # PlayerCamera, render-to-texture (GameRenderTarget: 1920x1080 HDR in gameplay,
+    │   │                #   resized to the viewport tab in the editor); Camera2d hosts PrimaryEguiContext
     │   ├── toon_material.rs  # ToonMaterial (StandardMaterial extension + lightmap)
     │   ├── post_process.rs   # Edge detection post-processing
     │   ├── outline.rs
@@ -140,7 +154,7 @@ src/
 - Plugins register named *scripts* (factories) and optional `LevelDataHooks` in `ScriptRegistry`. The host hydrates `ScriptBindings` on placed entities by calling the factory and recording inserted `ComponentId`s via archetype diff; dehydration removes exactly those on unload/reload.
 - **Loaded ≠ active.** `DynamicPlugin` has three hooks: `register` (scripts + level hooks; runs on every load/reload in *both* modes), `setup` (gameplay bootstrap + schedule), `teardown`. A plugin is loaded whenever the project declares it, but only *active* in `EditorMode::Gameplay` — only active plugins' schedules tick, so plugin keybinds and HUD panels can't fight the editor. Entering the editor runs every plugin's teardown, so **switching modes resets the gameplay session**. Script bindings stay hydrated in both modes (only hot-reload dehydrates), so placed plugin objects still look right while authoring.
 - A plugin can claim a *level* entity instead of spawning its own: register a script with `with_default_mesh(...)` and it appears in the editor's placement catalog as a one-click "mesh + binding" preset; the factory inserts a marker the plugin's systems look for. `cafe-sim`'s `cafe-shell` works this way, so the cafe shell is level geometry (collider + baked lightmaps + BVH occlusion in the editor) and the plugin only *reads* it, for the furniture-grid anchor. Materials ship inside `Cafe.gltf` — see `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md` for why a plugin must not dress level geometry at runtime (nothing unwinds it on unload).
-- `ENGINE_SCRIPTS_ABI_VERSION` (currently 4) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
+- `ENGINE_SCRIPTS_ABI_VERSION` (currently 5) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
 
 ## Level Persistence (see docs/LEVEL_SAVE_DESIGN.md)
 
@@ -150,15 +164,15 @@ worlds/{id}/
                                #   + EnvironmentData (sun/ambient, intensities in lightmap units) + required_plugins + plugin_data
                                #   + next_entity_id (placed-entity id counter, seeds the registry on load)
   chunks/chunk_X_Y.terrain     # v2 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc
-  chunks/chunk_X_Y.objects     # v4: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty;
+  chunks/chunk_X_Y.objects     # v5: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty/Group;
                                #   light intensity is in lightmap units, not lumens)
-                               #   + Vec<ScriptBinding> with typed PropValue props
+                               #   + Vec<ScriptBinding> with typed PropValue props + parent: Option<u64> (group id)
   chunks/chunk_X_Y_lightmap.v6.exr, objects/obj_{id}_{k}_lightmap.v6.exr  (k = sub-mesh index)
                                # HDR OpenEXR (f16 RGB, ZIP) radiance; LIGHTMAP_FORMAT_VERSION is in the
                                #   file name, so older bakes are skipped (with a warning), never misread
 ```
 
-All rkyv; v2 and v4 `world.meta` (and v2/v3 `.objects` files) are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
+All rkyv; v2 and v4 `world.meta` (and v2/v3/v4 `.objects` files) are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
 
 ## Shaders (`assets/shaders/`)
 
@@ -170,28 +184,40 @@ All rkyv; v2 and v4 `world.meta` (and v2/v3 `.objects` files) are read via `lega
 | `lightmap_bake.wgsl` | GPU compute terrain bake (sun + lights + AO + bounce; stack BVH traversal → packed f16 RGB) |
 | `edge_detection_post.wgsl` | Post-process edge detection |
 
+## Editor Model (docs/EDITOR_UI_DESIGN.md, all five phases)
+
+- The editor is a **docked window**: egui panels around a viewport tab that shows the camera's render texture. The 3D camera still renders to `GameRenderTarget`; in the editor the image is resized to the tab's physical size (`sync_render_target`) and the full-window sprite is hidden, in gameplay it goes back to 1920×1080 + sprite. `PrimaryEguiContext` is attached explicitly to the in-game `Camera2d` (`auto_create_primary_context` is off, because auto-creation grabs the main-menu camera). bevy_ui renders *above* egui.
+- **Pointer authority is `ViewportInput`**, filled from the viewport tab's egui `Response` each pass (hovered, cursor in texture pixels, look-drag, click, scroll, size). bevy_egui's "wants pointer" helpers are useless with a whole-window dock. `compute_editor_ray` (first in `EditorSet::Prepare`) turns it into one `EditorRay` per frame; the picker, placement preview and terrain brush all read that ray. Mouse/wheel consumers gate on `viewport_pointer_free`; key bindings gate on `keyboard_free` (egui text focus). One frame of latency (egui pass is in PostUpdate) is by design.
+- **One camera, two drivers.** In `EditorMode::Editor` `editor_fly_camera` owns the transform (RMB drag look, WASD/QE while looking, scroll = fly speed while looking / dolly idle); `camera_follow`, free-cam, `character_physics`, `check_interactions` and the sprite sizing are gated to `EditorMode::Gameplay`. `WorldFocus` (game/mod.rs) is the camera in the editor and the player in gameplay; streaming and the bake read it instead of `Player`.
+- **Cursor**: free in the editor; `CursorGrabMode::Locked` + hidden only while looking, restored to where the drag began. `simulation::setup` only locks in Gameplay mode.
+- **`EditorTool` state** (Select / Place / Terrain) replaced `UserSettings.edit_mode` / `terrain_edit_mode` (ABI 5). `OnExit(Place)` releases a grab, tears down the preview and closes the catalog; `OnExit(Terrain)` removes the brush disc.
+- **`Selection { primary, hovered }`** is what the inspector, Delete, F and the outliner act on. Viewport click (Select tool) or an outliner row sets it; `validate_selection` drops dead entities each frame; placement/drop/duplicate select the new entity.
+- **Every level-data mutation goes through `edits.rs`.** Panels write components directly and send `PlacedEdited { entity, what }`; `commit_placed_edits` re-derives `PlacedObject.chunk` from the transform (dirtying both chunks on a boundary crossing), syncs `Interactable.name` to the mesh children, and sets `LightingState.stale`. Script props are *drafted* in the inspector and committed as one `ScriptEdit::SetProps` when the user lets go, because applying = `detach_binding` + `NeedsHydration` (the host skips already-hydrated pairs), which rebuilds the plugin's components. Mesh asset / collider changes go through `RespawnPlaced::InPlace` (same id).
+- **Menu/toolbar commands are `EditorAction` messages** applied in `Update` (`actions.rs`): save, bake, world switch/create (with the editor camera re-seated), plugin add/remove/reload (`ReloadRequested` in script_host), exit to menu, selection ops. Panels never touch those systems directly.
+- **The engine has no pause menu any more.** `pause_menu.rs`, `PauseMenuState`, `UiAnchors` and the bevy_ui slider are gone. In the editor, Escape backs out one level (put a carried entity back → Select tool → deselect). `SimulationState::Paused` still exists for plugins. The engine never pauses on its own.
+- Environment (sun azimuth/elevation, colours, intensities) is edited in the inspector when nothing is selected, by writing `TerrainWorld.metadata.environment`; `apply_environment` reacts to the resource change and Shift+S persists it.
+- **Groups are organisational, not transform parents.** `PlacedKind::Group` is a placed entity like any other (transform, chunk, id); members carry `PlacedObject.parent = Some(group id)` and keep *world* transforms, no ECS `ChildOf`. The outliner draws the id tree (members whose group isn't loaded show at top level with ⤴), rows drag onto groups, a bottom strip drops to top level. Moving a group in the inspector applies the delta to its loaded members (`commit_placed_edits` keeps a per-group transform snapshot to measure the delta). Deleting a group re-files members under its parent; Shift+Delete / "Delete with members" is recursive. Groups aren't viewport-pickable; Alt+click a member to select its outermost group. `selection::{descendants, ancestors, PlacedTree}` are the tree helpers.
+
 ## Key Systems & Keybinds
 
 | Key | Action |
 |-----|--------|
-| WASD | Movement |
-| Space | Jump |
-| Escape | Pause menu |
+| WASD / Space | Gameplay movement / jump |
 | F1 | Toggle Editor / Gameplay mode |
 | Shift+R | Force hot-reload all plugins |
-| Shift+E | Toggle edit mode |
-| Tab | Toggle placement catalog: meshes, lights, plugin presets (edit mode) |
-| K | Toggle scripts panel (edit mode) |
-| Enter / Backspace | Attach / detach selected script to the placed entity under the crosshair (scripts panel open) |
-| LMB | Place selected entry (edit mode) / Raise terrain (terrain edit) |
-| RMB | Lower terrain (terrain edit) |
-| Delete | Delete placed entity under the crosshair, lights included (edit mode) |
-| R | Grab the placed entity under the crosshair; again to cancel (edit mode) |
-| Scroll | Cycle the open panel's selection (edit mode) |
+| RMB drag (viewport) | Look; WASD/QE fly while held, Shift ×4, scroll = fly speed |
+| Scroll (viewport, idle) | Dolly |
+| 1 / 2 / 3 | Select / Place / Terrain tool (viewport hovered); Shift+E / Shift+G toggle Place / Terrain |
+| LMB | Select tool: select · Place tool: place / drop grabbed · Terrain: raise |
+| Alt+LMB | Select the outermost group of the entity under the cursor |
+| Ctrl+LMB | Lower terrain (Terrain tool) |
+| Esc | Put a carried entity back → back to Select tool → deselect |
+| F | Focus camera on the selection (also outliner double-click) |
+| Delete | Delete the selection (a group keeps its members); Shift+Delete deletes a group with its members |
+| R | Grab the entity under the cursor (else the selection); again to cancel. Switches to Place while carrying |
 | Shift+Scroll | Adjust placement scale |
 | Alt+Scroll | Rotate placement (yaw, 15° steps) |
-| Shift+G | Toggle terrain edit mode |
-| `[` / `]` | Adjust brush size |
+| `[` / `]` | Adjust brush size (Terrain tool) |
 | Shift+S | Save terrain |
 | Shift+B | Bake lightmaps (3×3 chunks around the player by default; `BakeConfig::bake_radius`) |
 | Shift+L | Toggle baked lighting / flat unlit debug view |
@@ -199,7 +225,7 @@ All rkyv; v2 and v4 `world.meta` (and v2/v3 `.objects` files) are read via `lega
 
 ## Terrain Streaming Pipeline
 
-1. `update_streaming_ring` - Determines which chunks are in range (Chebyshev distance, load_radius=4, unload_radius=6)
+1. `update_streaming_ring` - Determines which chunks are in range of `WorldFocus` (Chebyshev distance, load_radius=4, unload_radius=6)
 2. `launch_chunk_tasks` - When asset loads complete, spawns AsyncComputeTaskPool mesh generation
 3. `finalize_computed_chunks` - Polls tasks, spawns chunk entities + objects (max 2/frame)
 
@@ -207,7 +233,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 
 ## Rendering Pipeline
 
-- Camera renders to 1920x1080 float16 HDR image, displayed via sprite on layer 1
+- Camera renders to a float16 HDR image (`GameRenderTarget`): 1920x1080 displayed via sprite on layer 1 in gameplay; in the editor the image is resized to the egui viewport tab and drawn as an egui texture (bevy_egui binds any filterable float texture and does its own linear→sRGB, so colours match the sprite path)
 - Materials: `ExtendedMaterial<StandardMaterial, ToonMaterial>` for objects, `ExtendedMaterial<StandardMaterial, TerrainMaterial>` for terrain
 - Material bind group 3; use `@group(#{MATERIAL_BIND_GROUP})` in WGSL (naga_oil substitution)
 - **All lighting is baked** — sun, ambient, and every placed point/spot light. A lightmap texel is outgoing radiance in *lightmap units* (1.0 = full base colour); the toon shaders only sample, band (hue-preserving, 5 bands, bottom band cross-faded to a neutral `TOON_FLOOR` of 0.18 so nothing is pure black), and multiply by base colour. **Band boundaries are antialiased with `fwidth`** — a hard `floor()` threshold on a filtered texture aliases at texel granularity no matter how many texels you spend, which is what made shadow edges a staircase; the ramp makes each boundary ~1 screen pixel wide at any resolution or distance. `toon_band`/`toon_shade`/`luminance` are duplicated verbatim in `toon_lighting.wgsl` and `terrain_toon.wgsl` (no shared WGSL import module exists) — keep them in step — no runtime light loops, shadow maps, or clustering. Model, identical in the CPU terrain, CPU object, and GPU terrain bakers: `sun_rgb * (ndotl * shadow + bounce) + ambient_rgb * ao + Σ local lights`. Local lights use a smooth bounded range falloff (not inverse-square) and a segment shadow ray that stops at the light. See `baking/lightmap.rs`.

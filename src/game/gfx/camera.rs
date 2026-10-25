@@ -1,7 +1,6 @@
 use std::f32::consts::PI;
 
 use crate::{
-    editor::{MeshSelectorOpen, ScriptPanelOpen},
     game::{
         GameEntity, gfx::post_process::EdgeDetectionSettings, simulation::Player,
         world::terrain::HeightmapData,
@@ -41,6 +40,12 @@ pub use engine_api::PlayerCamera;
 #[derive(Component)]
 pub struct RenderTextureSprite;
 
+/// The image the 3D camera renders into. The editor shows it inside an egui
+/// tab (and resizes it to fit); gameplay presents it via the full-window
+/// sprite.
+#[derive(Resource, Clone)]
+pub struct GameRenderTarget(pub Handle<Image>);
+
 pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
@@ -72,6 +77,7 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
     render_texture.resize(size);
 
     let render_texture_handle = images.add(render_texture);
+    commands.insert_resource(GameRenderTarget(render_texture_handle.clone()));
     let render_texture_layer = RenderLayers::layer(0);
 
     // The camera to render all entities on render layer #0, which is the default layer for
@@ -131,6 +137,10 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
     commands.spawn((
         GameEntity,
         IsDefaultUiCamera,
+        // The editor's egui context draws into this camera's target (the
+        // window), above the sprite. Attached here rather than auto-created
+        // because auto-creation would pick the main menu's camera.
+        bevy_egui::PrimaryEguiContext,
         Camera2d::default(),
         // PixelZoom::FitSize {
         //         width: RENDER_TEXTURE_WIDTH as i32,
@@ -325,16 +335,10 @@ pub fn adjust_camera_distance(
     mut scroll_events: MessageReader<MouseWheel>,
     mut settings: ResMut<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
-    selector: Res<MeshSelectorOpen>,
-    script_panel: Res<ScriptPanelOpen>,
 ) {
-    // Yield scroll to whichever editor strip is open (mesh catalog or scripts
-    // panel). Shift+scroll is reserved for placement scale adjustment.
     if settings.camera_view != CameraView::ThirdPerson
         || input.pressed(KeyCode::ShiftLeft)
         || input.pressed(KeyCode::ShiftRight)
-        || selector.0
-        || script_panel.0
     {
         return;
     }

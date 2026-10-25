@@ -1,36 +1,30 @@
-//! Edit-mode placement of level entities (Shift+E to toggle).
+//! Place-tool placement of level entities.
 //!
 //! What gets placed is whatever `PlacementConfig` currently describes — a mesh,
 //! a light, or a plugin preset — and the translucent preview follows the
-//! camera ray's hit on the terrain. Lights sit a little above the hit so they
+//! cursor ray's hit on the terrain. Lights sit a little above the hit so they
 //! light the ground they were dropped on rather than starting inside it.
 //!
-//! [`PlacedPicker`] is the one way the editor answers "which placed entity is
-//! the camera pointing at". It raycasts meshes first and falls back to a
-//! ray/sphere test for mesh-less kinds (lights, anchors), so Delete and the
-//! scripts panel work on lights even though nothing can be raycast there.
+//! The preview exists only while [`EditorTool::Place`] is active; the tool's
+//! `OnExit` tears it down (see `editor::mod`).
 
-use bevy::ecs::system::SystemParam;
-use bevy::input::mouse::MouseWheel;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
 use bevy::{log, prelude::*};
 use engine_api::{ScriptBinding, ScriptRegistry};
 
-use crate::editor::input::{ScrollMod, scroll_delta, scroll_modifier};
+use crate::editor::input::{ScrollMod, scroll_modifier, scroll_notches};
+use crate::editor::picking::{EditorRay, ViewportInput};
+use crate::editor::selection::Selection;
 use crate::game::GameEntity;
-use crate::game::gfx::camera::PlayerCamera;
-use crate::game::gltf_loading::{InteractableParent, PendingMaterial, spawn_interactable_scene};
+use crate::game::gltf_loading::{PendingMaterial, spawn_interactable_scene};
 use crate::game::world::objects::{
-    PlacedEntityRecord, PlacedKind, PlacedObject, PlacedObjectRegistry, PlacementConfig,
-    spawn_entity_record, world_pos_to_chunk,
+    PlacedEntityRecord, PlacedKind, PlacedObjectRegistry, PlacementConfig, spawn_entity_record,
+    world_pos_to_chunk,
 };
 use crate::game::world::terrain::TerrainChunk;
-use crate::settings::UserSettings;
 
 /// How far above the terrain hit a light preview (and the placed light) sits.
 const LIGHT_PLACEMENT_HEIGHT: f32 = 2.5;
-/// Pick radius for mesh-less placed entities.
-const PICK_SPHERE_RADIUS: f32 = 0.5;
 /// Yaw applied per notch of Alt+Scroll.
 const ROTATION_STEP: f32 = std::f32::consts::FRAC_PI_2 / 6.0; // 15°
 
@@ -40,88 +34,20 @@ pub struct PlacementPreview;
 #[derive(Resource, Default)]
 pub struct PlacementPreviewEntity(pub Option<Entity>);
 
-// ── Picking ───────────────────────────────────────────────────────────────────
-
-/// Everything needed to find the placed entity under the crosshair.
-#[derive(SystemParam)]
-pub struct PlacedPicker<'w, 's> {
-    raycast: MeshRayCast<'w, 's>,
-    camera: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
-    parents: Query<'w, 's, &'static InteractableParent>,
-    placed: Query<'w, 's, (Entity, &'static PlacedObject, &'static GlobalTransform)>,
-}
-
-impl PlacedPicker<'_, '_> {
-    /// The nearest placed entity along the camera's forward ray, if any.
-    pub fn pick(&mut self) -> Option<Entity> {
-        let cam = self.camera.single().ok()?;
-        let dir = Dir3::new(cam.forward().as_vec3()).ok()?;
-        let ray = Ray3d::new(cam.translation, dir);
-
-        // Meshes: first hit that resolves (via the scene's mesh children) to a
-        // PlacedObject root.
-        let mut best: Option<(f32, Entity)> = None;
-        for (entity, hit) in self.raycast.cast_ray(ray, &MeshRayCastSettings::default()) {
-            let root = self.parents.get(*entity).map(|p| p.0).unwrap_or(*entity);
-            if self.placed.get(root).is_ok() {
-                best = Some((hit.distance, root));
-                break;
-            }
-        }
-
-        // Mesh-less kinds: ray/sphere against their origin. Keep whichever is
-        // nearer so a light in front of a rock wins over the rock.
-        for (entity, obj, gt) in self.placed.iter() {
-            if obj.kind.is_mesh() {
-                continue;
-            }
-            let Some(t) = ray_sphere(ray, gt.translation(), PICK_SPHERE_RADIUS) else {
-                continue;
-            };
-            if best.is_none_or(|(d, _)| t < d) {
-                best = Some((t, entity));
-            }
-        }
-
-        best.map(|(_, e)| e)
-    }
-}
-
-/// Distance along `ray` to the first intersection with a sphere, or `None`.
-fn ray_sphere(ray: Ray3d, center: Vec3, radius: f32) -> Option<f32> {
-    let oc = ray.origin - center;
-    let b = oc.dot(ray.direction.as_vec3());
-    let c = oc.length_squared() - radius * radius;
-    let disc = b * b - c;
-    if disc < 0.0 {
-        return None;
-    }
-    let t = -b - disc.sqrt();
-    (t > 0.0).then_some(t)
-}
-
-// ── Systems ───────────────────────────────────────────────────────────────────
-
-pub fn toggle_edit_mode(mut settings: ResMut<UserSettings>, input: Res<ButtonInput<KeyCode>>) {
-    if input.just_pressed(KeyCode::KeyE)
-        && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight))
-    {
-        settings.toggle_edit_mode();
-    }
-}
-
-pub fn handle_edit_mode_click(
+/// LMB on the viewport places the configured entity at the preview.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_place_click(
     mut commands: Commands,
-    settings: Res<UserSettings>,
-    mouse_input: Res<ButtonInput<MouseButton>>,
+    viewport: Res<ViewportInput>,
     preview_entity: Res<PlacementPreviewEntity>,
     preview_query: Query<(&Transform, &Visibility), With<PlacementPreview>>,
     asset_server: Res<AssetServer>,
     config: Res<PlacementConfig>,
     script_registry: Res<ScriptRegistry>,
     mut registry: ResMut<PlacedObjectRegistry>,
+    mut selection: ResMut<Selection>,
 ) {
-    if !settings.edit_mode || !mouse_input.just_pressed(MouseButton::Left) {
+    if viewport.clicked_px.is_none() {
         return;
     }
 
@@ -166,20 +92,20 @@ pub fn handle_edit_mode_click(
         ]);
     }
 
-    spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
+    let entity = spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
     // Streaming must not dirty a chunk just by loading it, so marking dirty
     // is the placing caller's job.
     registry.dirty_chunks.insert(chunk);
+    selection.primary = Some(entity);
 }
 
 pub fn setup_placement_preview(
     mut commands: Commands,
     mut preview_entity: ResMut<PlacementPreviewEntity>,
     asset_server: Res<AssetServer>,
-    settings: Res<UserSettings>,
     config: Res<PlacementConfig>,
 ) {
-    if !settings.edit_mode || preview_entity.0.is_some() {
+    if preview_entity.0.is_some() {
         return;
     }
 
@@ -224,34 +150,35 @@ pub fn setup_placement_preview(
     log::info!("Placement preview entity created ({})", config.kind.label());
 }
 
+/// Follow the cursor ray's terrain hit; hidden when the cursor is off the
+/// viewport or over nothing.
 pub fn update_placement_preview(
     mut preview_query: Query<(&mut Transform, &mut Visibility), With<PlacementPreview>>,
-    camera_query: Query<&Transform, (With<PlayerCamera>, Without<PlacementPreview>)>,
     terrain_filter: Query<(), With<TerrainChunk>>,
     mut raycast: MeshRayCast,
     preview_entity: Res<PlacementPreviewEntity>,
-    settings: Res<UserSettings>,
+    ray: Res<EditorRay>,
     config: Res<PlacementConfig>,
 ) {
-    if !settings.edit_mode {
-        return;
-    }
     let Some(entity) = preview_entity.0 else {
         return;
     };
     let Ok((mut preview_transform, mut visibility)) = preview_query.get_mut(entity) else {
         return;
     };
-    let Ok(camera_transform) = camera_query.single() else {
-        return;
-    };
-    let Ok(dir) = Dir3::new(camera_transform.forward().as_vec3()) else {
+    let Some(ray) = ray.0 else {
+        *visibility = Visibility::Hidden;
         return;
     };
 
-    let ray = Ray3d::new(camera_transform.translation, dir);
     let terrain_only = |e: Entity| terrain_filter.contains(e);
     let settings = MeshRayCastSettings::default().with_filter(&terrain_only);
+
+    // Scale/rotation live on the config (edited by scroll and the Place
+    // panel, through `bypass_change_detection`); mirror them here so no
+    // editor needs to reach into the preview.
+    preview_transform.rotation = config.rotation;
+    preview_transform.scale = config.effective_scale();
 
     match raycast.cast_ray(ray, &settings).first() {
         Some((_, hit)) => {
@@ -293,7 +220,7 @@ pub fn draw_preview_gizmo(
     };
     gizmos.sphere(pos, 0.2, color);
     // Drop line to the ground so the lift reads as height, not as floating
-    // somewhere behind the crosshair.
+    // somewhere behind the cursor.
     gizmos.line(
         pos,
         pos - Vec3::Y * LIGHT_PLACEMENT_HEIGHT,
@@ -301,23 +228,9 @@ pub fn draw_preview_gizmo(
     );
 }
 
-pub fn cleanup_placement_preview(
-    mut commands: Commands,
-    mut preview_entity: ResMut<PlacementPreviewEntity>,
-    settings: Res<UserSettings>,
-) {
-    if !settings.is_changed() || settings.edit_mode || preview_entity.0.is_none() {
-        return;
-    }
-
-    if let Some(entity) = preview_entity.0.take() {
-        commands.entity(entity).despawn();
-        log::info!("Placement preview entity removed");
-    }
-}
-
-/// Despawn the preview entity unconditionally — used by `OnExit(EditorMode::Editor)`
-/// so the gameplay screen has no leftover ghost mesh.
+/// Despawn the preview entity — `OnExit(EditorTool::Place)` and
+/// `OnExit(EditorMode::Editor)`, so neither the next tool nor gameplay has a
+/// leftover ghost mesh.
 pub fn teardown_placement_preview(
     mut commands: Commands,
     mut preview_entity: ResMut<PlacementPreviewEntity>,
@@ -340,22 +253,15 @@ pub fn rebuild_preview_on_config_change(
 
 /// Shift + scroll wheel adjusts PlacementConfig.scale uniformly.
 pub fn adjust_placement_scale(
-    settings: Res<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
-    mut scroll_events: MessageReader<MouseWheel>,
+    viewport: Res<ViewportInput>,
     mut config: ResMut<PlacementConfig>,
-    preview_entity: Res<PlacementPreviewEntity>,
-    mut preview_query: Query<&mut Transform, With<PlacementPreview>>,
 ) {
-    if !settings.edit_mode {
-        scroll_events.clear();
-        return;
-    }
     if scroll_modifier(&input) != ScrollMod::Shift {
         return;
     }
 
-    let delta = scroll_delta(&mut scroll_events, 53.0);
+    let delta = scroll_notches(&viewport);
     if delta == 0.0 || !config.kind.is_mesh() {
         return;
     }
@@ -365,12 +271,6 @@ pub fn adjust_placement_scale(
     // trigger `rebuild_preview_on_config_change` and reload the scene.
     let config = config.bypass_change_detection();
     config.scale = (config.scale * factor).clamp(Vec3::splat(0.001), Vec3::splat(100.0));
-
-    if let Some(entity) = preview_entity.0
-        && let Ok(mut transform) = preview_query.get_mut(entity)
-    {
-        transform.scale = config.scale;
-    }
 }
 
 /// Alt/Option + scroll wheel yaws the placement in fixed steps.
@@ -378,74 +278,28 @@ pub fn adjust_placement_scale(
 /// Snapped rather than continuous so repeated placements line up with each
 /// other — freehand rotation makes a row of fence posts impossible to match.
 pub fn adjust_placement_rotation(
-    settings: Res<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
-    mut scroll_events: MessageReader<MouseWheel>,
+    viewport: Res<ViewportInput>,
     mut config: ResMut<PlacementConfig>,
-    preview_entity: Res<PlacementPreviewEntity>,
-    mut preview_query: Query<&mut Transform, With<PlacementPreview>>,
+    mut accumulated: Local<f32>,
 ) {
-    if !settings.edit_mode {
-        scroll_events.clear();
-        return;
-    }
     if scroll_modifier(&input) != ScrollMod::Alt {
+        *accumulated = 0.0;
         return;
     }
 
-    let delta = scroll_delta(&mut scroll_events, 53.0);
-    if delta.abs() < 0.5 {
+    // Trackpads deliver fractions of a notch; accumulate so a slow swipe
+    // still rotates rather than being discarded below the threshold.
+    *accumulated += scroll_notches(&viewport);
+    if accumulated.abs() < 0.5 {
         return;
     }
 
-    let steps = delta.round();
+    let steps = accumulated.round();
+    *accumulated -= steps;
     let yaw = Quat::from_rotation_y(steps * ROTATION_STEP);
     // Same reasoning as `adjust_placement_scale`: bypass change detection so
     // a rotation tweak doesn't respawn the preview scene every notch.
     let config = config.bypass_change_detection();
     config.rotation = (yaw * config.rotation).normalize();
-
-    if let Some(entity) = preview_entity.0
-        && let Ok(mut transform) = preview_query.get_mut(entity)
-    {
-        transform.rotation = config.rotation;
-    }
-}
-
-/// Delete key while looking at a placed entity in edit mode. Works on lights
-/// too, via the picker's sphere fallback.
-pub fn delete_hovered_object(
-    mut commands: Commands,
-    settings: Res<UserSettings>,
-    input: Res<ButtonInput<KeyCode>>,
-    grabbed: Res<crate::editor::grab::GrabbedEntity>,
-    mut registry: ResMut<PlacedObjectRegistry>,
-    mut picker: PlacedPicker,
-    placed_query: Query<&PlacedObject>,
-) {
-    // While carrying, Delete destroys the carried entity (see
-    // `grab::destroy_grabbed_object`) rather than whatever is behind it.
-    if grabbed.0.is_some() {
-        return;
-    }
-    if !settings.edit_mode || !input.just_pressed(KeyCode::Delete) {
-        return;
-    }
-
-    let Some(root) = picker.pick() else {
-        return;
-    };
-    let Ok(obj) = placed_query.get(root) else {
-        return;
-    };
-
-    registry.by_id.remove(&obj.id);
-    registry.dirty_chunks.insert(obj.chunk);
-    commands.entity(root).despawn();
-    info!(
-        "Deleted placed {} id={} from chunk {:?}",
-        obj.kind.label(),
-        obj.id,
-        obj.chunk
-    );
 }

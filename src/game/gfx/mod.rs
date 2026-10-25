@@ -14,6 +14,7 @@ use crosshair::update_crosshair_display;
 use outline::update_outline;
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings};
 
+use crate::editor::EditorMode;
 use crate::game::gfx::toon_material::{
     DefaultToonLightmap, ToonMaterial, create_default_toon_lightmap,
 };
@@ -40,14 +41,23 @@ impl Plugin for GfxPlugin {
         app.insert_resource(DefaultToonLightmap(handle));
 
         app.add_systems(Update, update_crosshair_display.in_set(GfxSet::InGame));
-        app.add_systems(Update, resize_render_texture_sprite.in_set(GfxSet::InGame));
-        app.add_systems(Update, adjust_camera_distance.in_set(GfxSet::InGame));
 
+        // Gameplay camera drivers. In `EditorMode::Editor` the editor's fly
+        // camera owns the camera transform and the viewport is an egui tab,
+        // so the player-follow, free-cam, zoom and full-window sprite sizing
+        // all step aside (see `editor::camera`).
+        app.add_systems(
+            Update,
+            (resize_render_texture_sprite, adjust_camera_distance)
+                .in_set(GfxSet::InGame)
+                .run_if(in_state(EditorMode::Gameplay)),
+        );
         app.add_systems(
             Update,
             (handle_camera_input, apply_freecam_movement, camera_follow)
                 .chain()
-                .in_set(GfxSet::Running),
+                .in_set(GfxSet::Running)
+                .run_if(in_state(EditorMode::Gameplay)),
         );
 
         app.add_plugins(MaterialPlugin::<

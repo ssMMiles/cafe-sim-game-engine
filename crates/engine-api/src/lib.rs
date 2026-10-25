@@ -24,7 +24,7 @@ pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_l
 /// - 4: split registration out of setup ([`DynamicPlugin::register`]) so a
 ///   plugin's scripts stay visible to the editor while its gameplay systems
 ///   are stopped. Added `plugin_register` to the generated FFI surface.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 4;
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 5;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -423,14 +423,12 @@ pub struct UserSettings {
     pub movement_mode: MovementMode,
     pub mouse_sensitivity: f32,
     pub movement_speed: f32,
-    pub edit_mode: bool,
     pub outline_visible: bool,
     pub camera_view: CameraView,
     pub third_person_distance: f32,
     pub edge_detection_enabled: bool,
     pub edge_depth_sensitivity: f32,
     pub edge_normal_sensitivity: f32,
-    pub terrain_edit_mode: bool,
     pub brush_radius: f32,
     pub physics_debug: bool,
     pub use_lightmap: bool,
@@ -443,14 +441,12 @@ impl Default for UserSettings {
             movement_mode: MovementMode::default(),
             mouse_sensitivity: 0.002,
             movement_speed: 0.5,
-            edit_mode: false,
             outline_visible: false,
             camera_view: CameraView::FirstPerson,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
             edge_depth_sensitivity: 2.0,
             edge_normal_sensitivity: 0.1,
-            terrain_edit_mode: false,
             brush_radius: 5.0,
             physics_debug: false,
             use_lightmap: true,
@@ -484,11 +480,6 @@ impl UserSettings {
                 current_value: self.movement_mode.to_string(),
             },
             SettingInfo {
-                name: "Edit Mode",
-                keybind: "Shift+E",
-                current_value: if self.edit_mode { "ON" } else { "OFF" }.to_string(),
-            },
-            SettingInfo {
                 name: "Mouse Sensitivity",
                 keybind: "",
                 current_value: format!("{:.3}", self.mouse_sensitivity),
@@ -512,11 +503,6 @@ impl UserSettings {
                     "OFF"
                 }
                 .to_string(),
-            },
-            SettingInfo {
-                name: "Terrain Edit",
-                keybind: "Shift+G",
-                current_value: if self.terrain_edit_mode { "ON" } else { "OFF" }.to_string(),
             },
             SettingInfo {
                 name: "Physics Debug",
@@ -553,19 +539,8 @@ impl UserSettings {
         };
     }
 
-    pub fn toggle_edit_mode(&mut self) {
-        self.edit_mode = !self.edit_mode;
-    }
-
     pub fn toggle_edge_detection(&mut self) {
         self.edge_detection_enabled = !self.edge_detection_enabled;
-    }
-
-    pub fn toggle_terrain_edit_mode(&mut self) {
-        self.terrain_edit_mode = !self.terrain_edit_mode;
-        if self.terrain_edit_mode {
-            self.edit_mode = false;
-        }
     }
 
     pub fn toggle_physics_debug(&mut self) {

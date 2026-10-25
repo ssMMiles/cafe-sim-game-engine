@@ -1,29 +1,33 @@
 //! Grab (`R`) — move, rotate, and rescale an entity that is already placed.
 //!
-//! Placement could only ever create new entities; the only edit available to
-//! an existing one was Delete. Grabbing lifts a placed entity back into the
-//! placement preview, so the normal placement controls (crosshair position,
-//! Shift+Scroll scale, Alt+Scroll rotate) apply to it, and drops it again
-//! under its **original id** — which matters, because the id keys the entity's
-//! baked lightmap files and any `PropValue::EntityRef` pointing at it.
+//! Grabbing lifts a placed entity back into the placement preview, so the
+//! normal placement controls (cursor position, Shift+Scroll scale, Alt+Scroll
+//! rotate) apply to it, and drops it again under its **original id** — which
+//! matters, because the id keys the entity's baked lightmap files and any
+//! `PropValue::EntityRef` pointing at it.
+//!
+//! `R` works from the Select tool too: it switches to Place for the duration
+//! of the carry and switches back on drop or cancel.
 //!
 //! The carried entity does not exist in the world while held: it lives in
 //! [`GrabbedEntity`] as a [`PlacedEntityRecord`], so every exit path has to
 //! put it back or it is silently lost. See [`release_grab`].
 //!
-//! Known limitation: position follows the crosshair while carrying, so there
-//! is no way to rotate an object strictly in place. A transform gizmo is the
-//! eventual answer.
+//! Known limitation: position follows the cursor while carrying, so there is
+//! no way to rotate an object strictly in place. The inspector's transform
+//! fields (Phase 3) and later a gizmo are the answer.
 
 use bevy::prelude::*;
 use engine_api::ScriptBindings;
 
-use crate::editor::object_placement::{PlacedPicker, PlacementPreview};
+use crate::editor::object_placement::PlacementPreview;
+use crate::editor::picking::{PlacedPicker, ViewportInput};
+use crate::editor::selection::Selection;
+use crate::editor::tool::EditorTool;
 use crate::game::world::objects::{
     PlacedEntityRecord, PlacedObject, PlacedObjectRegistry, PlacementConfig, spawn_entity_record,
     world_pos_to_chunk,
 };
-use crate::settings::UserSettings;
 
 /// The entity currently held by the editor, if any.
 #[derive(Resource, Default)]
@@ -39,6 +43,8 @@ pub struct GrabPayload {
     /// Placement settings to put back when the grab ends, so picking up a
     /// rock doesn't silently change what the next fresh placement will be.
     previous_config: PlacementConfig,
+    /// Tool to return to when the grab ends.
+    previous_tool: EditorTool,
 }
 
 /// `R` grabs or releases; `Delete` destroys what is being carried.
@@ -47,20 +53,20 @@ pub struct GrabPayload {
 /// destroy/delete share `Delete`. As separate systems their relative order
 /// would be unconstrained, so a grab could be cancelled by the very press
 /// that created it.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_grab_keys(
     mut commands: Commands,
-    settings: Res<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
     asset_server: Res<AssetServer>,
+    tool: Res<State<EditorTool>>,
+    mut next_tool: ResMut<NextState<EditorTool>>,
     mut grabbed: ResMut<GrabbedEntity>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut config: ResMut<PlacementConfig>,
+    mut selection: ResMut<Selection>,
     mut picker: PlacedPicker,
     placed_query: Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
 ) {
-    if !settings.edit_mode {
-        return;
-    }
     let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
 
     // Shift+R is the plugin hot-reload; don't eat it.
@@ -71,25 +77,34 @@ pub fn handle_grab_keys(
                 &asset_server,
                 &mut registry,
                 &mut config,
+                Some(&mut next_tool),
+                &mut selection,
                 &mut grabbed,
                 "Grab cancelled",
             );
         } else {
-            grab_hovered(
+            // Prefer what the cursor is on; fall back to the selection so `R`
+            // also works right after picking something in the outliner.
+            let Some(root) = picker.pick().or(selection.primary) else {
+                return;
+            };
+            grab_entity(
+                root,
                 &mut commands,
                 &mut grabbed,
                 &mut registry,
                 &mut config,
-                &mut picker,
+                *tool.get(),
+                &mut next_tool,
                 &placed_query,
             );
         }
         return;
     }
 
-    // Destroying the carried entity. `delete_hovered_object` is ordered
-    // before this and bails while anything is carried, so Delete can't both
-    // destroy the carried entity and delete whatever is behind it.
+    // Destroying the carried entity. `delete_selected` bails while anything is
+    // carried, so Delete can't both destroy the carried entity and delete the
+    // selection.
     if input.just_pressed(KeyCode::Delete)
         && let Some(payload) = grabbed.0.take()
     {
@@ -98,25 +113,34 @@ pub fn handle_grab_keys(
             payload.record.kind.label(),
             payload.record.id
         );
-        restore_config(&mut config, payload.previous_config);
+        finish_grab(
+            &mut config,
+            Some(&mut next_tool),
+            payload.previous_config,
+            payload.previous_tool,
+        );
     }
 }
 
-/// Lift the placed entity under the crosshair into the preview.
-fn grab_hovered(
+/// Lift a placed entity into the preview.
+#[allow(clippy::too_many_arguments)]
+fn grab_entity(
+    root: Entity,
     commands: &mut Commands,
     grabbed: &mut GrabbedEntity,
     registry: &mut PlacedObjectRegistry,
     config: &mut PlacementConfig,
-    picker: &mut PlacedPicker,
+    current_tool: EditorTool,
+    next_tool: &mut NextState<EditorTool>,
     placed_query: &Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
 ) {
-    let Some(root) = picker.pick() else {
-        return;
-    };
     let Ok((obj, transform, bindings)) = placed_query.get(root) else {
         return;
     };
+    if obj.kind.is_group() {
+        info!("Groups move through the inspector's transform fields, not grab");
+        return;
+    }
 
     let record = obj.to_record(transform, bindings);
     let origin_chunk = obj.chunk;
@@ -127,7 +151,7 @@ fn grab_hovered(
 
     // Point the preview at what we just picked up. This is a real change, so
     // `rebuild_preview_on_config_change` respawns the preview with the
-    // grabbed mesh — which is exactly what we want under the crosshair.
+    // grabbed mesh — which is exactly what we want under the cursor.
     let previous_config = config.clone();
     config.kind = record.kind.clone();
     config.scale = Vec3::from(record.scale);
@@ -135,6 +159,10 @@ fn grab_hovered(
     // Stamp mode must not fire on drop: the entity already carries its own
     // bindings, and stamping would duplicate them.
     config.stamp_script = None;
+
+    if current_tool != EditorTool::Place {
+        next_tool.set(EditorTool::Place);
+    }
 
     info!(
         "Grabbed placed {} id={} from chunk {origin_chunk:?}",
@@ -146,23 +174,27 @@ fn grab_hovered(
         record,
         origin_chunk,
         previous_config,
+        previous_tool: current_tool,
     });
 }
 
 /// LMB drops the carried entity at the preview's transform.
 ///
-/// Ordered before `handle_edit_mode_click` and clears the press, so the same
+/// Ordered before `handle_place_click` and clears the click, so the same
 /// click cannot also place a fresh entity on top of the one just dropped.
+#[allow(clippy::too_many_arguments)]
 pub fn place_grabbed_object(
     mut commands: Commands,
-    mut mouse_input: ResMut<ButtonInput<MouseButton>>,
+    mut viewport: ResMut<ViewportInput>,
     mut grabbed: ResMut<GrabbedEntity>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut config: ResMut<PlacementConfig>,
+    mut next_tool: ResMut<NextState<EditorTool>>,
+    mut selection: ResMut<Selection>,
     asset_server: Res<AssetServer>,
     preview_query: Query<(&Transform, &Visibility), With<PlacementPreview>>,
 ) {
-    if grabbed.0.is_none() || !mouse_input.just_pressed(MouseButton::Left) {
+    if grabbed.0.is_none() || viewport.clicked_px.is_none() {
         return;
     }
 
@@ -175,7 +207,7 @@ pub fn place_grabbed_object(
         return;
     }
 
-    mouse_input.clear_just_pressed(MouseButton::Left);
+    viewport.clicked_px = None;
 
     let Some(payload) = grabbed.0.take() else {
         return;
@@ -190,9 +222,10 @@ pub fn place_grabbed_object(
         preview_transform.translation.x,
         preview_transform.translation.z,
     );
-    spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
+    let entity = spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
     registry.dirty_chunks.insert(chunk);
     registry.dirty_chunks.insert(payload.origin_chunk);
+    selection.primary = Some(entity);
 
     info!(
         "Dropped placed {} id={} into chunk {chunk:?}",
@@ -200,41 +233,27 @@ pub fn place_grabbed_object(
         record.id
     );
 
-    restore_config(&mut config, payload.previous_config);
-}
-
-/// Put a carried entity back when edit mode is switched off.
-///
-/// Without this, toggling Shift+E (or anything that clears `edit_mode`) while
-/// holding an object would destroy it with no undo — the entity exists only
-/// inside [`GrabbedEntity`] while carried.
-pub fn release_grab_on_edit_mode_exit(
-    mut commands: Commands,
-    settings: Res<UserSettings>,
-    mut grabbed: ResMut<GrabbedEntity>,
-    mut registry: ResMut<PlacedObjectRegistry>,
-    mut config: ResMut<PlacementConfig>,
-    asset_server: Res<AssetServer>,
-) {
-    if settings.edit_mode || grabbed.0.is_none() {
-        return;
-    }
-    restore_grabbed(
-        &mut commands,
-        &asset_server,
-        &mut registry,
+    finish_grab(
         &mut config,
-        &mut grabbed,
-        "Edit mode left while carrying an object",
+        Some(&mut next_tool),
+        payload.previous_config,
+        payload.previous_tool,
     );
 }
 
-/// `OnExit(EditorMode::Editor)` counterpart of the above.
+/// Put a carried entity back. `OnExit(EditorTool::Place)` and
+/// `OnExit(EditorMode::Editor)`: without this, switching tool or mode while
+/// holding an object would destroy it with no undo — the entity exists only
+/// inside [`GrabbedEntity`] while carried.
+///
+/// This runs *because* the tool or mode changed, so it must not fight that
+/// change by restoring the previous tool — hence no `NextState` here.
 pub fn release_grab(
     mut commands: Commands,
     mut grabbed: ResMut<GrabbedEntity>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut config: ResMut<PlacementConfig>,
+    mut selection: ResMut<Selection>,
     asset_server: Res<AssetServer>,
 ) {
     if grabbed.0.is_none() {
@@ -245,39 +264,62 @@ pub fn release_grab(
         &asset_server,
         &mut registry,
         &mut config,
+        None,
+        &mut selection,
         &mut grabbed,
-        "Editor mode left while carrying an object",
+        "Place tool left while carrying an object",
     );
 }
 
 /// Respawn the carried entity at its original transform and chunk.
+#[allow(clippy::too_many_arguments)]
 fn restore_grabbed(
     commands: &mut Commands,
     asset_server: &AssetServer,
     registry: &mut PlacedObjectRegistry,
     config: &mut PlacementConfig,
+    next_tool: Option<&mut NextState<EditorTool>>,
+    selection: &mut Selection,
     grabbed: &mut GrabbedEntity,
     reason: &str,
 ) {
     let Some(payload) = grabbed.0.take() else {
         return;
     };
-    spawn_entity_record(
+    let entity = spawn_entity_record(
         commands,
         asset_server,
         registry,
         payload.origin_chunk,
         &payload.record,
     );
+    selection.primary = Some(entity);
     info!(
         "{reason}: restored {} id={} to chunk {:?}",
         payload.record.kind.label(),
         payload.record.id,
         payload.origin_chunk
     );
-    restore_config(config, payload.previous_config);
+    finish_grab(
+        config,
+        next_tool,
+        payload.previous_config,
+        payload.previous_tool,
+    );
 }
 
-fn restore_config(config: &mut PlacementConfig, previous: PlacementConfig) {
-    *config = previous;
+/// `next_tool` is `None` when the grab is ending because the tool already
+/// changed underneath it.
+fn finish_grab(
+    config: &mut PlacementConfig,
+    next_tool: Option<&mut NextState<EditorTool>>,
+    previous_config: PlacementConfig,
+    previous_tool: EditorTool,
+) {
+    *config = previous_config;
+    if let Some(next_tool) = next_tool
+        && previous_tool != EditorTool::Place
+    {
+        next_tool.set(previous_tool);
+    }
 }

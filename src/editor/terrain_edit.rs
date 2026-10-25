@@ -1,3 +1,8 @@
+//! Terrain tool: sculpt the heightmap under the cursor.
+//!
+//! LMB raises, Ctrl+LMB lowers (RMB is the editor's look-drag). The brush
+//! follows [`EditorRay`], so it lands wherever the cursor is on the viewport.
+
 use std::collections::HashSet;
 
 use bevy::{
@@ -7,18 +12,26 @@ use bevy::{
     prelude::*,
 };
 
-use crate::game::{
-    gfx::camera::PlayerCamera,
-    world::terrain::{
-        CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE, TerrainChunk,
-        mesh::{LOD_LEVELS, generate_lod_mesh},
-        storage::TerrainChunkRegistry,
-    },
+use crate::editor::picking::{EditorRay, ViewportInput};
+use crate::game::world::terrain::{
+    CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE, TerrainChunk,
+    mesh::{LOD_LEVELS, generate_lod_mesh},
+    storage::TerrainChunkRegistry,
 };
 use crate::settings::UserSettings;
 
-/// Height change per second at falloff=1, in pre-scaled world units.
-const BRUSH_STRENGTH: f32 = 50.0;
+/// Brush parameters that don't live on `UserSettings`.
+#[derive(Resource, Debug)]
+pub struct BrushSettings {
+    /// Height change per second at falloff=1, in pre-scaled world units.
+    pub strength: f32,
+}
+
+impl Default for BrushSettings {
+    fn default() -> Self {
+        Self { strength: 50.0 }
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct TerrainBrushHit {
@@ -27,25 +40,11 @@ pub struct TerrainBrushHit {
     pub was_painting: bool,
 }
 
-pub fn toggle_terrain_edit_mode(
-    mut settings: ResMut<UserSettings>,
-    input: Res<ButtonInput<KeyCode>>,
-) {
-    if input.just_pressed(KeyCode::KeyG)
-        && (input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight))
-    {
-        settings.toggle_terrain_edit_mode();
-    }
-}
-
 pub fn adjust_brush_size(
     mut settings: ResMut<UserSettings>,
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
 ) {
-    if !settings.terrain_edit_mode {
-        return;
-    }
     let dt = time.delta_secs();
     if input.pressed(KeyCode::BracketLeft) {
         settings.brush_radius = (settings.brush_radius - 10.0 * dt).max(1.0);
@@ -56,26 +55,15 @@ pub fn adjust_brush_size(
 }
 
 pub fn raycast_terrain_hit(
-    settings: Res<UserSettings>,
-    camera_query: Query<&Transform, With<PlayerCamera>>,
+    ray: Res<EditorRay>,
     terrain_chunk_filter: Query<(), With<TerrainChunk>>,
     mut raycast: MeshRayCast,
     mut brush_hit: ResMut<TerrainBrushHit>,
 ) {
-    if !settings.terrain_edit_mode {
-        brush_hit.hit = None;
-        return;
-    }
-
-    let Ok(camera_transform) = camera_query.single() else {
+    let Some(ray) = ray.0 else {
         brush_hit.hit = None;
         return;
     };
-
-    let ray = Ray3d::new(
-        camera_transform.translation,
-        Dir3::new(camera_transform.forward().as_vec3()).unwrap(),
-    );
 
     let filter = |entity: Entity| terrain_chunk_filter.contains(entity);
     let hits = raycast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&filter));
@@ -116,7 +104,7 @@ pub fn update_brush_preview(
         return;
     };
 
-    match brush_hit.hit.filter(|_| settings.terrain_edit_mode) {
+    match brush_hit.hit {
         Some(hit) => {
             *visibility = Visibility::Visible;
             transform.translation = hit + Vec3::Y * 0.05;
@@ -128,20 +116,36 @@ pub fn update_brush_preview(
     }
 }
 
-/// Hard teardown for `OnExit(EditorMode::Editor)` — despawn the brush preview
-/// disc so it doesn't linger in gameplay.
+/// Despawn the brush preview disc — `OnExit(EditorTool::Terrain)` and
+/// `OnExit(EditorMode::Editor)`.
 pub fn teardown_terrain_brush_preview(
     mut commands: Commands,
     preview_query: Query<Entity, With<BrushPreviewMarker>>,
+    mut brush_hit: ResMut<TerrainBrushHit>,
 ) {
+    brush_hit.hit = None;
     for entity in preview_query.iter() {
         commands.entity(entity).despawn();
     }
 }
 
+/// Which way the brush is pushing this frame, if the button is down over the
+/// viewport. Ctrl lowers; plain LMB raises.
+fn brush_sign(mouse: &ButtonInput<MouseButton>, keys: &ButtonInput<KeyCode>) -> Option<f32> {
+    if !mouse.pressed(MouseButton::Left) {
+        return None;
+    }
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    Some(if ctrl { -1.0 } else { 1.0 })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn apply_terrain_brush(
     mouse_input: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    viewport: Res<ViewportInput>,
     settings: Res<UserSettings>,
+    brush: Res<BrushSettings>,
     mut brush_hit: ResMut<TerrainBrushHit>,
     heightmap: Option<ResMut<HeightmapData>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -149,14 +153,15 @@ pub fn apply_terrain_brush(
     mut registry: Option<ResMut<TerrainChunkRegistry>>,
     time: Res<Time>,
 ) {
-    let raise = mouse_input.pressed(MouseButton::Left);
-    let lower = mouse_input.pressed(MouseButton::Right);
     let Some(hit_point) = brush_hit.hit else {
         return;
     };
-    if !settings.terrain_edit_mode || (!raise && !lower) {
+    if !viewport.pointer_free() {
         return;
     }
+    let Some(sign) = brush_sign(&mouse_input, &keys) else {
+        return;
+    };
 
     let Some(mut heightmap) = heightmap else {
         return;
@@ -164,7 +169,6 @@ pub fn apply_terrain_brush(
 
     let radius = settings.brush_radius;
     let dt = time.delta_secs();
-    let sign = if raise { 1.0_f32 } else { -1.0 };
 
     let center_tx = (hit_point.x / TILE_SIZE.0) as i32;
     let center_ty = (hit_point.z / TILE_SIZE.1) as i32;
@@ -185,7 +189,7 @@ pub fn apply_terrain_brush(
             }
 
             let falloff = 1.0 - dist / radius;
-            let delta = BRUSH_STRENGTH * falloff * dt * sign;
+            let delta = brush.strength * falloff * dt * sign;
             let current = heightmap.get_tile(tx, ty);
             let new_h = (current + delta).clamp(0.0, HEIGHT_SCALE);
             heightmap.set_tile(tx, ty, new_h);
@@ -224,26 +228,26 @@ pub fn apply_terrain_brush(
         }
 
         if let Some(ref mut reg) = registry {
-            if let Some(&entity) = reg.loaded_chunks.get(&(cx, cy)) {
-                if let Ok((chunk, mut aabb)) = chunk_query.get_mut(entity) {
-                    let (new_mesh, new_aabb) = generate_lod_mesh(
-                        |gx, gy| {
-                            let lx = (gx - start_x) as usize;
-                            let ly = (gy - start_y) as usize;
-                            heights[ly * CHUNK_SIZE + lx]
-                        },
-                        start_x,
-                        start_y,
-                        CHUNK_SIZE,
-                        CHUNK_SIZE,
-                        TILE_SIZE,
-                        0,
-                    );
-                    if let Some(m) = meshes.get_mut(&chunk.lod_meshes[0]) {
-                        *m = new_mesh;
-                    }
-                    *aabb = new_aabb;
+            if let Some(&entity) = reg.loaded_chunks.get(&(cx, cy))
+                && let Ok((chunk, mut aabb)) = chunk_query.get_mut(entity)
+            {
+                let (new_mesh, new_aabb) = generate_lod_mesh(
+                    |gx, gy| {
+                        let lx = (gx - start_x) as usize;
+                        let ly = (gy - start_y) as usize;
+                        heights[ly * CHUNK_SIZE + lx]
+                    },
+                    start_x,
+                    start_y,
+                    CHUNK_SIZE,
+                    CHUNK_SIZE,
+                    TILE_SIZE,
+                    0,
+                );
+                if let Some(m) = meshes.get_mut(&chunk.lod_meshes[0]) {
+                    *m = new_mesh;
                 }
+                *aabb = new_aabb;
             }
             reg.dirty_chunks.insert((cx, cy));
         }
@@ -261,8 +265,7 @@ pub fn finalize_terrain_lod(
     chunk_query: Query<&TerrainChunk>,
     registry: Option<Res<TerrainChunkRegistry>>,
 ) {
-    let painting =
-        mouse_input.pressed(MouseButton::Left) || mouse_input.pressed(MouseButton::Right);
+    let painting = mouse_input.pressed(MouseButton::Left);
 
     if painting || !brush_hit.was_painting || brush_hit.pending_full_lod.is_empty() {
         if !painting {

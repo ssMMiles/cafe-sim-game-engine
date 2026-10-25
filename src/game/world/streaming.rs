@@ -32,7 +32,7 @@ use bevy::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::game::simulation::Player;
+use crate::game::WorldFocus;
 
 use super::{
     baking::lightmap::terrain_lightmap_path,
@@ -146,7 +146,7 @@ pub struct StreamingState {
 /// - Despawns chunks that have moved beyond the unload radius (and evicts their tiles).
 /// - Cancels background compute tasks for chunks that go out of range.
 pub fn update_streaming_ring(
-    player_query: Query<&Transform, With<Player>>,
+    focus: Res<WorldFocus>,
     terrain_world: Option<Res<TerrainWorld>>,
     config: Res<ChunkStreamingConfig>,
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] asset_server: Res<AssetServer>,
@@ -166,12 +166,8 @@ pub fn update_streaming_ring(
         return;
     };
 
-    let Ok(player_transform) = player_query.single() else {
-        return;
-    };
-
-    let player_pos = player_transform.translation;
-    let (player_cx, player_cy) = world_pos_to_chunk(player_pos.x, player_pos.z);
+    let focus_pos = focus.0;
+    let (player_cx, player_cy) = world_pos_to_chunk(focus_pos.x, focus_pos.z);
 
     let metadata = &terrain_world.metadata;
 

@@ -79,7 +79,7 @@ pub struct WorldMetadata {
 /// baked (see `baking::lightmap`), so these are bake inputs, not real-time
 /// light parameters. The sun orientation and position defaults match what
 /// `game::world::setup` historically hard-coded.
-#[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+#[derive(Archive, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct EnvironmentData {
     /// Sun orientation as a quaternion, xyzw. Drives the `BakedSun` entity's
     /// transform, which the lightmap baker reads for its sun direction.

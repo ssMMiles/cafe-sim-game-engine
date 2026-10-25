@@ -68,6 +68,11 @@ log = "0.4.29"
 wasm-bindgen = "0.2.111"
 
 avian3d = { version = "0.5" }
+# Editor chrome (docked viewport, outliner, inspector). 0.39 is the Bevy 0.18
+# line; egui_dock 0.18 is the only line on the same egui (0.33). See
+# docs/EDITOR_UI_DESIGN.md §1.1.
+bevy_egui = "0.39"
+egui_dock = "0.18"
 rayon = "1"
 bytemuck = { version = "1", features = ["derive"] }
 # HDR lightmaps: OpenEXR (f16 RGB, ZIP) on disk, Rgba16Float on the GPU.

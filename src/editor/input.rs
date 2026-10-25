@@ -1,25 +1,37 @@
-//! Shared scroll-wheel handling for the editor.
+//! Shared input arbitration for the editor.
 //!
-//! The wheel means different things depending on the held modifier, and four
-//! separate systems consume it:
+//! Two questions every editor binding has to answer before acting:
+//!
+//! 1. **Does egui want the keyboard?** If a text field has focus, `R`, `K`,
+//!    `Delete`, `Shift+S`… must not fire. [`keyboard_free`] is the run
+//!    condition for every key binding (F1 and Escape excepted).
+//! 2. **Is the pointer on the viewport?** bevy_egui's own "wants pointer"
+//!    helpers are useless once the whole window is a dock — the pointer is
+//!    always over *some* egui area — so mouse buttons and the wheel are gated
+//!    on the viewport tab's own hover state instead
+//!    (`picking::viewport_pointer_free`).
+//!
+//! The wheel also means different things depending on the held modifier:
 //!
 //! | Modifier   | Action |
 //! |------------|--------|
-//! | none       | cycle the open panel's selection |
+//! | none       | cycle the open strip's selection, else dolly the camera |
 //! | Shift      | adjust placement scale |
 //! | Alt/Option | adjust placement rotation |
 //!
-//! Each consumer has its own `MessageReader`, so they all see every event and
-//! must agree on which modifier is theirs — otherwise one notch of
-//! Alt+Scroll would rotate the preview *and* cycle the catalog. Centralising
-//! the modifier test here is what keeps them in agreement.
-//!
-//! Rotation is on Alt rather than Ctrl because the freecam descends on
-//! `ControlLeft` (see `game::gfx::camera`): Ctrl+Scroll in freecam would sink
-//! the camera through the floor while rotating.
+//! Every consumer reads the same [`ViewportInput::scroll`] value, so they
+//! must agree on which modifier is theirs — centralising the modifier test
+//! here is what keeps them in agreement. Rotation is on Alt rather than Ctrl
+//! because Ctrl+LMB lowers terrain.
 
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy_egui::input::EguiWantsInput;
+
+use super::picking::ViewportInput;
+
+/// egui points per wheel notch. egui expands a line-unit wheel event by its
+/// `line_scroll_speed`; this undoes that so consumers think in notches again.
+const POINTS_PER_NOTCH: f32 = 50.0;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum ScrollMod {
@@ -40,17 +52,12 @@ pub fn scroll_modifier(input: &ButtonInput<KeyCode>) -> ScrollMod {
     }
 }
 
-/// Sum this frame's wheel events into a single delta in "notches".
-///
-/// `pixel_divisor` converts trackpad pixel deltas to notch-equivalents; it
-/// differs per call site (the panels were tuned at 40.0, placement at 53.0),
-/// so it stays a parameter rather than becoming a constant.
-pub fn scroll_delta(events: &mut MessageReader<MouseWheel>, pixel_divisor: f32) -> f32 {
-    events
-        .read()
-        .map(|event| match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / pixel_divisor,
-        })
-        .sum()
+/// This frame's wheel movement over the viewport, in notches (positive = up).
+pub fn scroll_notches(viewport: &ViewportInput) -> f32 {
+    viewport.scroll.y / POINTS_PER_NOTCH
+}
+
+/// Run condition: no egui text field is taking keystrokes.
+pub fn keyboard_free(wants: Option<Res<EguiWantsInput>>) -> bool {
+    wants.is_none_or(|w| !w.wants_any_keyboard_input())
 }

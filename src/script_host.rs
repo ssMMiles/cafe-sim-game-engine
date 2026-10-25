@@ -73,6 +73,11 @@ pub struct NeedsHydration;
 #[derive(Resource, Default)]
 pub struct LoadedPluginIds(pub Vec<String>);
 
+/// Set by the editor's Plugins ▸ Reload all; equivalent to Shift+R. Cleared
+/// when the reload runs.
+#[derive(Resource, Default)]
+pub struct ReloadRequested(pub bool);
+
 /// Records which components a plugin's hydrate fn actually inserted, so the
 /// host can remove exactly those again when the plugin goes away.
 #[cfg(not(target_family = "wasm"))]
@@ -114,6 +119,7 @@ impl Plugin for ScriptHostPlugin {
         // The registry exists on every platform so engine-side code (and the
         // editor) can query it unconditionally; on wasm it just stays empty.
         app.init_resource::<ScriptRegistry>();
+        app.init_resource::<ReloadRequested>();
         app.init_resource::<LoadedPluginIds>();
 
         #[cfg(not(target_family = "wasm"))]
@@ -859,9 +865,13 @@ fn refresh_loaded_plugin_ids(world: &mut World) {
 #[cfg(not(target_family = "wasm"))]
 fn run_scripts(world: &mut World) {
     let manual_reload = {
-        let input = world.resource::<ButtonInput<KeyCode>>();
-        let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-        shift && input.just_pressed(KeyCode::KeyR)
+        let key = {
+            let input = world.resource::<ButtonInput<KeyCode>>();
+            let shift = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
+            shift && input.just_pressed(KeyCode::KeyR)
+        };
+        let requested = std::mem::take(&mut world.resource_mut::<ReloadRequested>().0);
+        key || requested
     };
 
     sync_plugins(world, manual_reload);

@@ -54,17 +54,6 @@ impl InteractiveStyle {
             pressed_border: theme.border_strong,
         }
     }
-
-    pub fn slider_handle(theme: &UiTheme) -> Self {
-        Self {
-            idle_bg: theme.primary,
-            hover_bg: theme.primary_hover,
-            pressed_bg: theme.primary_pressed,
-            idle_border: theme.border_strong,
-            hover_border: theme.text_white,
-            pressed_border: theme.text_white,
-        }
-    }
 }
 
 pub fn update_interactive_visuals(
@@ -100,24 +89,6 @@ pub trait UiExt {
         variant: ButtonVariant,
         theme: &UiTheme,
     ) -> Entity;
-    fn ui_slider<C: Component, L: Component, T: Component>(
-        &mut self,
-        label: &str,
-        value: f32,
-        min: f32,
-        max: f32,
-        action: C,
-        label_component: L,
-        track_component: T,
-        theme: &UiTheme,
-    ) -> Entity;
-}
-
-/// Calculates the left-percent position for a slider handle given a normalized value [0,1].
-fn handle_left_percent(normalized_value: f32, track_width: f32, handle_size: f32) -> f32 {
-    let usable_width = track_width - handle_size;
-    let handle_left = normalized_value * usable_width;
-    (handle_left / track_width) * 100.0
 }
 
 impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
@@ -171,91 +142,5 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
             TextColor(theme.text),
         ))
         .id()
-    }
-
-    fn ui_slider<C: Component, L: Component, T: Component>(
-        &mut self,
-        label: &str,
-        value: f32,
-        min: f32,
-        max: f32,
-        action: C,
-        label_component: L,
-        track_component: T,
-        theme: &UiTheme,
-    ) -> Entity {
-        let normalized_value = (value - min) / (max - min);
-        let handle_left = handle_left_percent(
-            normalized_value,
-            theme.slider_track_width,
-            theme.slider_handle_size,
-        );
-        let handle_style = InteractiveStyle::slider_handle(theme);
-
-        self.spawn((Node {
-            width: Val::Px(theme.slider_track_width),
-            height: Val::Px(60.0),
-            flex_direction: FlexDirection::Column,
-            margin: UiRect::bottom(Val::Px(theme.pad_md)),
-            ..default()
-        },))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new(format!("{}: {:.3}", label, value)),
-                    TextFont {
-                        font_size: theme.size_label,
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
-                    Node {
-                        margin: UiRect::bottom(Val::Px(theme.pad_sm)),
-                        ..default()
-                    },
-                    label_component,
-                ));
-
-                parent
-                    .spawn((Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(theme.slider_handle_size),
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },))
-                    .with_children(|slider_parent| {
-                        slider_parent.spawn((
-                            Button,
-                            Node {
-                                width: Val::Percent(100.0),
-                                height: Val::Px(theme.slider_track_height),
-                                border_radius: BorderRadius::all(Val::Px(
-                                    theme.slider_track_height * 0.5,
-                                )),
-                                ..default()
-                            },
-                            BackgroundColor(theme.bg_surface),
-                            track_component,
-                        ));
-
-                        slider_parent.spawn((
-                            Button,
-                            Node {
-                                width: Val::Px(theme.slider_handle_size),
-                                height: Val::Px(theme.slider_handle_size),
-                                position_type: PositionType::Absolute,
-                                left: Val::Percent(handle_left),
-                                border: UiRect::all(Val::Px(2.0)),
-                                border_radius: BorderRadius::all(Val::Px(
-                                    theme.slider_handle_size * 0.5,
-                                )),
-                                ..default()
-                            },
-                            BackgroundColor(handle_style.idle_bg),
-                            BorderColor::all(handle_style.idle_border),
-                            handle_style,
-                            action,
-                        ));
-                    });
-            })
-            .id()
     }
 }

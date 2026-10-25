@@ -219,6 +219,7 @@ mod tests {
                     chunk: (0, 0),
                     name: String::new(),
                     kind: PlacedKind::mesh("x.gltf"),
+                    parent: None,
                 },
                 root_tf,
             ))

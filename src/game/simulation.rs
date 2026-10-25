@@ -3,6 +3,7 @@ use bevy::window::CursorOptions;
 use bevy::{log, prelude::*};
 
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS};
+use crate::editor::EditorMode;
 use crate::game::gfx::camera::setup_camera;
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
@@ -16,12 +17,16 @@ pub fn setup(
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     mut cursor_options: Single<&mut CursorOptions>,
+    mode: Res<State<EditorMode>>,
 ) {
     log::info!("Setting up the simulation environment");
 
-    // Lock cursor to window for FPS-style controls
-    cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
-    cursor_options.visible = false;
+    // Gameplay is FPS-style; the editor keeps a free cursor (its own
+    // `OnEnter` hook frees it).
+    if *mode.get() == EditorMode::Gameplay {
+        cursor_options.grab_mode = bevy::window::CursorGrabMode::Locked;
+        cursor_options.visible = false;
+    }
 
     let mr_windmill: Handle<Scene> = asset_server.load("meshes/character/robotv2.gltf#Scene0");
 

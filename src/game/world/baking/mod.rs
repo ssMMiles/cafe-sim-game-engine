@@ -37,8 +37,8 @@ use bevy::{
 use std::sync::Arc;
 
 use crate::game::{
+    WorldFocus,
     gfx::toon_material::ToonMaterial,
-    simulation::Player,
     world::{
         objects::{CHUNK_WORLD_SIZE, PlacedObject, world_pos_to_chunk},
         terrain::{
@@ -372,7 +372,7 @@ fn run_bake(
     mut bake_messages: MessageReader<BakeMessage>,
     mut commands: Commands,
     config: Res<BakeConfig>,
-    player_query: Query<&Transform, With<Player>>,
+    focus: Res<WorldFocus>,
     heightmap: Option<Res<HeightmapData>>,
     terrain_world: Option<Res<TerrainWorld>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -409,11 +409,7 @@ fn run_bake(
         .collect();
     let light_count = lights.len();
     let lighting = BakeLighting::new(&terrain_world.metadata.environment, sun_dir, lights);
-    let player_pos = player_query
-        .single()
-        .map(|t| t.translation)
-        .unwrap_or(Vec3::ZERO);
-    let region = BakeRegion::around(player_pos, config.bake_radius);
+    let region = BakeRegion::around(focus.0, config.bake_radius);
 
     // One BVH over every static occluder a ray from inside the region could
     // reach: the sun ray's reach, or the longest light range if that's more.

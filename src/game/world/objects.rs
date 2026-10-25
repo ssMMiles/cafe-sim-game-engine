@@ -13,9 +13,11 @@
 //! # Format history
 //! - v2: `objects: Vec<PlacedObjectRecord>`, mesh instances only.
 //! - v3: `entities: Vec<PlacedEntityRecord>` with a `kind` and `scripts`.
+//! - v4: light `intensity` in lightmap units (same layout as v3).
+//! - v5: `parent: Option<u64>` for editor grouping, and `PlacedKind::Group`.
 //!
-//! v2 files are still read (see [`legacy`]) and upgraded in memory to v3; they
-//! are rewritten as v3 the next time the chunk is saved.
+//! Older files are still read (see [`legacy`]) and upgraded in memory; they
+//! are rewritten as the current version the next time the chunk is saved.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -40,8 +42,9 @@ const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 /// Version 3: records generalised from mesh-only `PlacedObjectRecord` to
 /// `PlacedEntityRecord` (kind + scripts). Version 4: light `intensity`
 /// reinterpreted from bevy photometric units into lightmap units for the
-/// baked lighting pipeline. Versions 2 and 3 are still readable.
-pub const CHUNK_OBJECTS_VERSION: u32 = 4;
+/// baked lighting pipeline. Version 5: `parent` (editor grouping) and the
+/// `Group` kind. Versions 2–4 are still readable.
+pub const CHUNK_OBJECTS_VERSION: u32 = 5;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
 pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
@@ -64,6 +67,11 @@ pub struct PlacedEntityRecord {
     pub scale: [f32; 3],
     pub kind: PlacedKind,
     pub scripts: Vec<ScriptBinding>,
+    /// Id of the [`PlacedKind::Group`] this entity is filed under in the
+    /// editor's outliner, if any. Purely organisational: no transform
+    /// parenting, and the entity streams with its own chunk regardless of
+    /// where the group lives (see `docs/EDITOR_UI_DESIGN.md` §7).
+    pub parent: Option<u64>,
 }
 
 impl PlacedEntityRecord {
@@ -78,11 +86,17 @@ impl PlacedEntityRecord {
             scale: transform.scale.into(),
             kind,
             scripts: Vec::new(),
+            parent: None,
         }
     }
 
     pub fn with_scripts(mut self, scripts: Vec<ScriptBinding>) -> Self {
         self.scripts = scripts;
+        self
+    }
+
+    pub fn with_parent(mut self, parent: Option<u64>) -> Self {
+        self.parent = parent;
         self
     }
 
@@ -134,6 +148,9 @@ pub enum PlacedKind {
     },
     /// Transform only — a spawn point or script anchor.
     Empty,
+    /// An outliner folder. Has a transform (moving it moves its members by
+    /// the same delta, as an editor operation) but no visual or physics.
+    Group,
 }
 
 impl PlacedKind {
@@ -177,6 +194,10 @@ impl PlacedKind {
         )
     }
 
+    pub fn is_group(&self) -> bool {
+        matches!(self, PlacedKind::Group)
+    }
+
     /// Short editor label for this kind.
     pub fn label(&self) -> &'static str {
         match self {
@@ -184,6 +205,7 @@ impl PlacedKind {
             PlacedKind::PointLight { .. } => "Point Light",
             PlacedKind::SpotLight { .. } => "Spot Light",
             PlacedKind::Empty => "Empty",
+            PlacedKind::Group => "Group",
         }
     }
 }
@@ -215,12 +237,56 @@ pub struct ChunkObjectsFile {
 // Legacy (v2) format
 // ============================================================================
 
-/// The v2 on-disk shape, retained so existing worlds keep loading. Parsed by
-/// [`parse_chunk_objects_from_bytes`] and upgraded to v3 in memory; never
-/// written.
+/// Older on-disk shapes, retained so existing worlds keep loading. Parsed by
+/// [`parse_chunk_objects_from_bytes`] and upgraded in memory; never written.
 pub mod legacy {
     use super::{ChunkObjectsFile, ColliderMode, PlacedEntityRecord, PlacedKind};
+    use engine_api::ScriptBinding;
     use rkyv::{Archive, Deserialize, Serialize};
+
+    /// v3/v4 record: no `parent`. (`PlacedKind` gained `Group` in v5, but as
+    /// an appended variant it reads old files unchanged.)
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct PlacedEntityRecordV4 {
+        pub id: u64,
+        pub name: String,
+        pub position: [f32; 3],
+        pub rotation: [f32; 4],
+        pub scale: [f32; 3],
+        pub kind: PlacedKind,
+        pub scripts: Vec<ScriptBinding>,
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct ChunkObjectsFileV4 {
+        pub version: u32,
+        pub chunk_x: i32,
+        pub chunk_y: i32,
+        pub entities: Vec<PlacedEntityRecordV4>,
+    }
+
+    /// v4 → v5: nothing was grouped yet.
+    pub fn upgrade_v4(old: ChunkObjectsFileV4) -> ChunkObjectsFile {
+        ChunkObjectsFile {
+            version: super::CHUNK_OBJECTS_VERSION,
+            chunk_x: old.chunk_x,
+            chunk_y: old.chunk_y,
+            entities: old
+                .entities
+                .into_iter()
+                .map(|e| PlacedEntityRecord {
+                    id: e.id,
+                    name: e.name,
+                    position: e.position,
+                    rotation: e.rotation,
+                    scale: e.scale,
+                    kind: e.kind,
+                    scripts: e.scripts,
+                    parent: None,
+                })
+                .collect(),
+        }
+    }
 
     #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
     pub struct PlacedObjectRecordV2 {
@@ -285,6 +351,7 @@ pub mod legacy {
                         collider: ColliderMode::Trimesh,
                     },
                     scripts: Vec::new(),
+                    parent: None,
                 })
                 .collect(),
         }
@@ -304,6 +371,9 @@ pub struct PlacedObject {
     pub chunk: (i32, i32),
     pub name: String,
     pub kind: PlacedKind,
+    /// Outliner group this entity is filed under (a `PlacedKind::Group`'s
+    /// id). Organisational only — see [`PlacedEntityRecord::parent`].
+    pub parent: Option<u64>,
 }
 
 impl PlacedObject {
@@ -326,6 +396,7 @@ impl PlacedObject {
             scale: transform.scale.into(),
             kind: self.kind.clone(),
             scripts: bindings.map(|b| b.0.clone()).unwrap_or_default(),
+            parent: self.parent,
         }
     }
 }
@@ -345,6 +416,12 @@ pub struct PlacedObjectRegistry {
 }
 
 impl PlacedObjectRegistry {
+    /// Schedule a chunk's `.objects` file to be rewritten on the next save.
+    /// Dirty chunks are also pinned in memory by streaming until then.
+    pub fn mark_dirty(&mut self, chunk: (i32, i32)) {
+        self.dirty_chunks.insert(chunk);
+    }
+
     pub fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -446,6 +523,7 @@ pub fn spawn_entity_record(
         chunk,
         name: record.name.clone(),
         kind: record.kind.clone(),
+        parent: record.parent,
     };
 
     let entity = match &record.kind {
@@ -492,7 +570,7 @@ pub fn spawn_entity_record(
         PlacedKind::PointLight { .. } | PlacedKind::SpotLight { .. } => {
             commands.spawn((GameEntity, placed, transform)).id()
         }
-        PlacedKind::Empty => commands
+        PlacedKind::Empty | PlacedKind::Group => commands
             .spawn((
                 GameEntity,
                 placed,
@@ -749,8 +827,9 @@ pub fn serialize_chunk_objects(file: &ChunkObjectsFile) -> Result<Vec<u8>, Stora
     Ok(out)
 }
 
-/// Parse a `ChunkObjectsFile` from raw bytes. Accepts v2 (upgraded in memory)
-/// and v3. Used by the async `ChunkObjectsLoader` and the OPFS load path.
+/// Parse a `ChunkObjectsFile` from raw bytes. Accepts v2–v4 (upgraded in
+/// memory) and the current version. Used by the async `ChunkObjectsLoader`
+/// and the OPFS load path.
 pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, StorageError> {
     use std::io::Read as StdRead;
     let mut cursor = std::io::Cursor::new(bytes);
@@ -764,7 +843,7 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != 2 && version != 3 && version != CHUNK_OBJECTS_VERSION {
+    if !(2..=CHUNK_OBJECTS_VERSION).contains(&version) {
         return Err(StorageError::VersionMismatch {
             expected: CHUNK_OBJECTS_VERSION,
             found: version,
@@ -798,16 +877,25 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
         return Ok(legacy::upgrade(old));
     }
 
+    // v3 shares v4's layout exactly — only the meaning of light `intensity`
+    // changed — so both parse with the v4 types; v3 is then fixed up.
+    if version == 3 || version == 4 {
+        let archived = rkyv::access::<legacy::ArchivedChunkObjectsFileV4, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::ChunkObjectsFileV4 =
+            rkyv::deserialize::<legacy::ChunkObjectsFileV4, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let mut file = legacy::upgrade_v4(old);
+        if version == 3 {
+            legacy::rescale_v3_light_intensities(&mut file);
+        }
+        return Ok(file);
+    }
+
     let archived = rkyv::access::<ArchivedChunkObjectsFile, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let mut file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-
-    // v3 shares v4's layout exactly — only the meaning of light `intensity`
-    // changed — so it parses with the current types and is fixed up here.
-    if version == 3 {
-        legacy::rescale_v3_light_intensities(&mut file);
-    }
     file.version = CHUNK_OBJECTS_VERSION;
 
     Ok(file)
@@ -848,6 +936,7 @@ mod tests {
                             },
                         ],
                     }],
+                    parent: Some(9),
                 },
                 PlacedEntityRecord {
                     id: 2,
@@ -862,8 +951,58 @@ mod tests {
                         shadows: false,
                     },
                     scripts: Vec::new(),
+                    parent: None,
+                },
+                PlacedEntityRecord {
+                    id: 9,
+                    name: "props".into(),
+                    position: [0.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0],
+                    kind: PlacedKind::Group,
+                    scripts: Vec::new(),
+                    parent: None,
                 },
             ],
+        }
+    }
+
+    /// Frame `payload` in the on-disk envelope with an arbitrary version tag.
+    fn frame<
+        T: for<'a> rkyv::Serialize<
+                rkyv::api::high::HighSerializer<
+                    rkyv::util::AlignedVec,
+                    rkyv::ser::allocator::ArenaHandle<'a>,
+                    RkyvError,
+                >,
+            >,
+    >(
+        payload: &T,
+        version: u32,
+        chunk: (i32, i32),
+    ) -> Vec<u8> {
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(payload).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CHUNK_OBJECTS_MAGIC);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&chunk.0.to_le_bytes());
+        bytes.extend_from_slice(&chunk.1.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        bytes
+    }
+
+    fn v4_light(id: u64, kind: PlacedKind) -> legacy::PlacedEntityRecordV4 {
+        legacy::PlacedEntityRecordV4 {
+            id,
+            name: "lamp".into(),
+            position: [0.0, 3.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            kind,
+            scripts: Vec::new(),
         }
     }
 
@@ -876,10 +1015,12 @@ mod tests {
         assert_eq!(loaded.version, CHUNK_OBJECTS_VERSION);
         assert_eq!(loaded.chunk_x, -3);
         assert_eq!(loaded.chunk_y, 7);
-        assert_eq!(loaded.entities.len(), 2);
+        assert_eq!(loaded.entities.len(), 3);
 
         let rock = &loaded.entities[0];
         assert_eq!(rock.name, "rock");
+        assert_eq!(rock.parent, Some(9), "grouping survives a round trip");
+        assert!(loaded.entities[2].kind.is_group());
         match &rock.kind {
             PlacedKind::Mesh {
                 asset_path,
@@ -963,48 +1104,39 @@ mod tests {
     }
 
     /// A v3 file has v4's exact byte layout — only the meaning of light
-    /// `intensity` changed — so it parses with the current types and gets its
+    /// `intensity` changed — so it parses with the v4 types and gets its
     /// photometric intensities swapped for lightmap-unit ones. Everything
     /// else, including the lights' colour, range and cone, is preserved.
     #[test]
     fn v3_light_intensities_are_rescaled_on_load() {
-        let mut file = sample_current();
-        file.entities.push(PlacedEntityRecord {
-            id: 50,
-            name: "lamp".into(),
-            position: [0.0, 3.0, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-            kind: PlacedKind::PointLight {
-                color: [1.0, 0.5, 0.25],
-                intensity: 100_000.0,
-                range: 9.0,
-                shadows: false,
-            },
-            scripts: Vec::new(),
-        });
-        file.entities.push(PlacedEntityRecord {
-            id: 51,
-            name: "spot".into(),
-            position: [1.0, 4.0, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-            kind: PlacedKind::SpotLight {
-                color: [0.2, 0.4, 0.6],
-                intensity: 250_000.0,
-                range: 11.0,
-                inner_angle: 0.3,
-                outer_angle: 0.6,
-                shadows: true,
-            },
-            scripts: Vec::new(),
-        });
-
-        // Same payload, stamped as v3.
-        let mut bytes = serialize_chunk_objects(&file).unwrap();
-        bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
-
-        let loaded = parse_chunk_objects_from_bytes(&bytes).unwrap();
+        let old = legacy::ChunkObjectsFileV4 {
+            version: 3,
+            chunk_x: 0,
+            chunk_y: 0,
+            entities: vec![
+                v4_light(
+                    50,
+                    PlacedKind::PointLight {
+                        color: [1.0, 0.5, 0.25],
+                        intensity: 100_000.0,
+                        range: 9.0,
+                        shadows: false,
+                    },
+                ),
+                v4_light(
+                    51,
+                    PlacedKind::SpotLight {
+                        color: [0.2, 0.4, 0.6],
+                        intensity: 250_000.0,
+                        range: 11.0,
+                        inner_angle: 0.3,
+                        outer_angle: 0.6,
+                        shadows: true,
+                    },
+                ),
+            ],
+        };
+        let loaded = parse_chunk_objects_from_bytes(&frame(&old, 3, (0, 0))).unwrap();
         assert_eq!(loaded.version, CHUNK_OBJECTS_VERSION);
 
         let point = &loaded.entities.iter().find(|e| e.id == 50).unwrap().kind;
@@ -1040,11 +1172,35 @@ mod tests {
             }
             other => panic!("expected a spot light, got {other:?}"),
         }
+    }
 
-        // Meshes are untouched by the rescale.
-        let rock = loaded.entities.iter().find(|e| e.id == 1).unwrap();
-        assert!(matches!(rock.kind, PlacedKind::Mesh { .. }));
-        assert_eq!(rock.scripts.len(), 1);
+    /// v4 is what every released world is saved as: it must load with its
+    /// light intensities untouched and no grouping.
+    #[test]
+    fn v4_file_upgrades_with_no_parents() {
+        let old = legacy::ChunkObjectsFileV4 {
+            version: 4,
+            chunk_x: 2,
+            chunk_y: 3,
+            entities: vec![v4_light(
+                50,
+                PlacedKind::PointLight {
+                    color: [1.0, 0.5, 0.25],
+                    intensity: 1.5,
+                    range: 9.0,
+                    shadows: false,
+                },
+            )],
+        };
+        let loaded = parse_chunk_objects_from_bytes(&frame(&old, 4, (2, 3))).unwrap();
+        assert_eq!(loaded.version, CHUNK_OBJECTS_VERSION);
+        let lamp = &loaded.entities[0];
+        assert_eq!(lamp.parent, None);
+        assert_eq!(lamp.name, "lamp");
+        match &lamp.kind {
+            PlacedKind::PointLight { intensity, .. } => assert_eq!(*intensity, 1.5),
+            other => panic!("expected a point light, got {other:?}"),
+        }
     }
 
     #[test]
