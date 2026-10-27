@@ -192,7 +192,7 @@ pub fn sync_coffee_menu_ui(
         .spawn_owned((
             Text::new("Drinks"),
             TextFont {
-                font_size: 28.0,
+                font_size: FontSize::Px(28.0),
                 ..default()
             },
             TextColor(text_color),
@@ -240,7 +240,7 @@ pub fn sync_coffee_menu_ui(
             .with_child_owned((
                 Text::new(drink.name),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: FontSize::Px(16.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -248,7 +248,7 @@ pub fn sync_coffee_menu_ui(
             .with_child_owned((
                 Text::new(format!("{:.0}s", drink.brew_secs)),
                 TextFont {
-                    font_size: 12.0,
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(dim_color),
@@ -350,7 +350,7 @@ pub fn manage_brew_popups(
                 BrewPopupText,
                 Text::new(""),
                 TextFont {
-                    font_size: POPUP_FONT_SIZE,
+                    font_size: FontSize::Px(POPUP_FONT_SIZE),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 1.0, 1.0)),

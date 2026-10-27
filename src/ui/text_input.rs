@@ -60,7 +60,7 @@ pub fn spawn_text_input<M: Component>(
             col.spawn((
                 Text::new(label),
                 TextFont {
-                    font_size: theme.size_label,
+                    font_size: FontSize::Px(theme.size_label),
                     ..default()
                 },
                 TextColor(theme.text_dim),
@@ -96,7 +96,7 @@ pub fn spawn_text_input<M: Component>(
                         initial
                     }),
                     TextFont {
-                        font_size: theme.size_body,
+                        font_size: FontSize::Px(theme.size_body),
                         ..default()
                     },
                     TextColor(if initial.is_empty() {

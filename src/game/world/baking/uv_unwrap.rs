@@ -50,7 +50,11 @@ impl LightmapUvCache {
         if let Some(&tri_count) = self.0.get(&id) {
             return Some(tri_count);
         }
-        let tri_count = generate_lightmap_uvs(meshes.get_mut(id)?)?;
+        // `Assets::get_mut` hands back an `AssetMut` guard in Bevy 0.19 (it
+        // only raises `AssetEvent::Modified` if the asset really changed), so
+        // bind it before taking the `&mut Mesh`.
+        let mut mesh = meshes.get_mut(id)?;
+        let tri_count = generate_lightmap_uvs(&mut mesh)?;
         self.0.insert(id, tri_count);
         Some(tri_count)
     }

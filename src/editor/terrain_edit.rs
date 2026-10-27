@@ -360,7 +360,7 @@ pub fn apply_terrain_brush(
                     TILE_SIZE,
                     0,
                 );
-                if let Some(m) = meshes.get_mut(&chunk.lod_meshes[0]) {
+                if let Some(mut m) = meshes.get_mut(&chunk.lod_meshes[0]) {
                     *m = new_mesh;
                 }
                 *aabb = new_aabb;
@@ -430,7 +430,7 @@ pub fn finalize_terrain_lod(
                 TILE_SIZE,
                 lod,
             );
-            if let Some(m) = meshes.get_mut(&chunk.lod_meshes[lod]) {
+            if let Some(mut m) = meshes.get_mut(&chunk.lod_meshes[lod]) {
                 *m = new_mesh;
             }
         }

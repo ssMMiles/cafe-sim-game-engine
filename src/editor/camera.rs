@@ -241,7 +241,7 @@ pub fn sync_render_target(
     if images
         .get(&target.0)
         .is_some_and(|img| img.size() != wanted)
-        && let Some(image) = images.get_mut(&target.0)
+        && let Some(mut image) = images.get_mut(&target.0)
     {
         log::debug!("Viewport render target -> {}x{}", wanted.x, wanted.y);
         image.resize(Extent3d {
@@ -269,7 +269,7 @@ pub fn restore_render_target(
     if images
         .get(&target.0)
         .is_some_and(|img| img.size() != gameplay_size)
-        && let Some(image) = images.get_mut(&target.0)
+        && let Some(mut image) = images.get_mut(&target.0)
     {
         image.resize(Extent3d {
             width: RENDER_TEXTURE_WIDTH,

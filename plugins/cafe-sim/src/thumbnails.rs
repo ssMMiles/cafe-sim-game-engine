@@ -81,7 +81,7 @@ pub fn init_thumbnails(world: &mut World) {
         world.spawn_owned((
             DirectionalLight {
                 illuminance: 6000.0,
-                shadows_enabled: false,
+                shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_translation(origin + Vec3::new(3.0, 4.0, 3.0))
@@ -91,9 +91,9 @@ pub fn init_thumbnails(world: &mut World) {
 
         // The piece itself — painted with the catalog color, unless the piece
         // opts out of tinting to keep its own model material.
-        let scene: Handle<Scene> = world.resource::<AssetServer>().load(piece.asset_path);
+        let scene: Handle<WorldAsset> = world.resource::<AssetServer>().load(piece.asset_path);
         let mut thumb = world.spawn_owned((
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             Transform::from_translation(origin).with_scale(Vec3::splat(PIECE_SCALE)),
             ThumbnailScene(layers),
         ));

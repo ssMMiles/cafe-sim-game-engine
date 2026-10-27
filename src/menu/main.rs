@@ -46,7 +46,7 @@ pub fn setup_main_menu(
                         "No projects found in `projects/`. Create a project.toml to get started.",
                     ),
                     TextFont {
-                        font_size: theme.size_body,
+                        font_size: FontSize::Px(theme.size_body),
                         ..default()
                     },
                     TextColor(theme.text_dim),

@@ -63,7 +63,7 @@ pub fn spawn_checkbox<M: Component>(
             row.spawn((
                 Text::new(label),
                 TextFont {
-                    font_size: theme.size_body,
+                    font_size: FontSize::Px(theme.size_body),
                     ..default()
                 },
                 TextColor(theme.text),

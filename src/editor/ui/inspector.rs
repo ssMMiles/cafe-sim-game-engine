@@ -550,7 +550,7 @@ fn script_section(
                 draft.dirty = true;
             }
             let popup_open = egui::Popup::is_any_open(ui.ctx());
-            if draft.dirty && !interacting && !popup_open && !ui.ctx().is_using_pointer() {
+            if draft.dirty && !interacting && !popup_open && !ui.ctx().egui_is_using_pointer() {
                 draft.dirty = false;
                 panels.script_edits.write(ScriptEdit::SetProps {
                     entity,

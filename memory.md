@@ -331,3 +331,45 @@ Both remaining phases landed together (terrain brush expansion + transform gizmo
   the same B0002 reason as `flying` (Panels holds `ResMut<BrushSettings>`).
   Terrain hint rows are per-mode (`Ctx::TerrainSculpt/Flatten/Smooth` + shared
   `Ctx::Terrain` for `[ / ]`).
+
+## Bevy 0.18 → 0.20 upgrade — October 2026
+
+Plan: `docs/BEVY_0_20_UPGRADE_PLAN.md` (§8 records what Phase 1 actually hit).
+**Phase 1 (Bevy 0.19) landed 2026-10-27. Phase 2 (Bevy 0.20) not started.**
+The engine is now on bevy 0.19.1 / avian3d 0.7.0 / bevy_egui 0.40.1 /
+egui_dock 0.19.1 / egui 0.34.3 / wgpu+naga 29. 76 tests pass, same as the
+pre-upgrade baseline; nothing visual has been verified yet.
+
+- **The `CLAUDE.md` egui pin note is stale.** It still says bevy_egui 0.39 /
+  egui_dock 0.18 are "the last lines for Bevy 0.18". They were, but the
+  ecosystem realigned: the 0.19 line is bevy_egui 0.40 + egui_dock 0.19 (egui
+  0.34), and the 0.20 line is bevy_egui 0.43 + egui_dock 0.21 (egui 0.36).
+  The invariant that still holds is that **bevy_egui and egui_dock must agree
+  on the egui minor** — that's the thing to check when bumping, not the
+  specific versions.
+- **The editor chrome is now driven from a root `egui::Ui`**, not the
+  `Context`. egui deleted the `Context`-based panel API: `Panel` (which
+  replaced `SidePanel`/`TopBottomPanel`) and `egui_dock::DockArea` take
+  `&mut Ui`. bevy_egui owns `begin_pass`/`end_pass`, so `Context::run_ui` is
+  unavailable; `editor_ui` builds `egui::Ui::new(ctx, id, UiBuilder::new())`
+  (which defaults to the background layer and `content_rect`) and threads it
+  through the panels and the dock. `Window` is unaffected — still `&Context`.
+- **Render passes are systems now, not graph nodes.** `post_process.rs` is a
+  system in `Core3dSystems::PostProcess` `.after(tonemapping)`;
+  `baking/gpu.rs`'s compute dispatch is a system in the surviving `RenderGraph`
+  *schedule* at `RenderGraphSystems::Render`. The model to copy when touching
+  either is `bevy_core_pipeline::fullscreen_material` — it is Bevy's own
+  reference implementation of a fullscreen post-process effect, and it already
+  shows the per-view pipeline specialization pattern.
+- **The edge-detection pipeline is specialized on `ExtractedView::target_format`**
+  via `Variants`/`Specializer`/`SpecializerKey`, replacing a hard-coded
+  `Rgba16Float` that silently assumed the camera keeps its `Hdr` component.
+  Don't reintroduce the constant.
+- **`#![recursion_limit = "256"]` on `game_engine_lib` and `engine_api` is
+  load-bearing**, not cosmetic: Bevy 0.19's `SystemParam`/auto-trait chains
+  overflow the default 128-deep trait solver, and that overflow is scheduled to
+  become a hard error.
+- Biggest remaining risk is Phase 2's naga_oil → **WESL** shader conversion (5
+  of 6 shaders), plus `Tonemapping::None` → `Tonemapping::Linear` (0.20 made
+  `None` a full passthrough that drops the negative-channel clamp — bad news
+  just upstream of a 5-band quantiser).

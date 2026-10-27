@@ -57,7 +57,7 @@ pub fn spawn_balance_hud(commands: &mut Commands, balance: &Balance) {
             BalanceText,
             Text::new(format_balance(balance.0)),
             TextFont {
-                font_size: 20.0,
+                font_size: FontSize::Px(20.0),
                 ..default()
             },
             TextColor(text_color),
@@ -117,7 +117,7 @@ fn spawn_change_popup(commands: &mut Commands, label: String, rgb: (f32, f32, f3
         .with_child_owned((
             Text::new(label),
             TextFont {
-                font_size: 18.0,
+                font_size: FontSize::Px(18.0),
                 ..default()
             },
             TextColor(Color::srgba(rgb.0, rgb.1, rgb.2, 1.0)),

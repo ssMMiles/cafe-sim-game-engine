@@ -111,7 +111,7 @@ fn sun_light(env: &terrain::storage::EnvironmentData) -> DirectionalLight {
         color: env.sun_color(),
         illuminance: env.sun_intensity * PBR_LUX_PER_UNIT,
         // Shadows are baked; this light never casts any.
-        shadows_enabled: false,
+        shadow_maps_enabled: false,
         ..default()
     }
 }

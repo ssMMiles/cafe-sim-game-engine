@@ -28,7 +28,7 @@ pub fn setup(
         cursor_options.visible = false;
     }
 
-    let mr_windmill: Handle<Scene> = asset_server.load("meshes/character/robotv2.gltf#Scene0");
+    let mr_windmill: Handle<WorldAsset> = asset_server.load("meshes/character/robotv2.gltf#Scene0");
 
     // Capsule length = cylindrical portion only (total height - 2 * radius)
     let capsule_cylinder_height = CHAR_HEIGHT - 2.0 * CHAR_RADIUS;
@@ -40,7 +40,7 @@ pub fn setup(
             Transform::default(),
             GlobalTransform::default(),
             Visibility::Inherited,
-            SceneRoot(mr_windmill),
+            WorldAssetRoot(mr_windmill),
             RigidBody::Kinematic,
         ))
         .id();

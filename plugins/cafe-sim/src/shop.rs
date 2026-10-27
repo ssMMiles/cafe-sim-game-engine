@@ -85,7 +85,7 @@ pub fn sync_shop_ui(
         .spawn_owned((
             Text::new("Shop"),
             TextFont {
-                font_size: 28.0,
+                font_size: FontSize::Px(28.0),
                 ..default()
             },
             TextColor(text_color),
@@ -133,7 +133,7 @@ pub fn sync_shop_ui(
             .with_child_owned((
                 Text::new(category.name),
                 TextFont {
-                    font_size: 18.0,
+                    font_size: FontSize::Px(18.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -209,7 +209,7 @@ pub fn sync_shop_ui(
                 .with_child_owned((
                     Text::new(piece.name),
                     TextFont {
-                        font_size: 14.0,
+                        font_size: FontSize::Px(14.0),
                         ..default()
                     },
                     TextColor(text_color),

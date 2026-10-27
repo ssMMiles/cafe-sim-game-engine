@@ -9,7 +9,7 @@ use bevy::{
     pbr::ExtendedMaterial,
     picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
     prelude::*,
-    scene::SceneInstanceReady,
+    world_serialization::WorldInstanceReady,
 };
 
 /// Overrides a specific material after scene load, replacing all mesh materials.
@@ -18,7 +18,7 @@ pub struct PendingMaterial {
     pub base_color: Color,
     pub metallic: f32,
     pub perceptual_roughness: f32,
-    pub alpha_mode: bevy::render::alpha::AlphaMode,
+    pub alpha_mode: bevy::material::AlphaMode,
 }
 
 /// Converts GLTF-embedded StandardMaterials to toon materials on scene load,
@@ -66,7 +66,7 @@ pub struct InteractableParent(pub Entity);
 pub struct HoveredOver;
 
 fn on_scene_ready(
-    trigger: On<SceneInstanceReady>,
+    trigger: On<WorldInstanceReady>,
     mut commands: Commands,
     entity_query: Query<(
         Option<&Interactable>,
@@ -126,7 +126,7 @@ fn on_scene_ready(
         commands.entity(entity).remove::<PendingMaterial>();
 
         log::info!(
-            "Applied material to entity {:?} via SceneInstanceReady",
+            "Applied material to entity {:?} via WorldInstanceReady",
             entity
         );
     }
@@ -376,7 +376,7 @@ pub fn show_interaction_text(
             InteractionText,
             Text2d::new("Boo!"),
             TextFont {
-                font_size: 60.0,
+                font_size: FontSize::Px(60.0),
                 ..default()
             },
             TextColor(Color::srgb(1.0, 1.0, 1.0)),

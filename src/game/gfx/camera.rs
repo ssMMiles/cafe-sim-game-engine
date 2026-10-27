@@ -9,7 +9,9 @@ use crate::{
 };
 use bevy::{
     anti_alias::fxaa::Fxaa,
-    camera::{RenderTarget, visibility::RenderLayers},
+    // `Hdr` moved from `bevy_render::view` to `bevy_camera` in Bevy 0.19 —
+    // it is a camera property, not a view one.
+    camera::{Hdr, RenderTarget, visibility::RenderLayers},
     core_pipeline::{
         prepass::{DepthPrepass, NormalPrepass},
         tonemapping::Tonemapping,
@@ -19,11 +21,8 @@ use bevy::{
     light::VolumetricFog,
     pbr::{DistanceFog, FogFalloff},
     prelude::*,
-    render::{
-        render_resource::{
-            Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-        },
-        view::Hdr,
+    render::render_resource::{
+        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     },
     window::PrimaryWindow,
 };

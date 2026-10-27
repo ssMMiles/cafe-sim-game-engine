@@ -25,13 +25,13 @@ NEVER guess or make assumptions about the codebase or external dependencies. Alw
 
 # Architecture Overview
 
-**engine** is a 3D terrain editor and exploration game built with Bevy 0.18 and Rust. It supports both native (Windows/Linux/Mac) and WASM (WebGPU) platforms.
+**engine** is a 3D terrain editor and exploration game built with Bevy 0.19 and Rust. It supports both native (Windows/Linux/Mac) and WASM (WebGPU) platforms.
 
 ## Tech Stack
 
-- **Bevy 0.18** - Game engine (ECS)
-- **bevy_egui 0.39 + egui_dock 0.18** - Editor chrome only (docked viewport, panels). **These are the last lines for Bevy 0.18**: bevy_egui 0.40+ targets Bevy 0.19/0.20 and egui_dock must stay on the same `egui` (0.33). Never add `egui` directly; use `bevy_egui::egui`
-- **avian3d 0.5** - Physics (kinematic character controller, colliders)
+- **Bevy 0.19** - Game engine (ECS)
+- **bevy_egui 0.40 + egui_dock 0.19** - Editor chrome only (docked viewport, panels). The invariant: **bevy_egui and egui_dock must agree on the `egui` minor** (0.34 on this line). Never add `egui` directly; use `bevy_egui::egui`. Mid-upgrade to Bevy 0.20 — see `docs/BEVY_0_20_UPGRADE_PLAN.md`
+- **avian3d 0.7** - Physics (kinematic character controller, colliders)
 - **rkyv 0.8** - Zero-copy serialization for terrain/object persistence
 - **wasm-bindgen / web-sys** - WASM platform support (OPFS storage)
 
@@ -255,7 +255,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 - **Shadow casting uses real triangles**, not convex hulls: `baking/bvh.rs` builds one flat BVH per bake over every toon-shaded mesh whose ancestry includes a `PlacedObject` or a `RigidBody::Static` (so editor props and plugin scenery like the cafe shell occlude, but a plugin's moving toon mesh does not). The CPU bakers traverse it and the GPU bake traverses the same uploaded nodes. Objects shadow themselves; acne is avoided by offsetting ray origins along the *face* normal, and terrain rays use two origins (0.5 up for the coarse DDA, at the surface for the exact triangle test). AO rays also test the BVH, which yields contact shadows under furniture. Bounce rays are absorbed by scenery but only terrain re-emits.
 - Volumetric fog + distance fog for atmosphere; sky dome follows camera
 
-## Physics (avian3d 0.5)
+## Physics (avian3d 0.7)
 
 - Player: `RigidBody::Kinematic` + capsule collider (radius=0.3, cylinder_height from CHAR_HEIGHT=1.5)
 - Ground detection: heightmap sampling + shape cast downward

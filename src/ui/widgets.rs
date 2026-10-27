@@ -96,7 +96,7 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
         self.spawn((
             Text::new(text),
             TextFont {
-                font_size: theme.size_title,
+                font_size: FontSize::Px(theme.size_title),
                 ..default()
             },
             TextColor(theme.text_white),
@@ -136,7 +136,7 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
         .with_child((
             Text::new(text),
             TextFont {
-                font_size: theme.size_body,
+                font_size: FontSize::Px(theme.size_body),
                 ..default()
             },
             TextColor(theme.text),

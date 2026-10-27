@@ -98,10 +98,10 @@ pub fn sync_preview(
     }
 
     if let Some(piece) = selection.piece {
-        let scene: Handle<Scene> = asset_server.load(piece.asset_path);
+        let scene: Handle<WorldAsset> = asset_server.load(piece.asset_path);
         let mut preview = commands.spawn_owned((
             PlacementPreview,
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             Transform::from_translation(anchor.origin).with_scale(Vec3::splat(PIECE_SCALE)),
             Visibility::Hidden,
         ));
@@ -261,9 +261,9 @@ pub fn spawn_piece(
     occupancy: &mut GridOccupancy,
     anchor: &CafeAnchor,
 ) -> Entity {
-    let scene: Handle<Scene> = asset_server.load(piece.asset_path);
+    let scene: Handle<WorldAsset> = asset_server.load(piece.asset_path);
     let mut placed = commands.spawn_owned((
-        SceneRoot(scene),
+        WorldAssetRoot(scene),
         Transform::from_translation(cell_center(anchor, i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
         AutoCollider,
         PlacedCell(i, j),
@@ -344,7 +344,7 @@ pub fn manage_placement_hint(
             .spawn_owned((
                 Text::new("Press C to cancel"),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: FontSize::Px(16.0),
                     ..default()
                 },
                 TextColor(text_color),

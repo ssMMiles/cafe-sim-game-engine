@@ -104,7 +104,7 @@ impl Plugin for EditorPlugin {
         app.init_state::<EditorMode>();
         app.add_plugins((tool::ToolPlugin, ui::EditorUiPlugin));
 
-        let in_editor = in_state(AppState::InGame).and(in_state(EditorMode::Editor));
+        let in_editor = in_state(AppState::InGame).and_then(in_state(EditorMode::Editor));
         app.configure_sets(Update, EditorSet::Prepare.run_if(in_editor.clone()));
         app.configure_sets(
             Update,
@@ -115,7 +115,7 @@ impl Plugin for EditorPlugin {
         app.configure_sets(
             Update,
             EditorSet::Active
-                .run_if(in_editor.and(in_state(SimulationState::Running)))
+                .run_if(in_editor.and_then(in_state(SimulationState::Running)))
                 .after(EditorSet::Prepare),
         );
 
@@ -185,8 +185,8 @@ impl Plugin for EditorPlugin {
                 select_on_click.run_if(
                     select
                         .clone()
-                        .and(viewport_pointer_free)
-                        .and(gizmo_pointer_free),
+                        .and_then(viewport_pointer_free)
+                        .and_then(gizmo_pointer_free),
                 ),
                 update_hover.run_if(select.clone()),
                 focus_selection.run_if(keyboard_free),
@@ -214,15 +214,15 @@ impl Plugin for EditorPlugin {
             (
                 (delete_selected, handle_grab_keys)
                     .chain()
-                    .run_if(keyboard_free.and(select.clone().or(place.clone()))),
+                    .run_if(keyboard_free.and_then(select.clone().or_else(place.clone()))),
                 (place_grabbed_object, handle_place_click)
                     .chain()
-                    .run_if(place.clone().and(viewport_pointer_free)),
+                    .run_if(place.clone().and_then(viewport_pointer_free)),
                 (update_placement_preview, draw_preview_gizmo)
                     .chain()
                     .run_if(place.clone()),
                 (adjust_placement_scale, adjust_placement_rotation)
-                    .run_if(place.clone().and(viewport_pointer_free)),
+                    .run_if(place.clone().and_then(viewport_pointer_free)),
             )
                 .in_set(EditorSet::Active),
         );

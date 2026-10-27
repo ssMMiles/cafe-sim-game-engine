@@ -316,7 +316,7 @@ pub fn manage_customer_popups(
             .with_child_owned((
                 Text::new(customer.order),
                 TextFont {
-                    font_size: POPUP_FONT_SIZE,
+                    font_size: FontSize::Px(POPUP_FONT_SIZE),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 1.0, 1.0)),

@@ -382,7 +382,7 @@ fn prepare_library(
 #[cfg(not(target_family = "wasm"))]
 fn run_register(world: &mut World, plugin_id: &str, register_fn: PluginRegisterFn) -> bool {
     // Make sure Time is registered host-side before the dylib touches it.
-    let _ = world.register_resource::<bevy::time::Time>();
+    let _ = world.register_component::<bevy::time::Time>();
 
     let world_ptr = world as *mut World as *mut c_void;
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { register_fn(world_ptr) }));
@@ -436,7 +436,7 @@ fn activate_plugin(world: &mut World, plugin_id: &str) {
         }
     };
 
-    let _ = world.register_resource::<bevy::time::Time>();
+    let _ = world.register_component::<bevy::time::Time>();
 
     let mut new_schedule = Schedule::new(PluginSchedule(plugin_id.to_owned()));
     let schedule_ptr = &mut new_schedule as *mut bevy::ecs::schedule::Schedule as *mut c_void;

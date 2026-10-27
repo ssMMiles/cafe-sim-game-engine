@@ -309,7 +309,7 @@ pub fn build_hire_menu(
         .spawn_owned((
             Text::new("Hire Staff"),
             TextFont {
-                font_size: 28.0,
+                font_size: FontSize::Px(28.0),
                 ..default()
             },
             TextColor(text_color),
@@ -349,7 +349,7 @@ pub fn build_hire_menu(
             .spawn_owned((
                 Text::new(c.name.clone()),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -362,7 +362,7 @@ pub fn build_hire_menu(
                 .spawn_owned((
                     Text::new(line),
                     TextFont {
-                        font_size: 13.0,
+                        font_size: FontSize::Px(13.0),
                         ..default()
                     },
                     TextColor(dim_color),
@@ -375,7 +375,7 @@ pub fn build_hire_menu(
             .spawn_owned((
                 Text::new(format!("${}/day", c.pay)),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -451,7 +451,7 @@ pub fn spawn_button(
         .with_child_owned((
             Text::new(label.to_string()),
             TextFont {
-                font_size: 15.0,
+                font_size: FontSize::Px(15.0),
                 ..default()
             },
             TextColor(text),

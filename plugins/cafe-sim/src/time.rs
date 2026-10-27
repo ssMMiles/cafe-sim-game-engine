@@ -84,7 +84,7 @@ pub fn spawn_time_hud(commands: &mut Commands, initial: &GameTime) {
             TimeDayText,
             Text::new(format!("Day {}", initial.day)),
             TextFont {
-                font_size: 12.0,
+                font_size: FontSize::Px(12.0),
                 ..default()
             },
             TextColor(day_color),
@@ -96,7 +96,7 @@ pub fn spawn_time_hud(commands: &mut Commands, initial: &GameTime) {
             TimeClockText,
             Text::new(initial.formatted()),
             TextFont {
-                font_size: 20.0,
+                font_size: FontSize::Px(20.0),
                 ..default()
             },
             TextColor(clock_color),

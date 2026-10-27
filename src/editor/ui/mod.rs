@@ -76,7 +76,7 @@ impl Plugin for EditorUiPlugin {
         app.init_resource::<MenuState>();
         app.add_systems(
             EguiPrimaryContextPass,
-            editor_ui.run_if(in_state(AppState::InGame).and(in_state(EditorMode::Editor))),
+            editor_ui.run_if(in_state(AppState::InGame).and_then(in_state(EditorMode::Editor))),
         );
     }
 }
@@ -209,15 +209,29 @@ pub(super) fn editor_ui(
         *dock = DockLayout::default();
     }
 
-    egui::TopBottomPanel::top("editor_menu").show(&ctx, |ui| {
+    // egui 0.34 unified panels onto `Ui`: `Panel` (which replaced
+    // `SidePanel`/`TopBottomPanel`) and `DockArea` take a `&mut Ui`, not a
+    // `&Context`. bevy_egui drives `begin_pass`/`end_pass` itself so we can't
+    // use `Context::run_ui`; build the root `Ui` directly instead. It defaults
+    // to the background layer and `Context::content_rect`, which is what the
+    // old context-level panels used. Each panel shrinks `root`'s available
+    // space in turn and the dock fills whatever is left.
+    let mut root = egui::Ui::new(
+        ctx.clone(),
+        egui::Id::new("editor_root"),
+        egui::UiBuilder::new(),
+    );
+
+    egui::Panel::top("editor_menu").show_inside(&mut root, |ui| {
         menu::menu_bar(ui, &mut panels);
     });
-    egui::TopBottomPanel::top("editor_toolbar").show(&ctx, |ui| {
+    egui::Panel::top("editor_toolbar").show_inside(&mut root, |ui| {
         menu::toolbar(ui, &mut panels);
     });
+    // `Window` is a free-floating area, not a panel — it still takes a `&Context`.
     menu::dialogs(&ctx, &mut panels);
 
-    egui::TopBottomPanel::bottom("editor_status").show(&ctx, |ui| {
+    egui::Panel::bottom("editor_status").show_inside(&mut root, |ui| {
         ui.horizontal_wrapped(|ui| {
             for (keys, action) in controls.rows(panels.fly_lock.0, panels.brush.mode) {
                 ui.strong(keys);
@@ -265,14 +279,14 @@ pub(super) fn editor_ui(
         &mut panels,
     );
 
-    let mut style = egui_dock::Style::from_egui(ctx.style().as_ref());
+    let mut style = egui_dock::Style::from_egui(root.style().as_ref());
     style.tab.tab_body.inner_margin = egui::Margin::ZERO;
     DockArea::new(&mut dock.0)
         .style(style)
         .show_close_buttons(false)
         .show_leaf_close_all_buttons(false)
         .show_leaf_collapse_buttons(false)
-        .show(&ctx, &mut tabs);
+        .show_inside(&mut root, &mut tabs);
 
     *viewport = current;
 }

@@ -115,13 +115,13 @@ pub fn setup_placement_preview(
 
     let entity = match &config.kind {
         PlacedKind::Mesh { asset_path, .. } => {
-            let scene: Handle<Scene> = asset_server.load(asset_path);
+            let scene: Handle<WorldAsset> = asset_server.load(asset_path);
             spawn_interactable_scene(
                 &mut commands,
                 (
                     GameEntity,
                     PlacementPreview,
-                    SceneRoot(scene),
+                    WorldAssetRoot(scene),
                     transform,
                     GlobalTransform::default(),
                     Visibility::Hidden,

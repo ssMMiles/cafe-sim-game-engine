@@ -81,7 +81,7 @@ pub fn spawn_dropdown<M: Component>(
                         CHEVRON_CLOSED
                     }),
                     TextFont {
-                        font_size: theme.size_body,
+                        font_size: FontSize::Px(theme.size_body),
                         ..default()
                     },
                     TextColor(theme.text_dim),
@@ -95,7 +95,7 @@ pub fn spawn_dropdown<M: Component>(
                 header.spawn((
                     Text::new(label),
                     TextFont {
-                        font_size: theme.size_body,
+                        font_size: FontSize::Px(theme.size_body),
                         ..default()
                     },
                     TextColor(theme.text),

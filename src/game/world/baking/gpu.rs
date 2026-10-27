@@ -6,14 +6,14 @@
 //! ## Pipeline
 //!
 //! 1. **Main world** (`enqueue_terrain_bake_jobs`): For each loaded chunk build
-//!    a `ShaderStorageBuffer` output buffer + metadata, push a `GpuBakeJob` into
+//!    a `ShaderBuffer` output buffer + metadata, push a `GpuBakeJob` into
 //!    `GpuBakePending`, and spawn a readback entity with an observer.
 //!
 //! 2. **ExtractSchedule** (`extract_bake_jobs`): Drain jobs from main world into
 //!    the render world's `GpuBakeExtracted`.
 //!
 //! 3. **PrepareBindGroups** (`prepare_gpu_bake_jobs`): Upload heightmap + uniform
-//!    data as raw GPU buffers, look up the `GpuShaderStorageBuffer` for the output
+//!    data as raw GPU buffers, look up the `GpuShaderBuffer` for the output
 //!    handle, build the bind group.
 //!
 //! 4. **Render graph node** (`BakeComputeNode`): Dispatch the compute shader.
@@ -29,14 +29,13 @@ use bevy::{
         ExtractSchedule, MainWorld, Render, RenderApp, RenderStartup, RenderSystems,
         gpu_readback::{Readback, ReadbackComplete},
         render_asset::RenderAssets,
-        render_graph::{self, RenderGraph, RenderLabel},
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
             BufferUsages, CachedComputePipelineId, ComputePassDescriptor,
             ComputePipelineDescriptor, PipelineCache, ShaderStages, binding_types,
         },
-        renderer::{RenderContext, RenderDevice},
-        storage::{GpuShaderStorageBuffer, ShaderStorageBuffer},
+        renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems},
+        storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
 use std::{path::PathBuf, sync::Arc};
@@ -139,8 +138,8 @@ pub struct GpuBakeChunkJob {
     pub bvh: Arc<TriangleBvh>,
     /// Placed point/spot lights, uploaded verbatim (shared across strips).
     pub lights: Vec<BakedLight>,
-    /// Handle to the output `ShaderStorageBuffer` (pre-allocated, zeroed).
-    pub out_handle: Handle<ShaderStorageBuffer>,
+    /// Handle to the output `ShaderBuffer` (pre-allocated, zeroed).
+    pub out_handle: Handle<ShaderBuffer>,
     /// Material to swap the lightmap into once the readback completes.
     pub material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
     /// Absolute path to the world directory, used when saving the PNG.
@@ -227,57 +226,51 @@ struct GpuBakePipeline {
 }
 
 // ============================================================================
-// Render graph node
+// Bake compute pass
 // ============================================================================
 
-/// Label for the lightmap bake compute node in the render graph.
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct BakeComputeNodeLabel;
+/// Dispatches the lightmap compute pass.
+///
+/// Bevy 0.19 removed the `RenderGraph` *API* (nodes, labels, edges) but kept
+/// `RenderGraph` as the top-level **schedule** for rendering that isn't tied to
+/// a camera view — which is exactly what this is. So the old
+/// `render_graph::Node` became a plain system in that schedule, in
+/// [`RenderGraphSystems::Render`] (before `Submit` flushes the command
+/// buffers).
+///
+/// The resource lookups stay fallible for the same reason as before: the
+/// pipeline may still be compiling, in which case jobs simply retry next frame
+/// because `Readback` keeps polling until the entity is despawned.
+fn bake_compute_pass(
+    pipeline_res: Option<Res<GpuBakePipeline>>,
+    in_flight: Option<Res<GpuBakeInFlight>>,
+    pipeline_cache: Res<PipelineCache>,
+    mut ctx: RenderContext,
+) {
+    let (Some(pipeline_res), Some(in_flight)) = (pipeline_res, in_flight) else {
+        return;
+    };
 
-/// Render graph node that dispatches the lightmap compute pass.
-#[derive(Default)]
-struct BakeComputeNode;
+    let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id)
+    else {
+        return;
+    };
 
-impl render_graph::Node for BakeComputeNode {
-    fn run(
-        &self,
-        _graph: &mut render_graph::RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), render_graph::NodeRunError> {
-        let Some(pipeline_res) = world.get_resource::<GpuBakePipeline>() else {
-            return Ok(());
-        };
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id)
-        else {
-            // Pipeline still compiling — jobs will retry next frame because
-            // Readback polls until the entity is despawned.
-            return Ok(());
-        };
+    for strip in &in_flight.strips {
+        let mut pass = ctx
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("lightmap_bake_pass"),
+                timestamp_writes: None,
+            });
 
-        let Some(in_flight) = world.get_resource::<GpuBakeInFlight>() else {
-            return Ok(());
-        };
+        pass.set_pipeline(compute_pipeline);
+        pass.set_bind_group(0, &strip.bind_group, &[]);
 
-        for strip in &in_flight.strips {
-            let mut pass =
-                render_context
-                    .command_encoder()
-                    .begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("lightmap_bake_pass"),
-                        timestamp_writes: None,
-                    });
-
-            pass.set_pipeline(compute_pipeline);
-            pass.set_bind_group(0, &strip.bind_group, &[]);
-
-            let wg_x = (strip.resolution + 15) / 16;
-            let wg_y = (strip.strip_rows + 15) / 16;
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
-        }
-
-        Ok(())
+        // 16×16 workgroups, rounded up to cover the strip.
+        let wg_x = strip.resolution.div_ceil(16);
+        let wg_y = strip.strip_rows.div_ceil(16);
+        pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
 }
 
@@ -306,11 +299,12 @@ pub fn add_gpu_baking_to_app(app: &mut App) {
     render_app
         .init_resource::<GpuBakeExtracted>()
         .init_resource::<GpuBakeInFlight>()
-        .add_systems(
-            RenderStartup,
-            (init_gpu_bake_pipeline, add_bake_render_graph_node),
-        )
+        .add_systems(RenderStartup, init_gpu_bake_pipeline)
         .add_systems(ExtractSchedule, extract_bake_jobs)
+        .add_systems(
+            RenderGraph,
+            bake_compute_pass.in_set(RenderGraphSystems::Render),
+        )
         .add_systems(
             Render,
             (
@@ -318,10 +312,6 @@ pub fn add_gpu_baking_to_app(app: &mut App) {
                 clear_in_flight_after_render.in_set(RenderSystems::Cleanup),
             ),
         );
-}
-
-fn add_bake_render_graph_node(mut render_graph: ResMut<RenderGraph>) {
-    render_graph.add_node(BakeComputeNodeLabel, BakeComputeNode);
 }
 
 // ============================================================================
@@ -452,7 +442,7 @@ pub fn enqueue_terrain_bake_jobs(
 fn dispatch_chunk(
     entry: GpuBakeQueueEntry,
     strip_rows: u32,
-    buffers: &mut Assets<ShaderStorageBuffer>,
+    buffers: &mut Assets<ShaderBuffer>,
     pending: &mut GpuBakePending,
 ) {
     let texel_count = (entry.resolution * entry.resolution) as usize;
@@ -460,7 +450,7 @@ fn dispatch_chunk(
     let byte_count = texel_count * 2 * std::mem::size_of::<u32>();
 
     // COPY_SRC is required by GpuReadbackPlugin so it can copy results to CPU.
-    let mut out_buf = ShaderStorageBuffer::with_size(byte_count, RenderAssetUsages::RENDER_WORLD);
+    let mut out_buf = ShaderBuffer::with_size(byte_count, RenderAssetUsages::RENDER_WORLD);
     out_buf.buffer_description.usage =
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
     let out_handle = buffers.add(out_buf);
@@ -504,7 +494,7 @@ fn dispatch_chunk(
 pub fn top_up_gpu_bake(
     config: Res<BakeConfig>,
     mut queue: ResMut<GpuBakeQueue>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut pending: ResMut<GpuBakePending>,
     mut commands: Commands,
 ) {
@@ -614,7 +604,7 @@ fn prepare_gpu_bake_jobs(
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Option<Res<GpuBakePipeline>>,
-    gpu_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
     mut extracted: ResMut<GpuBakeExtracted>,
     mut in_flight: ResMut<GpuBakeInFlight>,
 ) {
@@ -627,10 +617,10 @@ fn prepare_gpu_bake_jobs(
     let bind_group_layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
 
     for chunk_job in extracted.jobs.drain(..) {
-        // Retrieve the GPU-side output buffer prepared from the ShaderStorageBuffer asset.
+        // Retrieve the GPU-side output buffer prepared from the ShaderBuffer asset.
         let Some(gpu_out) = gpu_buffers.get(&chunk_job.out_handle) else {
             warn!(
-                "GPU bake: output ShaderStorageBuffer not ready for chunk ({}, {}), skipping",
+                "GPU bake: output ShaderBuffer not ready for chunk ({}, {}), skipping",
                 chunk_job.chunk_x, chunk_job.chunk_y
             );
             continue;
@@ -787,7 +777,7 @@ fn handle_bake_complete(
 
     let new_handle = images.add(lightmap.into_image());
 
-    if let Some(mat) = materials.get_mut(tag.material_handle) {
+    if let Some(mut mat) = materials.get_mut(tag.material_handle) {
         mat.extension.lightmap = new_handle;
     }
 

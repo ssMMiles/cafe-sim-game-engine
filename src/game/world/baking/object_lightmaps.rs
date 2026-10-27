@@ -179,7 +179,7 @@ pub fn apply_object_lightmaps(
             };
             // The same unwrap the bake used — the UVs must match the texels.
             uv_cache.ensure(&mut meshes, entry.mesh.id());
-            if let Some(mat) = materials.get_mut(mat_handle.id()) {
+            if let Some(mut mat) = materials.get_mut(mat_handle.id()) {
                 mat.extension.lightmap = image;
             }
             applied += 1;
@@ -245,7 +245,7 @@ mod tests {
 
         let mut state: SystemState<(ToonMeshQuery, Query<&Children>)> =
             SystemState::new(&mut world);
-        let (meshes, children) = state.get(&world);
+        let (meshes, children) = state.get(&world).unwrap();
         let entries = collect_toon_meshes(root, &meshes, &children);
 
         assert_eq!(entries.len(), 2);

@@ -470,14 +470,17 @@ fn finalize_terrain_setup(
     commands.insert_resource(HeightmapData::new(TILE_SIZE));
 
     // Shared terrain material — created once, reused by every chunk.
-    let stone_texture: Handle<Image> =
-        asset_server.load_with_settings("textures/terrain.png", |s: &mut ImageLoaderSettings| {
+    // 0.19 collapsed the `load_*` variants into one builder.
+    let stone_texture: Handle<Image> = asset_server
+        .load_builder()
+        .with_settings(|s: &mut ImageLoaderSettings| {
             s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                 address_mode_u: ImageAddressMode::Repeat,
                 address_mode_v: ImageAddressMode::Repeat,
                 ..ImageSamplerDescriptor::default()
             });
-        });
+        })
+        .load("textures/terrain.png");
 
     // Unbaked chunks bind the shared 1×1 white lightmap, i.e. fully lit.
     let default_lightmap = create_default_toon_lightmap(images);

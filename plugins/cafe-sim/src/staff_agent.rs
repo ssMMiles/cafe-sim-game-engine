@@ -536,7 +536,7 @@ fn spawn_notice_toast(commands: &mut Commands, names: &[String]) {
             .with_child_owned((
                 Text::new(message),
                 TextFont {
-                    font_size: 18.0,
+                    font_size: FontSize::Px(18.0),
                     ..default()
                 },
                 TextColor(Color::srgb(1.0, 0.55, 0.55)),

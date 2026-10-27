@@ -1,11 +1,12 @@
 use bevy::{
     light::NotShadowCaster,
+    // `OpaqueRendererMethod` and `SpecializedMeshPipelineError` moved into the
+    // new `bevy_material` crate in Bevy 0.19.
+    material::{OpaqueRendererMethod, specialize::SpecializedMeshPipelineError},
     mesh::MeshVertexBufferLayoutRef,
-    pbr::{MaterialPipeline, MaterialPipelineKey, OpaqueRendererMethod},
+    pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::render_resource::{
-        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
-    },
+    render::render_resource::{AsBindGroup, RenderPipelineDescriptor},
     shader::ShaderRef,
 };
 
@@ -44,7 +45,7 @@ impl Material for SkyDomeMaterial {
         // Disable depth write so the sky dome always sits behind all other geometry
         // without poisoning the depth buffer.
         if let Some(ref mut ds) = descriptor.depth_stencil {
-            ds.depth_write_enabled = false;
+            ds.depth_write_enabled = Some(false);
         }
         Ok(())
     }

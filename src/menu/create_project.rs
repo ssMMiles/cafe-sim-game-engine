@@ -67,7 +67,7 @@ pub fn setup(mut commands: Commands, theme: Res<UiTheme>) {
                     body.spawn((
                         Text::new("(no plugins discovered under `plugins/`)"),
                         TextFont {
-                            font_size: theme.size_caption,
+                            font_size: FontSize::Px(theme.size_caption),
                             ..default()
                         },
                         TextColor(theme.text_dim),
@@ -103,7 +103,7 @@ pub fn setup(mut commands: Commands, theme: Res<UiTheme>) {
             root.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: theme.size_caption,
+                    font_size: FontSize::Px(theme.size_caption),
                     ..default()
                 },
                 TextColor(theme.danger),

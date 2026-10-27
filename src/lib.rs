@@ -1,3 +1,8 @@
+// Bevy 0.19's deeper `SystemParam`/auto-trait chains (notably the render
+// pipeline resources) overflow the default 128-deep trait solver. The overflow
+// is currently a warning but is scheduled to become a hard error.
+#![recursion_limit = "256"]
+
 use avian3d::prelude::PhysicsPlugins;
 use bevy::{
     asset::{AssetMetaCheck, io::AssetSourceBuilder},

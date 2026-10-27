@@ -541,7 +541,7 @@ fn apply_object_bake(
     for result in results {
         // A material can be gone if the object was deleted mid-bake. The EXR
         // is already on disk, so the next load picks it up regardless.
-        if let Some(mat) = toon_materials.get_mut(result.material.id()) {
+        if let Some(mut mat) = toon_materials.get_mut(result.material.id()) {
             mat.extension.lightmap = images.add(result.image);
         }
     }

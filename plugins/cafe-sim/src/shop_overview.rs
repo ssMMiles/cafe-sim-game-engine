@@ -312,7 +312,7 @@ pub fn build_shop_overview(
                 ShopNameInputDisplay,
                 Text::new(shop_state.name.clone()),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -335,7 +335,7 @@ pub fn build_shop_overview(
             .spawn_owned((
                 Text::new(shop_state.name.clone()),
                 TextFont {
-                    font_size: 36.0,
+                    font_size: FontSize::Px(36.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -401,7 +401,7 @@ pub fn build_shop_overview(
         .spawn_owned((
             Text::new("Staff"),
             TextFont {
-                font_size: 24.0,
+                font_size: FontSize::Px(24.0),
                 ..default()
             },
             TextColor(text_color),
@@ -414,7 +414,7 @@ pub fn build_shop_overview(
             .spawn_owned((
                 Text::new("No staff yet."),
                 TextFont {
-                    font_size: 14.0,
+                    font_size: FontSize::Px(14.0),
                     ..default()
                 },
                 TextColor(dim_color),
@@ -455,7 +455,7 @@ pub fn build_shop_overview(
             .spawn_owned((
                 Text::new(member.name.clone()),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -468,7 +468,7 @@ pub fn build_shop_overview(
                 .spawn_owned((
                     Text::new(line),
                     TextFont {
-                        font_size: 13.0,
+                        font_size: FontSize::Px(13.0),
                         ..default()
                     },
                     TextColor(dim_color),
@@ -482,7 +482,7 @@ pub fn build_shop_overview(
             .spawn_owned((
                 Text::new(format!("Job: {job_label}")),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
                 TextColor(text_color),
@@ -556,7 +556,7 @@ fn spawn_action_button(
         .with_child_owned((
             Text::new(label.to_string()),
             TextFont {
-                font_size: 16.0,
+                font_size: FontSize::Px(16.0),
                 ..default()
             },
             TextColor(text),

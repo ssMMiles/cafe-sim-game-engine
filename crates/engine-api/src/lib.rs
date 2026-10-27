@@ -1,3 +1,8 @@
+// See the note in the host crate's `lib.rs`: Bevy 0.19's `SystemParam` chains
+// overflow the default 128-deep trait solver (here via `ToonMaterial`'s
+// `AsBindGroup` params).
+#![recursion_limit = "256"]
+
 use bevy::prelude::*;
 use std::collections::HashSet;
 
@@ -95,7 +100,7 @@ impl ScriptOwned {
     }
 }
 
-/// Tag a `SceneRoot` (or any entity that will have a mesh hierarchy) to have
+/// Tag a `WorldAssetRoot` (or any entity that will have a mesh hierarchy) to have
 /// the host attach a static trimesh collider once. The host removes the marker
 /// after fulfilling it, so the component is a one-shot request.
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -184,7 +189,9 @@ macro_rules! add {
                 // was rebuilt without restarting the host, which would silently
                 // give us wrong ComponentIds.
                 let dll_time_tid = ::std::any::TypeId::of::<$crate::bevy::time::Time>();
-                let cid = world.register_resource::<$crate::bevy::time::Time>();
+                // Bevy 0.19 made resources components, so resource
+                // registration folded into `register_component`.
+                let cid = world.register_component::<$crate::bevy::time::Time>();
                 let has_resource = world.contains_resource::<$crate::bevy::time::Time>();
                 ::std::eprintln!(
                     "[scripts] DLL Time TypeId={dll_time_tid:?} ComponentId={cid:?} resource_exists={has_resource}"

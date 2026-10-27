@@ -131,7 +131,7 @@ fn spawn_slot_card(
     row.with_child_owned((
         Text::new(format!("Slot {slot}")),
         TextFont {
-            font_size: theme.size_body,
+            font_size: FontSize::Px(theme.size_body),
             ..default()
         },
         TextColor(text_color),
@@ -157,7 +157,7 @@ fn spawn_slot_card(
                 col.spawn_owned((
                     Text::new(right_primary),
                     TextFont {
-                        font_size: theme.size_body,
+                        font_size: FontSize::Px(theme.size_body),
                         ..default()
                     },
                     TextColor(text_color),
@@ -166,7 +166,7 @@ fn spawn_slot_card(
                     col.spawn_owned((
                         Text::new(right_secondary),
                         TextFont {
-                            font_size: theme.size_label,
+                            font_size: FontSize::Px(theme.size_label),
                             ..default()
                         },
                         TextColor(theme.text_dim),

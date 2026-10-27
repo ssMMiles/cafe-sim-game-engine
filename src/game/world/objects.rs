@@ -531,7 +531,7 @@ pub fn spawn_entity_record(
             asset_path,
             collider,
         } => {
-            let handle: Handle<Scene> = asset_server.load(asset_path);
+            let handle: Handle<WorldAsset> = asset_server.load(asset_path);
             let entity = spawn_interactable_scene(
                 commands,
                 (
@@ -547,7 +547,7 @@ pub fn spawn_entity_record(
                     },
                     ConvertToToon,
                     crate::game::world::baking::object_lightmaps::NeedsObjectLightmaps,
-                    SceneRoot(handle),
+                    WorldAssetRoot(handle),
                     transform,
                     GlobalTransform::default(),
                     Visibility::Inherited,

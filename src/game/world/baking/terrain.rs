@@ -164,7 +164,7 @@ pub fn bake_terrain_lightmaps(
         }
 
         let new_handle = images.add(lightmap.into_image());
-        if let Some(mat) = materials.get_mut(material_handle.id()) {
+        if let Some(mut mat) = materials.get_mut(material_handle.id()) {
             mat.extension.lightmap = new_handle;
         }
 

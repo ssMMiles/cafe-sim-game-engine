@@ -88,17 +88,17 @@ impl Plugin for SimulationPlugin {
         app.configure_sets(
             Update,
             SimSet::Running
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+                .run_if(in_state(AppState::InGame).and_then(in_state(SimulationState::Running))),
         );
         app.configure_sets(
             Update,
             SimSet::Paused
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Paused))),
+                .run_if(in_state(AppState::InGame).and_then(in_state(SimulationState::Paused))),
         );
         app.configure_sets(
             FixedUpdate,
             SimSet::Running
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+                .run_if(in_state(AppState::InGame).and_then(in_state(SimulationState::Running))),
         );
 
         // Sub-plugin sets — GfxPlugin
@@ -106,7 +106,7 @@ impl Plugin for SimulationPlugin {
         app.configure_sets(
             Update,
             GfxSet::Running
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+                .run_if(in_state(AppState::InGame).and_then(in_state(SimulationState::Running))),
         );
 
         // Sub-plugin sets — WorldPlugin
@@ -114,7 +114,7 @@ impl Plugin for SimulationPlugin {
         app.configure_sets(
             Update,
             WorldSet::Running
-                .run_if(in_state(AppState::InGame).and(in_state(SimulationState::Running))),
+                .run_if(in_state(AppState::InGame).and_then(in_state(SimulationState::Running))),
         );
 
         // Sub-plugin sets — TerrainPlugin
