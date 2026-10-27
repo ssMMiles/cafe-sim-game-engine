@@ -15,3 +15,8 @@ If updating a plugin, rebuild the workspace:
 ```
 cargo build --workspace
 ```
+
+To build for web:
+```
+wasm-pack build --target web --release --features opfs
+```
