@@ -23,7 +23,8 @@ use half::f16;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
-use crate::game::world::objects::PlacedKind;
+use super::BakeConfig;
+use crate::game::world::objects::{CHUNK_WORLD_SIZE, PlacedKind};
 use crate::game::world::terrain::storage::EnvironmentData;
 
 /// Bump whenever the *meaning* of a lightmap texel changes (new light types
@@ -309,7 +310,89 @@ pub struct LightmapBuffer {
     pub texels: Vec<Vec3>,
 }
 
+/// The texel grid a terrain chunk is baked on: its `res × res` lightmap plus
+/// `margin` extra texels on every side.
+///
+/// Chunks are baked one at a time, and the blur that follows can only see
+/// the chunk's own texels. At a chunk edge the kernel window is clamped,
+/// which biases the result towards the edge texel by the local gradient
+/// times about half the radius — in *opposite* directions on the two sides
+/// of a seam. In a shadow penumbra or a light's falloff that was a ~20%
+/// brightness step along the seam, which the toon quantiser turned into band
+/// edges that visibly jumped wherever a shadow crossed from one chunk into
+/// the next (the spawn area sits on the corner of four chunks).
+///
+/// Baking `margin >= blur_radius` texels past the edge gives the kernel real
+/// neighbour data instead; the margin is cropped away before the lightmap is
+/// stored. With [`Self::texel_seed`] keyed by *world* texel rather than
+/// chunk-local index, two chunks sharing a seam then bake identical texels
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkBakeGrid {
+    /// Resolution of the finished lightmap.
+    pub res: usize,
+    /// Extra texels baked on each side, cropped before storage.
+    pub margin: usize,
+}
+
+impl ChunkBakeGrid {
+    pub fn new(config: &BakeConfig) -> Self {
+        Self {
+            res: config.terrain_resolution as usize,
+            margin: config.blur_radius as usize,
+        }
+    }
+
+    /// Side length of the grid actually baked.
+    pub fn padded(self) -> usize {
+        self.res + 2 * self.margin
+    }
+
+    /// World XZ of the (possibly fractional) padded texel `(px, py)` of chunk
+    /// `(chunk_x, chunk_y)`. Texel `margin` sits on the chunk's origin and
+    /// texel `margin + res - 1` on its far edge — the same `res - 1` spacing
+    /// the terrain mesh's UV1 uses — so the margin lies in the neighbours.
+    ///
+    /// Computed from the texel's index in the *world* grid rather than a
+    /// chunk origin plus a local offset, so a texel two chunks share
+    /// evaluates to bit-identical coordinates in both bakes (a shadow ray is
+    /// binary; one ulp can flip it). The GPU shader does the same.
+    pub fn world_xz(self, chunk_x: i32, chunk_y: i32, px: f32, py: f32) -> Vec2 {
+        let span = (self.res - 1).max(1);
+        let global = |chunk: i32, p: f32| (chunk * span as i32) as f32 + p - self.margin as f32;
+        Vec2::new(global(chunk_x, px), global(chunk_y, py)) / span as f32 * CHUNK_WORLD_SIZE
+    }
+
+    /// Hemisphere-sampling seed for padded texel `(px, py)` of chunk
+    /// `(chunk_x, chunk_y)`.
+    ///
+    /// Derived from the texel's index in the *world* grid, so the texel a
+    /// seam's two chunks share — and every overlapping margin texel — draws
+    /// the same ray directions from both sides. The GPU shader computes the
+    /// same value.
+    pub fn texel_seed(self, chunk_x: i32, chunk_y: i32, px: usize, py: usize) -> u32 {
+        let span = (self.res - 1) as i32;
+        let local = |p: usize| p as i32 - self.margin as i32;
+        let gx = chunk_x.wrapping_mul(span).wrapping_add(local(px));
+        let gy = chunk_y.wrapping_mul(span).wrapping_add(local(py));
+        (gx as u32)
+            .wrapping_mul(1_000_003)
+            .wrapping_add((gy as u32).wrapping_mul(2_654_435_761))
+    }
+}
+
 impl LightmapBuffer {
+    /// The central `(res - 2·margin)²` texels: the finished chunk lightmap
+    /// once the bake margin has served its purpose (see [`ChunkBakeGrid`]).
+    pub fn crop(&self, margin: usize) -> Self {
+        let n = self.res;
+        let inner = n.saturating_sub(2 * margin);
+        let texels = (0..inner * inner)
+            .map(|i| self.texels[(i / inner + margin) * n + (i % inner + margin)])
+            .collect();
+        Self { res: inner, texels }
+    }
+
     /// A black buffer of `res × res`.
     ///
     /// Test-only: every bake path now builds its texels in one pass and
@@ -764,6 +847,49 @@ mod tests {
             assert!((*a - *b).abs().max_element() < 1e-2, "{a} vs {b}");
         }
         assert!(LightmapBuffer::from_rgba16_bytes(4, &bytes[1..]).is_none());
+    }
+
+    #[test]
+    fn crop_keeps_the_central_texels_in_order() {
+        let padded = gradient(8);
+        let inner = padded.crop(2);
+        assert_eq!(inner.res, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    inner.texels[y * 4 + x],
+                    padded.texels[(y + 2) * 8 + (x + 2)]
+                );
+            }
+        }
+        assert_eq!(padded.crop(0).texels, padded.texels);
+    }
+
+    /// The margin texels must land exactly on the neighbour chunk's texels,
+    /// and the texel on a seam must get the same position and seed from both
+    /// chunks — that is what makes the two sides bake identically.
+    #[test]
+    fn bake_grid_margin_and_seeds_line_up_across_a_seam() {
+        let grid = ChunkBakeGrid { res: 16, margin: 3 };
+        assert_eq!(grid.padded(), 22);
+        assert_eq!(grid.world_xz(0, 0, 3.0, 3.0), Vec2::ZERO);
+        assert_eq!(
+            grid.world_xz(0, 0, 18.0, 18.0),
+            Vec2::splat(CHUNK_WORLD_SIZE)
+        );
+        // Chunk 0's first real texel is chunk -1's last real texel, and chunk
+        // 0's left margin overlaps chunk -1's interior — bit for bit.
+        assert_eq!(
+            grid.world_xz(0, 0, 3.0, 7.0),
+            grid.world_xz(-1, 0, 18.0, 7.0)
+        );
+        assert_eq!(
+            grid.world_xz(0, 0, 1.0, 7.0),
+            grid.world_xz(-1, 0, 16.0, 7.0)
+        );
+        assert_eq!(grid.texel_seed(0, 0, 3, 7), grid.texel_seed(-1, 0, 18, 7));
+        assert_eq!(grid.texel_seed(0, 0, 2, 7), grid.texel_seed(-1, 0, 17, 7));
+        assert_ne!(grid.texel_seed(0, 0, 3, 7), grid.texel_seed(0, 0, 4, 7));
     }
 
     #[test]

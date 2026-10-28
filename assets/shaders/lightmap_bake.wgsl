@@ -33,13 +33,16 @@ struct BakeUniforms {
     // Dimensions of the flat heightmap cache array.
     cache_stride: u32,
     cache_depth: u32,
-    // Output lightmap resolution (pixels per side).
+    // Finished lightmap resolution (pixels per side); the grid actually
+    // baked is `terrain_resolution + 2 * margin`.
     terrain_resolution: u32,
     // Number of AO hemisphere rays.
     ao_rays: u32,
-    // World-space origin of the chunk being baked.
-    chunk_origin_x: f32,
-    chunk_origin_z: f32,
+    // Index of the chunk being baked. Texel positions and seeds derive from
+    // the chunk's place in the world texel grid, so two chunks compute
+    // bit-identical values for the texels they share (ChunkBakeGrid).
+    chunk_index_x: i32,
+    chunk_index_y: i32,
     // Physical side length of the chunk in world units.
     chunk_world_size: f32,
     // AO hemisphere radius in world units.
@@ -74,6 +77,12 @@ struct BakeUniforms {
     ambient_b: f32,
     // Number of placed point/spot lights in the `lights` binding.
     num_lights: u32,
+    // Extra texels baked on every side of the chunk so the CPU blur sees
+    // real neighbour data at the chunk edge; cropped after readback.
+    margin: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 /// Must match `BvhNode` in `baking/bvh.rs`: 32 bytes.
@@ -623,19 +632,23 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let res = u.terrain_resolution;
+    let padded = res + 2u * u.margin;
     // Offset ty by the strip start row so each dispatch covers the correct slice.
     let tx = id.x;
     let ty = id.y + u.row_offset;
-    if tx >= res || ty >= res {
+    if tx >= padded || ty >= padded {
         return;
     }
-    let pixel_idx = ty * res + tx;
+    let pixel_idx = ty * padded + tx;
 
-    let uv_u = f32(tx) / f32(max(res - 1u, 1u));
-    let uv_v = f32(ty) / f32(max(res - 1u, 1u));
-
-    let wx = u.chunk_origin_x + uv_u * u.chunk_world_size;
-    let wz = u.chunk_origin_z + uv_v * u.chunk_world_size;
+    // Index of this texel in the world grid: `res - 1` texels per chunk, the
+    // margin reaching into the neighbours. Mirrors ChunkBakeGrid::world_xz
+    // operation for operation.
+    let span = i32(max(res - 1u, 1u));
+    let gx = u.chunk_index_x * span + i32(tx) - i32(u.margin);
+    let gy = u.chunk_index_y * span + i32(ty) - i32(u.margin);
+    let wx = f32(gx) / f32(span) * u.chunk_world_size;
+    let wz = f32(gy) / f32(span) * u.chunk_world_size;
     let surface = vec3<f32>(wx, world_height(wx, wz), wz);
     let sun_dir = vec3<f32>(u.sun_dir_x, u.sun_dir_y, u.sun_dir_z);
     let normal  = world_normal(wx, wz);
@@ -651,8 +664,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let ao      = compute_ao(origin, mesh_origin, normal);
     let ndotl   = max(dot(normal, sun_dir), 0.0);
 
-    // Per-texel seed for decorrelated hemisphere sampling in compute_bounce.
-    let texel_seed: u32 = tx * 1000003u + ty * 2654435761u;
+    // Per-texel seed for decorrelated hemisphere sampling in compute_bounce,
+    // keyed by world texel (ChunkBakeGrid::texel_seed) so seams agree.
+    let texel_seed: u32 = bitcast<u32>(gx) * 1000003u + bitcast<u32>(gy) * 2654435761u;
 
     let bounce = compute_bounce(origin, mesh_origin, normal, texel_seed);
 

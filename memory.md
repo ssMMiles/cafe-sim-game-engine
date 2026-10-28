@@ -597,3 +597,20 @@ never written — it vanished on refresh. World *content* was never the problem;
 Manifest round-trip is covered by tests (including quote/backslash escaping in
 user-entered names) — on wasm that serialize/parse pair is the only thing
 between "created a project" and "still there after a refresh".
+
+## Terrain lightmap seams at chunk edges — October 2026
+
+**Shadow "line break" around spawn.** Stored lightmaps were checked by stitching the EXRs
+(a scratch exr→png tool; `exrheader` is on this machine, no Python EXR libs). Shadows
+*matched* across x=0 / z=0 in flat regions, but in the steep gradient next to spawn the
+z=0 seam had a 0.093 → 0.112 step (~20%). Cause: `LightmapBuffer::blur` is per chunk,
+so its window clamps at the chunk edge and biases each side towards its own edge texel,
+in opposite directions. The 5-band quantiser turns that into band edges that jump along
+the seam wherever a shadow or light falloff crosses chunks — and spawn is the corner of
+four chunks, which is why it looked origin-specific. Fix: `ChunkBakeGrid` (bake
+`blur_radius` extra texels per side, blur, crop), positions/seeds keyed by *world* texel
+index, cache grown by the margin → seam texels are bit-identical (test in terrain.rs).
+Note a residual, pre-existing asymmetry: secondary rays (bounce hit → shadow ray) can
+run past one chunk's cache but not the neighbour's; it did not show up in the test.
+Things ruled out while looking: heightmap/GPU `floor` for negative tiles (fine), per-strip
+uniforms (one buffer per strip, fine), chunk transforms, mesh UV1.

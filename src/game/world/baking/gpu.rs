@@ -53,9 +53,10 @@ use std::sync::{
 
 use super::bvh::{BvhNode, BvhTriangle, TriangleBvh};
 use super::lightmap::{
-    BakeLighting, BakedLight, LightmapBuffer, LightmapLocation, store_lightmap,
+    BakeLighting, BakedLight, ChunkBakeGrid, LightmapBuffer, LightmapLocation, store_lightmap,
     terrain_lightmap_location,
 };
+use super::terrain::extract_bake_cache;
 use super::{BakeConfig, BakeRegion};
 use crate::game::world::{
     objects::CHUNK_WORLD_SIZE,
@@ -130,10 +131,13 @@ pub struct BakeUniformsData {
     pub tile_size_z: f32,
     pub cache_stride: u32,
     pub cache_depth: u32,
+    /// Finished lightmap resolution; the shader bakes `+ 2·margin`.
     pub terrain_resolution: u32,
     pub ao_rays: u32,
-    pub chunk_origin_x: f32,
-    pub chunk_origin_z: f32,
+    /// Chunk index: texel positions and seeds derive from the chunk's place
+    /// in the world texel grid, so seams match (`ChunkBakeGrid::world_xz`).
+    pub chunk_index_x: i32,
+    pub chunk_index_y: i32,
     pub chunk_world_size: f32,
     pub ao_radius: f32,
     pub sun_dir_x: f32,
@@ -162,6 +166,11 @@ pub struct BakeUniformsData {
     pub ambient_b: f32,
     /// Number of `BakedLight`s in the lights storage buffer.
     pub num_lights: u32,
+    /// Extra texels baked on every side of the chunk (`ChunkBakeGrid::margin`).
+    pub margin: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 // ============================================================================
@@ -190,7 +199,8 @@ pub struct GpuBakeProcessed(pub std::collections::HashSet<Entity>);
 pub struct GpuBakeChunkJob {
     pub chunk_x: i32,
     pub chunk_y: i32,
-    pub resolution: u32,
+    /// Lightmap resolution plus the bake margin; the GPU works on the padded grid.
+    pub grid: ChunkBakeGrid,
     /// Number of rows each strip covers (used to size the Y workgroup dispatch).
     pub strip_rows: u32,
     /// One uniform set per strip, differing only in `row_offset`.
@@ -215,7 +225,7 @@ pub struct GpuBakeChunkJob {
 pub struct BakeReadbackTag {
     pub chunk_x: i32,
     pub chunk_y: i32,
-    pub resolution: u32,
+    pub grid: ChunkBakeGrid,
     pub material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
     pub dest: LightmapLocation,
 }
@@ -224,7 +234,7 @@ pub struct BakeReadbackTag {
 struct GpuBakeQueueEntry {
     chunk_x: i32,
     chunk_y: i32,
-    resolution: u32,
+    grid: ChunkBakeGrid,
     uniforms_data: BakeUniformsData,
     heightmap_bytes: Vec<f32>,
     /// Scene BVH, uploaded verbatim.
@@ -411,16 +421,12 @@ pub fn enqueue_terrain_bake_jobs(
     lighting: &BakeLighting,
     bvh: &Arc<TriangleBvh>,
 ) {
-    use super::raycast::BakeHeightCache;
-
     // Clear processed set so results from a prior bake don't block this one,
     // and discard any leftover entries from an interrupted previous bake.
     processed.0.clear();
     queue.pending.clear();
 
-    let res = config.terrain_resolution;
-    // Same footprint the mesh's lightmap UVs span — see the CPU baker.
-    let chunk_world_size = CHUNK_WORLD_SIZE;
+    let grid = ChunkBakeGrid::new(config);
     let ray_reach = config.ao_radius * 4.0;
 
     for (chunk, material_handle) in chunk_query.iter() {
@@ -432,16 +438,7 @@ pub fn enqueue_terrain_bake_jobs(
             continue;
         }
 
-        let chunk_origin_x = chunk.chunk_x as f32 * chunk_world_size;
-        let chunk_origin_z = chunk.chunk_y as f32 * chunk_world_size;
-
-        let cache = BakeHeightCache::extract(
-            heightmap,
-            chunk_origin_x - ray_reach,
-            chunk_origin_z - ray_reach,
-            chunk_origin_x + chunk_world_size + ray_reach,
-            chunk_origin_z + chunk_world_size + ray_reach,
-        );
+        let cache = extract_bake_cache(heightmap, grid, chunk.chunk_x, chunk.chunk_y, ray_reach);
 
         let uniforms_data = BakeUniformsData {
             cache_min_x: cache.cache_min_x(),
@@ -450,11 +447,11 @@ pub fn enqueue_terrain_bake_jobs(
             tile_size_z: cache.tile_size.1,
             cache_stride: cache.stride() as u32,
             cache_depth: cache.depth() as u32,
-            terrain_resolution: res,
+            terrain_resolution: grid.res as u32,
             ao_rays: config.ao_rays,
-            chunk_origin_x,
-            chunk_origin_z,
-            chunk_world_size,
+            chunk_index_x: chunk.chunk_x,
+            chunk_index_y: chunk.chunk_y,
+            chunk_world_size: CHUNK_WORLD_SIZE,
             ao_radius: config.ao_radius,
             sun_dir_x: lighting.sun_dir.x,
             sun_dir_y: lighting.sun_dir.y,
@@ -476,12 +473,16 @@ pub fn enqueue_terrain_bake_jobs(
             ambient_g: lighting.ambient_rgb.y,
             ambient_b: lighting.ambient_rgb.z,
             num_lights: lighting.lights.len() as u32,
+            margin: grid.margin as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
 
         queue.pending.push_back(GpuBakeQueueEntry {
             chunk_x: chunk.chunk_x,
             chunk_y: chunk.chunk_y,
-            resolution: res,
+            grid,
             uniforms_data,
             heightmap_bytes: cache.into_data(),
             bvh: bvh.clone(),
@@ -514,7 +515,8 @@ fn dispatch_chunk(
     buffers: &mut Assets<ShaderBuffer>,
     pending: &mut GpuBakePending,
 ) {
-    let texel_count = (entry.resolution * entry.resolution) as usize;
+    let padded = entry.grid.padded() as u32;
+    let texel_count = (padded * padded) as usize;
     // One `vec2<u32>` per texel: four packed f16s, i.e. an Rgba16Float texel.
     let byte_count = texel_count * 2 * std::mem::size_of::<u32>();
 
@@ -523,7 +525,7 @@ fn dispatch_chunk(
     out_buf.buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
     let out_handle = buffers.add(out_buf);
 
-    let total_strips = entry.resolution.div_ceil(strip_rows);
+    let total_strips = padded.div_ceil(strip_rows);
 
     // Build one uniform set per strip, differing only in row_offset.
     let mut strip_uniforms = Vec::with_capacity(total_strips as usize);
@@ -536,7 +538,7 @@ fn dispatch_chunk(
     pending.jobs.push(GpuBakeChunkJob {
         chunk_x: entry.chunk_x,
         chunk_y: entry.chunk_y,
-        resolution: entry.resolution,
+        grid: entry.grid,
         strip_rows,
         strip_uniforms,
         heightmap_bytes: entry.heightmap_bytes,
@@ -569,7 +571,7 @@ pub fn top_up_gpu_bake(
     while queue.in_flight < config.gpu_parallel_chunks && !queue.pending.is_empty() {
         let entry = queue.pending.pop_front().unwrap();
         let remaining = queue.pending.len();
-        let total_strips = entry.resolution.div_ceil(config.dispatch_strip_rows);
+        let total_strips = (entry.grid.padded() as u32).div_ceil(config.dispatch_strip_rows);
         let chunk_x = entry.chunk_x;
         let chunk_y = entry.chunk_y;
 
@@ -592,7 +594,7 @@ pub fn top_up_gpu_bake(
             BakeReadbackTag {
                 chunk_x,
                 chunk_y,
-                resolution: chunk_job.resolution,
+                grid: chunk_job.grid,
                 material_handle: chunk_job.material_handle,
                 dest: chunk_job.dest.clone(),
             },
@@ -761,7 +763,7 @@ fn prepare_gpu_bake_jobs(
 
             in_flight.strips.push(BakeInFlightStrip {
                 bind_group,
-                resolution: chunk_job.resolution,
+                resolution: chunk_job.grid.padded() as u32,
                 strip_rows: chunk_job.strip_rows,
                 _uniform_buf: uniform_buf,
             });
@@ -814,23 +816,26 @@ fn handle_bake_complete(
     };
 
     let raw_bytes: &[u8] = &trigger.data;
-    let res = tag.resolution as usize;
+    let padded = tag.grid.padded();
 
-    // The shader wrote one Rgba16Float texel (two packed f16 pairs) per entry.
-    let Some(raw) = LightmapBuffer::from_rgba16_bytes(res, raw_bytes) else {
+    // The shader wrote one Rgba16Float texel (two packed f16 pairs) per entry
+    // of the padded grid.
+    let Some(raw) = LightmapBuffer::from_rgba16_bytes(padded, raw_bytes) else {
         error!(
             "GPU bake readback size mismatch for chunk ({}, {}): expected {} bytes, got {}",
             tag.chunk_x,
             tag.chunk_y,
-            res * res * 8,
+            padded * padded * 8,
             raw_bytes.len()
         );
         commands.entity(entity).try_despawn();
         return;
     };
 
-    // Blur to eliminate per-texel Monte Carlo variance before toon quantization.
-    let lightmap = raw.blur(config.blur_radius);
+    // Blur to eliminate per-texel Monte Carlo variance before toon
+    // quantization, then drop the margin that let the blur see past the
+    // chunk edge (see `ChunkBakeGrid`).
+    let lightmap = raw.blur(config.blur_radius).crop(tag.grid.margin);
 
     // A failed write is logged but the live material still gets the result.
     if let Err(e) = store_lightmap(&tag.dest, &lightmap) {
