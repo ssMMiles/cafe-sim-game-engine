@@ -20,6 +20,7 @@
 use bevy::prelude::*;
 use engine_api::ScriptBindings;
 
+use crate::editor::history::{Change, History};
 use crate::editor::object_placement::PlacementPreview;
 use crate::editor::picking::{PlacedPicker, ViewportInput};
 use crate::editor::selection::Selection;
@@ -63,6 +64,7 @@ pub fn handle_grab_keys(
     mut registry: ResMut<PlacedObjectRegistry>,
     mut config: ResMut<PlacementConfig>,
     mut selection: ResMut<Selection>,
+    mut history: ResMut<History>,
     mut picker: PlacedPicker,
     placed_query: Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
 ) {
@@ -111,6 +113,13 @@ pub fn handle_grab_keys(
             "Destroyed grabbed {} id={}",
             payload.record.kind.label(),
             payload.record.id
+        );
+        history.push(
+            format!("Delete '{}'", record_display_name(&payload.record)),
+            vec![Change::Despawn {
+                chunk: payload.origin_chunk,
+                record: payload.record,
+            }],
         );
         finish_grab(
             &mut config,
@@ -188,6 +197,7 @@ pub fn place_grabbed_object(
     mut config: ResMut<PlacementConfig>,
     mut next_tool: ResMut<NextState<EditorTool>>,
     mut selection: ResMut<Selection>,
+    mut history: ResMut<History>,
     asset_server: Res<AssetServer>,
     preview_query: Query<(&Transform, &Visibility), With<PlacementPreview>>,
 ) {
@@ -210,6 +220,7 @@ pub fn place_grabbed_object(
         return;
     };
     let mut record = payload.record;
+    let before = record.transform();
 
     record.position = preview_transform.translation.into();
     record.rotation = preview_transform.rotation.to_array();
@@ -223,6 +234,16 @@ pub fn place_grabbed_object(
     registry.dirty_chunks.insert(chunk);
     registry.dirty_chunks.insert(payload.origin_chunk);
     selection.primary = Some(entity);
+    // The id survived the carry, so this is a move; undo re-derives the
+    // chunk from the restored transform.
+    history.push(
+        format!("Move '{}'", record_display_name(&record)),
+        vec![Change::Transform {
+            id: record.id,
+            before,
+            after: *preview_transform,
+        }],
+    );
 
     info!(
         "Dropped placed {} id={} into chunk {chunk:?}",
@@ -302,6 +323,14 @@ fn restore_grabbed(
         payload.previous_config,
         payload.previous_tool,
     );
+}
+
+fn record_display_name(record: &PlacedEntityRecord) -> String {
+    if record.name.is_empty() {
+        record.kind.label().to_owned()
+    } else {
+        record.name.clone()
+    }
 }
 
 /// `next_tool` is `None` when the grab is ending because the tool already

@@ -20,7 +20,7 @@ use bevy_egui::egui;
 
 use super::Panels;
 use crate::editor::actions::EditorAction;
-use crate::editor::edits::{EditKind, PlacedEdited};
+use crate::editor::edits::PlacedEdited;
 use crate::game::world::objects::PlacedKind;
 
 #[derive(Resource, Default)]
@@ -350,11 +350,8 @@ fn rename_field(ui: &mut egui::Ui, panels: &mut Panels, row: &Row) {
         if let Ok((_, mut obj, _, _, _)) = panels.placed.get_mut(row.entity)
             && obj.name != new_name
         {
-            obj.name = new_name;
-            panels.edits.write(PlacedEdited {
-                entity: row.entity,
-                what: EditKind::Name,
-            });
+            let before = std::mem::replace(&mut obj.name, new_name);
+            panels.edits.write(PlacedEdited::name(row.entity, before));
         }
     }
 }

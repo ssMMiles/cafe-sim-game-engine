@@ -366,7 +366,10 @@ pub fn add_gpu_baking_to_app(app: &mut App) {
         .insert_resource(supported)
         .init_resource::<GpuBakeExtracted>()
         .init_resource::<GpuBakeInFlight>()
-        .add_systems(RenderStartup, (init_gpu_bake_pipeline, detect_compute_support))
+        .add_systems(
+            RenderStartup,
+            (init_gpu_bake_pipeline, detect_compute_support),
+        )
         .add_systems(ExtractSchedule, extract_bake_jobs)
         .add_systems(
             RenderGraph,

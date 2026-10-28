@@ -14,11 +14,13 @@
 
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
+use engine_api::ScriptBindings;
 
 use super::grab::GrabbedEntity;
+use super::history::{Change, History};
 use super::picking::{PlacedPicker, ViewportInput};
 use crate::game::gfx::camera::PlayerCamera;
-use crate::game::world::objects::{PlacedObject, PlacedObjectRegistry};
+use crate::game::world::objects::{PlacedEntityRecord, PlacedObject, PlacedObjectRegistry};
 
 const SELECTED_COLOR: Color = Color::srgb(1.0, 0.75, 0.2);
 const HOVER_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
@@ -256,7 +258,9 @@ pub fn delete_selected(
     grabbed: Res<GrabbedEntity>,
     mut selection: ResMut<Selection>,
     mut registry: ResMut<PlacedObjectRegistry>,
+    mut history: ResMut<History>,
     mut placed: PlacedTree,
+    bindings: Query<&ScriptBindings>,
 ) {
     if grabbed.0.is_some() || !input.just_pressed(KeyCode::Delete) {
         return;
@@ -265,20 +269,36 @@ pub fn delete_selected(
         return;
     };
     let recursive = input.pressed(KeyCode::ShiftLeft) || input.pressed(KeyCode::ShiftRight);
-    delete_placed(&mut commands, &mut registry, &mut placed, entity, recursive);
+    delete_placed(
+        &mut commands,
+        &mut registry,
+        &mut history,
+        &mut placed,
+        &bindings,
+        entity,
+        recursive,
+    );
 }
 
-/// Remove a placed entity from the world and schedule its chunk for saving.
+/// Remove a placed entity from the world and schedule its chunk for saving,
+/// recording one undo transaction.
 ///
 /// Deleting a group re-files its members under the group's own parent, so
 /// nothing is lost by accident; `recursive` deletes the members too.
 pub fn delete_placed(
     commands: &mut Commands,
     registry: &mut PlacedObjectRegistry,
+    history: &mut History,
     placed: &mut PlacedTree,
+    bindings: &Query<&ScriptBindings>,
     entity: Entity,
     recursive: bool,
 ) {
+    let record_of = |placed: &PlacedTree, entity: Entity| -> Option<PlacedEntityRecord> {
+        let (_, obj, transform) = placed.get(entity).ok()?;
+        Some(obj.to_record(transform, bindings.get(entity).ok()))
+    };
+
     let Ok((_, obj, _)) = placed.get(entity) else {
         return;
     };
@@ -289,19 +309,39 @@ pub fn delete_placed(
         obj.parent,
         obj.kind.is_group(),
     );
+    let display = obj.display_name();
+    let Some(record) = record_of(placed, entity) else {
+        return;
+    };
+    // Member changes first, the group itself last: undo runs in reverse, so
+    // the group exists again before its members are re-filed / re-spawned.
+    let mut changes = Vec::new();
 
     if is_group {
         if recursive {
             for member in descendants(id, placed) {
-                if let Ok((_, m, _)) = placed.get(member) {
-                    registry.by_id.remove(&m.id);
-                    registry.mark_dirty(m.chunk);
+                let Ok((_, m, _)) = placed.get(member) else {
+                    continue;
+                };
+                let (m_id, m_chunk) = (m.id, m.chunk);
+                if let Some(record) = record_of(placed, member) {
+                    changes.push(Change::Despawn {
+                        chunk: m_chunk,
+                        record,
+                    });
                 }
+                registry.by_id.remove(&m_id);
+                registry.mark_dirty(m_chunk);
                 commands.entity(member).despawn();
             }
         } else {
             for (_, mut m, _) in placed.iter_mut() {
                 if m.parent == Some(id) {
+                    changes.push(Change::Parent {
+                        id: m.id,
+                        before: Some(id),
+                        after: parent,
+                    });
                     m.parent = parent;
                     registry.mark_dirty(m.chunk);
                 }
@@ -309,9 +349,11 @@ pub fn delete_placed(
         }
     }
 
+    changes.push(Change::Despawn { chunk, record });
     registry.by_id.remove(&id);
     registry.mark_dirty(chunk);
     commands.entity(entity).despawn();
+    history.push(format!("Delete '{display}'"), changes);
     info!("Deleted placed {label} id={id} from chunk {chunk:?}");
 }
 
@@ -379,6 +421,7 @@ mod tests {
     fn deleting_a_group_refiles_members_under_its_parent() {
         let mut world = World::new();
         world.init_resource::<PlacedObjectRegistry>();
+        world.init_resource::<History>();
         let outer = world.spawn(placed(1, PlacedKind::Group, None)).id();
         let inner = world.spawn(placed(2, PlacedKind::Group, Some(1))).id();
         let leaf = world.spawn(placed(3, PlacedKind::Empty, Some(2))).id();
@@ -386,13 +429,23 @@ mod tests {
         let mut system = IntoSystem::into_system(
             |mut commands: Commands,
              mut registry: ResMut<PlacedObjectRegistry>,
-             mut placed: PlacedTree| {
+             mut history: ResMut<History>,
+             mut placed: PlacedTree,
+             bindings: Query<&ScriptBindings>| {
                 let target = placed
                     .iter()
                     .find(|(_, o, _)| o.id == 2)
                     .map(|(e, _, _)| e)
                     .unwrap();
-                delete_placed(&mut commands, &mut registry, &mut placed, target, false);
+                delete_placed(
+                    &mut commands,
+                    &mut registry,
+                    &mut history,
+                    &mut placed,
+                    &bindings,
+                    target,
+                    false,
+                );
             },
         );
         system.initialize(&mut world);
@@ -418,6 +471,7 @@ mod tests {
     fn recursive_delete_takes_members_too() {
         let mut world = World::new();
         world.init_resource::<PlacedObjectRegistry>();
+        world.init_resource::<History>();
         let group = world.spawn(placed(1, PlacedKind::Group, None)).id();
         let leaf = world.spawn(placed(2, PlacedKind::Empty, Some(1))).id();
         let other = world.spawn(placed(3, PlacedKind::Empty, None)).id();
@@ -425,8 +479,18 @@ mod tests {
         let mut system = IntoSystem::into_system(
             move |mut commands: Commands,
                   mut registry: ResMut<PlacedObjectRegistry>,
-                  mut placed: PlacedTree| {
-                delete_placed(&mut commands, &mut registry, &mut placed, group, true);
+                  mut history: ResMut<History>,
+                  mut placed: PlacedTree,
+                  bindings: Query<&ScriptBindings>| {
+                delete_placed(
+                    &mut commands,
+                    &mut registry,
+                    &mut history,
+                    &mut placed,
+                    &bindings,
+                    group,
+                    true,
+                );
             },
         );
         system.initialize(&mut world);
@@ -436,5 +500,12 @@ mod tests {
         assert!(world.get_entity(group).is_err());
         assert!(world.get_entity(leaf).is_err());
         assert!(world.get_entity(other).is_ok());
+        let history = world.resource::<History>();
+        assert_eq!(
+            history.undo_len(),
+            1,
+            "one transaction for the whole delete"
+        );
+        assert_eq!(history.undo_label(), Some("Delete 'Group'"));
     }
 }

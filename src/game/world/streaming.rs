@@ -162,6 +162,7 @@ pub fn update_streaming_ring(
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(Entity, &PlacedObject)>,
     mut heightmap: Option<ResMut<HeightmapData>>,
+    history: Option<Res<crate::editor::history::History>>,
 ) {
     // All three are inserted together by create_terrain; wait until they're available.
     let Some(terrain_world) = terrain_world else {
@@ -181,7 +182,10 @@ pub fn update_streaming_ring(
     // files from live entities and heightmap tiles, so unloading a dirty
     // chunk would make the next save overwrite its file with empty/flat
     // data. A dirty chunk stays resident until a save drains the dirty sets,
-    // after which it unloads normally.
+    // after which it unloads normally. Chunks the editor's undo history
+    // refers to are pinned the same way, so an undo can always find its
+    // target.
+    let pinned = history.as_ref().map(|h| &h.pinned);
     let to_unload: Vec<(i32, i32)> = state
         .loaded
         .iter()
@@ -190,6 +194,7 @@ pub fn update_streaming_ring(
         .filter(|chunk| {
             !chunk_registry.dirty_chunks.contains(chunk)
                 && !obj_registry.dirty_chunks.contains(chunk)
+                && !pinned.is_some_and(|p| p.contains(chunk))
         })
         .collect();
 
@@ -348,11 +353,7 @@ pub fn update_streaming_ring(
             // "unbaked", so every failure collapses to `None`.
             {
                 let s = crate::storage::wasm::WasmStorage;
-                let key = super::baking::lightmap::terrain_lightmap_key(
-                    &metadata.world_id,
-                    cx,
-                    cy,
-                );
+                let key = super::baking::lightmap::terrain_lightmap_key(&metadata.world_id, cx, cy);
                 let slot = lightmap_slot.clone();
                 spawn_local(async move {
                     let result = match s.load(&key).await {
@@ -401,9 +402,9 @@ pub fn launch_chunk_tasks(
     // the chunk's slot, so this closure is unused there.
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     let lightmap_src = |cx: i32, cy: i32| -> Option<LightmapSource> {
-        terrain_world.as_ref().map(|w| {
-            super::baking::lightmap::terrain_lightmap_path(&w.world_path, cx, cy)
-        })
+        terrain_world
+            .as_ref()
+            .map(|w| super::baking::lightmap::terrain_lightmap_path(&w.world_path, cx, cy))
     };
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     let _ = &terrain_world;
@@ -492,8 +493,8 @@ pub fn launch_chunk_tasks(
             let (cx, cy) = chunk_coord;
 
             let lm = lightmap_src(cx, cy);
-            let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm) });
+            let task =
+                thread_pool.spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm) });
 
             state.computing.insert(
                 chunk_coord,
@@ -538,11 +539,9 @@ pub fn launch_chunk_tasks(
                 apply_chunk_to_heightmap(&mut heightmap, data);
             }
 
-            let lm: Option<LightmapSource> =
-                pending.opfs_lightmap.lock().unwrap().take().flatten();
-            let task = thread_pool.spawn(async move {
-                compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm)
-            });
+            let lm: Option<LightmapSource> = pending.opfs_lightmap.lock().unwrap().take().flatten();
+            let task = thread_pool
+                .spawn(async move { compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm) });
 
             state
                 .computing

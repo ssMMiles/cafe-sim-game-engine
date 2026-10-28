@@ -209,7 +209,13 @@ pub fn bake_terrain_lightmaps(
 
 /// Bilinearly read the coarse AO/bounce grid at full-resolution texel
 /// `(tx, ty)`. `grid` is `cg × cg` samples taken every `step` texels.
-fn sample_low_freq(grid: &[(f32, f32)], cg: usize, tx: usize, ty: usize, step: usize) -> (f32, f32) {
+fn sample_low_freq(
+    grid: &[(f32, f32)],
+    cg: usize,
+    tx: usize,
+    ty: usize,
+    step: usize,
+) -> (f32, f32) {
     let fx = tx as f32 / step as f32;
     let fy = ty as f32 / step as f32;
     let x0 = (fx.floor() as usize).min(cg - 1);
@@ -276,7 +282,10 @@ mod tests {
             for ty in (0..res).step_by(3) {
                 for tx in (0..res).step_by(3) {
                     let (ao, bounce) = sample_low_freq(&grid, cg, tx, ty, step);
-                    assert!((ao - tx as f32).abs() < 1e-3, "step {step} ao at {tx}: {ao}");
+                    assert!(
+                        (ao - tx as f32).abs() < 1e-3,
+                        "step {step} ao at {tx}: {ao}"
+                    );
                     assert!(
                         (bounce - ty as f32).abs() < 1e-3,
                         "step {step} bounce at {ty}: {bounce}"

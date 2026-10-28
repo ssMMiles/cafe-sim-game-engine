@@ -33,6 +33,7 @@ use super::catalog::MeshCatalog;
 use super::controls::ActiveControls;
 use super::edits::{LightingState, PlacedEdited, RespawnPlaced, ScriptEdit};
 use super::grab::GrabbedEntity;
+use super::history::History;
 use super::picking::ViewportInput;
 use super::selection::Selection;
 use super::terrain_edit::BrushSettings;
@@ -149,6 +150,7 @@ pub struct Panels<'w, 's> {
     pub settings: ResMut<'w, UserSettings>,
     pub brush: ResMut<'w, BrushSettings>,
     pub lighting: ResMut<'w, LightingState>,
+    pub history: ResMut<'w, History>,
     pub registry: Res<'w, PlacedObjectRegistry>,
     pub grabbed: Res<'w, GrabbedEntity>,
     pub cam_settings: Res<'w, EditorCameraSettings>,
@@ -165,11 +167,7 @@ pub struct Panels<'w, 's> {
 impl Panels<'_, '_> {
     /// Display name for a placed entity: its label, or its kind.
     pub fn display_name(obj: &PlacedObject) -> String {
-        if obj.name.is_empty() {
-            obj.kind.label().to_owned()
-        } else {
-            obj.name.clone()
-        }
+        obj.display_name()
     }
 }
 
@@ -267,6 +265,10 @@ pub(super) fn editor_ui(
             } else {
                 ui.weak("lighting baked");
             }
+            if let Some(notice) = panels.history.notice() {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), notice);
+            }
         });
     });
 
@@ -286,6 +288,13 @@ pub(super) fn editor_ui(
         .show_leaf_close_all_buttons(false)
         .show_leaf_collapse_buttons(false)
         .show_inside(&mut root, &mut tabs);
+
+    // Whether a widget interaction is still in flight: a drag, an open popup
+    // (colour picker) or a focused field. The undo stack keeps a continuous
+    // edit's transaction open while this holds.
+    current.egui_busy = ctx.egui_is_using_pointer()
+        || egui::Popup::is_any_open(&ctx)
+        || ctx.egui_wants_keyboard_input();
 
     *viewport = current;
 }

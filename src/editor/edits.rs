@@ -14,37 +14,72 @@
 //! from the new props (and resets their runtime state — panels therefore
 //! commit on release/blur, never per frame).
 //!
-//! This is also the seam a future undo stack hooks: everything that changes
-//! level data passes through this module.
+//! This is also where the undo stack records: every message carries the value
+//! it replaced, and the systems here push a [`history::Change`] for each —
+//! unless the message is a replay *from* the history (`PlacedEdited::replay`,
+//! `ScriptEdit::Replace`), which is applied but never recorded.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 use engine_api::{ScriptBinding, ScriptBindings, ScriptProp, ScriptRegistry};
 
+use super::history::{self, Change, History, MergeKey};
 use super::selection::{PlacedTree, Selection, descendants};
 use crate::game::gltf_loading::Interactable;
 use crate::game::world::baking::BakeMessage;
 use crate::game::world::objects::{
-    PlacedObject, PlacedObjectRegistry, spawn_entity_record, world_pos_to_chunk,
+    PlacedKind, PlacedObject, PlacedObjectRegistry, spawn_entity_record, world_pos_to_chunk,
 };
 use crate::script_host::NeedsHydration;
 
-/// What changed on a placed entity. Sent after the component was mutated.
-#[derive(Message, Debug, Clone, Copy)]
+/// What changed on a placed entity. Sent after the component was mutated,
+/// carrying the value it had before so the change can be undone.
+#[derive(Message, Debug, Clone)]
 pub struct PlacedEdited {
     pub entity: Entity,
     pub what: EditKind,
+    /// Sent by the undo stack itself: apply the bookkeeping, but neither
+    /// record it nor cascade a group move to its members (the history holds
+    /// every member's exact transform).
+    pub replay: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl PlacedEdited {
+    pub fn transform(entity: Entity, before: Transform) -> Self {
+        Self::new(entity, EditKind::Transform { before })
+    }
+
+    pub fn name(entity: Entity, before: String) -> Self {
+        Self::new(entity, EditKind::Name { before })
+    }
+
+    pub fn kind(entity: Entity, before: PlacedKind) -> Self {
+        Self::new(entity, EditKind::Kind { before })
+    }
+
+    fn new(entity: Entity, what: EditKind) -> Self {
+        Self {
+            entity,
+            what,
+            replay: false,
+        }
+    }
+
+    pub fn replayed(mut self) -> Self {
+        self.replay = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum EditKind {
     /// `Transform` changed: may have crossed a chunk boundary; lighting stale.
-    Transform,
+    Transform { before: Transform },
     /// `PlacedObject.name` changed: gameplay `Interactable` labels follow.
-    Name,
+    Name { before: String },
     /// `PlacedObject.kind` parameters changed in place (light colour, range…).
-    Kind,
+    Kind { before: PlacedKind },
 }
 
 /// Script-binding edits. Applied by [`apply_script_edits`].
@@ -66,6 +101,12 @@ pub enum ScriptEdit {
         plugin: String,
         script: String,
         props: Vec<ScriptProp>,
+    },
+    /// Undo/redo: make the binding list exactly `bindings`, re-hydrating
+    /// everything. Never recorded.
+    Replace {
+        entity: Entity,
+        bindings: Vec<ScriptBinding>,
     },
 }
 
@@ -95,6 +136,7 @@ pub fn commit_placed_edits(
     mut edits: MessageReader<PlacedEdited>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut lighting: ResMut<LightingState>,
+    mut history: ResMut<History>,
     mut placed: PlacedTree,
     children: Query<&Children>,
     mut interactables: Query<&mut Interactable>,
@@ -105,27 +147,56 @@ pub fn commit_placed_edits(
             continue;
         };
         let (id, chunk, is_group) = (obj.id, obj.chunk, obj.kind.is_group());
+        let display = obj.display_name();
         let new_transform = *transform;
         registry.mark_dirty(chunk);
 
-        match edit.what {
-            EditKind::Transform => {
+        match &edit.what {
+            EditKind::Transform { before } => {
                 rederive_chunk(&mut placed, &mut registry, edit.entity);
                 lighting.stale = true;
 
-                if is_group && let Some(old) = group_transforms.get(&edit.entity).copied() {
+                let mut tx = (!edit.replay).then(|| {
+                    history.merge_or_push(
+                        MergeKey::Transform(id),
+                        format!("Move '{display}'"),
+                        Change::Transform {
+                            id,
+                            before: *before,
+                            after: new_transform,
+                        },
+                    )
+                });
+
+                // Members follow a group by the group's delta. Each member's
+                // move is recorded on its own, so undo restores exact
+                // transforms rather than re-running the cascade (which would
+                // miss members that weren't loaded at the time, or move ones
+                // that were).
+                if is_group
+                    && !edit.replay
+                    && let Some(old) = group_transforms.get(&edit.entity).copied()
+                {
                     let delta = new_transform.to_matrix() * old.to_matrix().inverse();
                     if delta != Mat4::IDENTITY {
                         for member in descendants(id, &placed) {
-                            if let Ok((_, _, mut t)) = placed.get_mut(member) {
+                            if let Ok((_, m, mut t)) = placed.get_mut(member) {
+                                let before = *t;
                                 *t = Transform::from_matrix(delta * t.to_matrix());
+                                if let Some(tx) = tx.as_deref_mut() {
+                                    tx.absorb(Change::Transform {
+                                        id: m.id,
+                                        before,
+                                        after: *t,
+                                    });
+                                }
                             }
                             rederive_chunk(&mut placed, &mut registry, member);
                         }
                     }
                 }
             }
-            EditKind::Name => {
+            EditKind::Name { before } => {
                 // The label is cloned onto the root and every mesh child at
                 // scene-ready time (`propagate_to_mesh_children`); keep them
                 // all in step.
@@ -134,17 +205,42 @@ pub fn commit_placed_edits(
                 } else {
                     obj.name.clone()
                 };
+                let after = obj.name.clone();
                 for e in std::iter::once(edit.entity).chain(children.iter_descendants(edit.entity))
                 {
                     if let Ok(mut i) = interactables.get_mut(e) {
                         i.name = label.clone();
                     }
                 }
+                if !edit.replay {
+                    history.push(
+                        format!(
+                            "Rename '{}' to '{label}'",
+                            history::name_or_kind(before, obj)
+                        ),
+                        vec![Change::Name {
+                            id,
+                            before: before.clone(),
+                            after,
+                        }],
+                    );
+                }
             }
-            EditKind::Kind => {
+            EditKind::Kind { before } => {
                 // The baker and the light gizmo read `PlacedObject.kind`
                 // live, so nothing to propagate — only the bake is stale.
                 lighting.stale = true;
+                if !edit.replay {
+                    history.merge_or_push(
+                        MergeKey::Kind(id),
+                        format!("Edit '{display}'"),
+                        Change::Kind {
+                            id,
+                            before: before.clone(),
+                            after: obj.kind.clone(),
+                        },
+                    );
+                }
             }
         }
     }
@@ -181,22 +277,29 @@ pub fn apply_script_edits(
     mut edits: MessageReader<ScriptEdit>,
     script_registry: Res<ScriptRegistry>,
     mut registry: ResMut<PlacedObjectRegistry>,
+    mut history: ResMut<History>,
     placed: Query<&PlacedObject>,
     mut bindings_query: Query<&mut ScriptBindings>,
 ) {
     for edit in edits.read() {
-        match edit {
-            ScriptEdit::Attach {
-                entity,
-                plugin,
-                script,
-            } => {
-                let Ok(obj) = placed.get(*entity) else {
-                    continue;
-                };
-                if bindings_query
-                    .get(*entity)
-                    .is_ok_and(|b| b.iter().any(|x| &x.plugin == plugin && &x.script == script))
+        let entity = match edit {
+            ScriptEdit::Attach { entity, .. }
+            | ScriptEdit::Detach { entity, .. }
+            | ScriptEdit::SetProps { entity, .. }
+            | ScriptEdit::Replace { entity, .. } => *entity,
+        };
+        let Ok(obj) = placed.get(entity) else {
+            continue;
+        };
+        let before: Vec<ScriptBinding> = bindings_query
+            .get(entity)
+            .map(|b| b.0.clone())
+            .unwrap_or_default();
+        let label = match edit {
+            ScriptEdit::Attach { plugin, script, .. } => {
+                if before
+                    .iter()
+                    .any(|x| &x.plugin == plugin && &x.script == script)
                 {
                     info!("{plugin}/{script} already attached to id={}", obj.id);
                     continue;
@@ -206,55 +309,44 @@ pub fn apply_script_edits(
                     .map(|r| r.schema.default_props())
                     .unwrap_or_default();
                 let binding = ScriptBinding::new(plugin.clone(), script.clone()).with_props(props);
-                match bindings_query.get_mut(*entity) {
+                match bindings_query.get_mut(entity) {
                     Ok(mut existing) => existing.0.push(binding),
                     Err(_) => {
                         commands
-                            .entity(*entity)
+                            .entity(entity)
                             .insert(ScriptBindings(vec![binding]));
                     }
                 }
-                commands.entity(*entity).insert(NeedsHydration);
-                registry.mark_dirty(obj.chunk);
+                commands.entity(entity).insert(NeedsHydration);
                 info!("Attached {plugin}/{script} to placed id={}", obj.id);
+                format!("Attach {plugin}/{script}")
             }
-            ScriptEdit::Detach {
-                entity,
-                plugin,
-                script,
-            } => {
-                let Ok(obj) = placed.get(*entity) else {
+            ScriptEdit::Detach { plugin, script, .. } => {
+                let Ok(mut existing) = bindings_query.get_mut(entity) else {
                     continue;
                 };
-                let Ok(mut existing) = bindings_query.get_mut(*entity) else {
-                    continue;
-                };
-                let before = existing.0.len();
                 existing
                     .0
                     .retain(|b| !(&b.plugin == plugin && &b.script == script));
-                if existing.0.len() == before {
+                if existing.0.len() == before.len() {
                     continue;
                 }
                 if existing.0.is_empty() {
                     commands
-                        .entity(*entity)
+                        .entity(entity)
                         .remove::<(ScriptBindings, NeedsHydration)>();
                 }
-                queue_detach(&mut commands, *entity, plugin, script);
-                registry.mark_dirty(obj.chunk);
+                queue_detach(&mut commands, entity, plugin, script);
                 info!("Detached {plugin}/{script} from placed id={}", obj.id);
+                format!("Detach {plugin}/{script}")
             }
             ScriptEdit::SetProps {
-                entity,
                 plugin,
                 script,
                 props,
+                ..
             } => {
-                let Ok(obj) = placed.get(*entity) else {
-                    continue;
-                };
-                let Ok(mut existing) = bindings_query.get_mut(*entity) else {
+                let Ok(mut existing) = bindings_query.get_mut(entity) else {
                     continue;
                 };
                 let Some(binding) = existing
@@ -270,11 +362,58 @@ pub fn apply_script_edits(
                 binding.props = props.clone();
                 // Hydration skips (plugin, script) pairs it has already done,
                 // so strip the old components first and re-arm.
-                queue_detach(&mut commands, *entity, plugin, script);
-                commands.entity(*entity).insert(NeedsHydration);
-                registry.mark_dirty(obj.chunk);
+                queue_detach(&mut commands, entity, plugin, script);
+                commands.entity(entity).insert(NeedsHydration);
+                format!("Edit {plugin}/{script} props")
             }
-        }
+            ScriptEdit::Replace { bindings, .. } => {
+                if *bindings == before {
+                    continue;
+                }
+                // Everything hydrated goes, then the whole target list is
+                // re-armed: exact, and re-hydrating an unchanged binding is
+                // harmless in the editor.
+                for b in &before {
+                    queue_detach(&mut commands, entity, &b.plugin, &b.script);
+                }
+                if bindings.is_empty() {
+                    commands
+                        .entity(entity)
+                        .remove::<(ScriptBindings, NeedsHydration)>();
+                } else {
+                    commands
+                        .entity(entity)
+                        .insert((ScriptBindings(bindings.clone()), NeedsHydration));
+                }
+                registry.mark_dirty(obj.chunk);
+                continue; // a replay: never recorded
+            }
+        };
+        registry.mark_dirty(obj.chunk);
+
+        // `after` for Attach/Detach/SetProps is what the component now holds
+        // (Attach of a first binding went through `commands`, so build it).
+        let after = match edit {
+            ScriptEdit::Attach { plugin, script, .. } if before.is_empty() => {
+                let props = script_registry
+                    .get(plugin, script)
+                    .map(|r| r.schema.default_props())
+                    .unwrap_or_default();
+                vec![ScriptBinding::new(plugin.clone(), script.clone()).with_props(props)]
+            }
+            _ => bindings_query
+                .get(entity)
+                .map(|b| b.0.clone())
+                .unwrap_or_default(),
+        };
+        history.push(
+            label,
+            vec![Change::Scripts {
+                id: obj.id,
+                before,
+                after,
+            }],
+        );
     }
 }
 
@@ -294,6 +433,7 @@ pub fn respawn_placed(
     mut registry: ResMut<PlacedObjectRegistry>,
     mut selection: ResMut<Selection>,
     mut lighting: ResMut<LightingState>,
+    mut history: ResMut<History>,
     placed: Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
 ) {
     for request in requests.read() {
@@ -326,6 +466,17 @@ pub fn respawn_placed(
         registry.mark_dirty(chunk);
         lighting.stale = true;
         selection.primary = Some(new_entity);
+        // An in-place respawn was caused by a `Kind` change that is already
+        // recorded; only a duplicate is a new fact.
+        if duplicate {
+            history.push(
+                format!("Duplicate '{}'", obj.display_name()),
+                vec![Change::Spawn {
+                    chunk,
+                    record: record.clone(),
+                }],
+            );
+        }
         info!(
             "{} placed {} id={}",
             if duplicate { "Duplicated" } else { "Respawned" },

@@ -54,7 +54,7 @@ pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
 // ============================================================================
 
 /// One placed thing in a level: a mesh, a light, or a bare anchor.
-#[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+#[derive(Archive, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct PlacedEntityRecord {
     /// Stable id within this world, allocated by [`PlacedObjectRegistry`].
     /// Also keys the object's baked lightmap on disk.
@@ -377,6 +377,15 @@ pub struct PlacedObject {
 }
 
 impl PlacedObject {
+    /// Editor-facing label: the name, or the kind when unnamed.
+    pub fn display_name(&self) -> String {
+        if self.name.is_empty() {
+            self.kind.label().to_owned()
+        } else {
+            self.name.clone()
+        }
+    }
+
     /// Rebuild the on-disk record from live component state.
     ///
     /// Script bindings live in the separate [`ScriptBindings`] component (the

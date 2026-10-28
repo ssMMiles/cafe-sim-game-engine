@@ -629,7 +629,17 @@ mod cost {
         let t = Instant::now();
         for (i, &(o, mo, n)) in pts.iter().enumerate() {
             sink += compute_indirect_bounce(
-                o, mo, n, &cache, &bvh, sun_dir, reach, bounce_rays, shadow_steps, 0.5, 1,
+                o,
+                mo,
+                n,
+                &cache,
+                &bvh,
+                sun_dir,
+                reach,
+                bounce_rays,
+                shadow_steps,
+                0.5,
+                1,
                 i as u32,
             );
         }
@@ -640,9 +650,21 @@ mod cost {
         // 1024² texels per chunk.
         let chunk_ms = total * 1024.0 * 1024.0 / 1e6;
         println!("\n--- CPU terrain bake, per texel (sink={sink:.1}) ---");
-        println!("  sun shadow : {:8.0} ns  ({:5.1}%)", per(sun), 100.0 * per(sun) / total);
-        println!("  ao         : {:8.0} ns  ({:5.1}%)", per(ao), 100.0 * per(ao) / total);
-        println!("  bounce     : {:8.0} ns  ({:5.1}%)", per(bounce), 100.0 * per(bounce) / total);
+        println!(
+            "  sun shadow : {:8.0} ns  ({:5.1}%)",
+            per(sun),
+            100.0 * per(sun) / total
+        );
+        println!(
+            "  ao         : {:8.0} ns  ({:5.1}%)",
+            per(ao),
+            100.0 * per(ao) / total
+        );
+        println!(
+            "  bounce     : {:8.0} ns  ({:5.1}%)",
+            per(bounce),
+            100.0 * per(bounce) / total
+        );
         println!(
             "    (ao without any BVH: {:.0} ns => BVH traversal is {:.0} ns of ao)",
             per(ao_no_bvh),
@@ -650,7 +672,10 @@ mod cost {
         );
         println!("  total      : {total:8.0} ns");
         println!("  => {chunk_ms:.0} ms per 1024² chunk, single-threaded");
-        println!("  => {:.1} s for a 3x3 bake region, single-threaded", chunk_ms * 9.0 / 1000.0);
+        println!(
+            "  => {:.1} s for a 3x3 bake region, single-threaded",
+            chunk_ms * 9.0 / 1000.0
+        );
 
         // What the split-pass bake costs: sun every texel, ao+bounce on a
         // grid `d` times coarser (so 1/d² as many of them).

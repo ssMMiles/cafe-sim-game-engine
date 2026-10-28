@@ -556,7 +556,7 @@ impl LightmapBuffer {
     pub fn from_exr_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         // The builder methods live on these traits; `read_first_rgba_layer_from_file`
         // (the file-only convenience we used to call) has them in scope already.
-        use exr::image::read::{layers::ReadChannels, image::ReadLayers};
+        use exr::image::read::{image::ReadLayers, layers::ReadChannels};
 
         let image = exr::prelude::read()
             .no_deep_data()
@@ -681,7 +681,8 @@ pub fn try_load_lightmap_image(
 
 /// True for a file name that is a lightmap from some *older* bake format.
 fn is_stale_lightmap_name(name: &str) -> bool {
-    name.contains("_lightmap") && !name.ends_with(&format!("_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr"))
+    name.contains("_lightmap")
+        && !name.ends_with(&format!("_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr"))
 }
 
 fn warn_stale_count(stale: usize, world: &str) {

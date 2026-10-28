@@ -44,6 +44,7 @@ static CONTROLS: &[ControlRow] = &[
     row(Ctx::Base, "F1", "Gameplay"),
     row(Ctx::Base, "1 / 2 / 3", "Select / Place / Terrain"),
     row(Ctx::Base, "Esc", "Cancel / deselect"),
+    row(Ctx::Base, "Ctrl+Z / Ctrl+Shift+Z", "Undo / Redo"),
     row(Ctx::Base, "Shift+S", "Save"),
     row(Ctx::Base, "Shift+B", "Bake"),
     row(Ctx::Base, "Shift+L", "Lighting view"),

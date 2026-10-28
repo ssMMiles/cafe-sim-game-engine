@@ -41,6 +41,9 @@ pub struct ViewportInput {
     pub scroll: Vec2,
     /// Physical size of the tab body. The render target is resized to match.
     pub size_px: UVec2,
+    /// egui still has an interaction in flight (widget drag, open popup,
+    /// focused text field). Continuous edits stay coalesced while it holds.
+    pub egui_busy: bool,
 }
 
 impl ViewportInput {

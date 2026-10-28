@@ -13,7 +13,7 @@
 
 use bevy::prelude::*;
 
-use super::edits::{EditKind, PlacedEdited};
+use super::edits::PlacedEdited;
 use super::picking::{EditorRay, ViewportInput};
 use super::selection::Selection;
 use crate::game::gfx::camera::PlayerCamera;
@@ -196,11 +196,11 @@ pub fn update_transform_gizmo(
         && let Some(drag) = gizmo.drag.take()
         && let Ok(mut transform) = transforms.get_mut(drag.entity)
     {
+        // Restoring the start makes the coalesced history change a no-op,
+        // which `settle_history` drops when the drag's transaction closes.
+        let before = *transform;
         *transform = drag.start;
-        edits.write(PlacedEdited {
-            entity: drag.entity,
-            what: EditKind::Transform,
-        });
+        edits.write(PlacedEdited::transform(drag.entity, before));
     }
 
     let Some(entity) = selection.primary else {
@@ -224,6 +224,7 @@ pub fn update_transform_gizmo(
                 && let Ok(mut transform) = transforms.get_mut(drag.entity)
             {
                 let axis = drag.axis.dir();
+                let before = *transform;
                 let changed = match drag.mode {
                     GizmoMode::Translate => {
                         axis_ray_param(drag.start.translation, axis, ray).map(|t| {
@@ -244,10 +245,7 @@ pub fn update_transform_gizmo(
                     }
                 };
                 if changed == Some(true) {
-                    edits.write(PlacedEdited {
-                        entity: drag.entity,
-                        what: EditKind::Transform,
-                    });
+                    edits.write(PlacedEdited::transform(drag.entity, before));
                 }
             }
             return;

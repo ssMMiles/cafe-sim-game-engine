@@ -27,6 +27,7 @@ mod controls;
 mod edits;
 mod gizmo;
 mod grab;
+pub mod history;
 mod input;
 mod lightmap_toggle;
 mod object_placement;
@@ -57,6 +58,7 @@ use gizmo::{
     gizmo_pointer_free, reset_gizmo, update_transform_gizmo,
 };
 use grab::{GrabbedEntity, handle_grab_keys, place_grabbed_object, release_grab};
+use history::{History, apply_undo_redo, prepare_history, settle_history, undo_redo_hotkeys};
 use input::keyboard_free;
 use lightmap_toggle::{sync_lightmap_mode, toggle_lightmap_mode};
 use object_placement::{
@@ -129,7 +131,9 @@ impl Plugin for EditorPlugin {
         app.init_resource::<Selection>();
         app.add_systems(
             Update,
-            (compute_editor_ray, validate_selection).in_set(EditorSet::Prepare),
+            (compute_editor_ray, validate_selection, prepare_history)
+                .chain()
+                .in_set(EditorSet::Prepare),
         );
 
         // ── Edits and actions (panels → world) ───────────────────────────────
@@ -138,15 +142,21 @@ impl Plugin for EditorPlugin {
         app.add_message::<RespawnPlaced>();
         app.add_message::<EditorAction>();
         app.init_resource::<LightingState>();
+        app.init_resource::<History>();
+        // Undo/redo first: the messages it emits are committed below in the
+        // same frame. `settle_history` last: it sees this frame's recordings.
         app.add_systems(
             Update,
             (
+                undo_redo_hotkeys.run_if(keyboard_free),
+                apply_undo_redo,
                 apply_level_actions,
                 apply_selection_actions,
                 commit_placed_edits,
                 apply_script_edits,
                 respawn_placed,
                 clear_lighting_stale_on_bake,
+                settle_history,
             )
                 .chain()
                 .in_set(EditorSet::InGame),
@@ -341,6 +351,9 @@ mod tests {
     /// startup panic, not a compile error, so it is checked here.
     #[test]
     fn editor_systems_have_disjoint_parameters() {
+        initializes("apply_undo_redo", apply_undo_redo);
+        initializes("settle_history", settle_history);
+        initializes("prepare_history", prepare_history);
         initializes("apply_level_actions", apply_level_actions);
         initializes("apply_selection_actions", apply_selection_actions);
         initializes("commit_placed_edits", commit_placed_edits);

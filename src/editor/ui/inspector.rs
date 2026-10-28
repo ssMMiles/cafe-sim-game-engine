@@ -13,7 +13,8 @@ use engine_api::{PropValue, ScriptBinding, ScriptProp};
 
 use super::Panels;
 use crate::editor::actions::EditorAction;
-use crate::editor::edits::{EditKind, PlacedEdited, RespawnPlaced, ScriptEdit};
+use crate::editor::edits::{PlacedEdited, RespawnPlaced, ScriptEdit};
+use crate::editor::history::{Change, MergeKey};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -103,26 +104,32 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
 
         // ── Transform ────────────────────────────────────────────────────────────
         ui.collapsing_header_default_open("Transform", |ui| {
+            let before = *transform;
             if transform_fields(ui, entity, &mut transform, obj.kind.is_mesh(), state) {
-                panels.edits.write(PlacedEdited {
-                    entity,
-                    what: EditKind::Transform,
-                });
+                panels.edits.write(PlacedEdited::transform(entity, before));
             }
         });
 
         // ── Kind ─────────────────────────────────────────────────────────────────
         let kind_title = obj.kind.label();
         ui.collapsing_header_default_open(kind_title, |ui| {
+            let before = obj.kind.clone();
             match kind_fields(ui, &mut obj, &panels.config) {
                 KindChange::None => {}
                 KindChange::InPlace => {
-                    panels.edits.write(PlacedEdited {
-                        entity,
-                        what: EditKind::Kind,
-                    });
+                    panels.edits.write(PlacedEdited::kind(entity, before));
                 }
                 KindChange::Respawn => {
+                    // The respawn itself records nothing; the kind change is
+                    // the fact to remember.
+                    panels.history.push(
+                        format!("Edit '{}'", obj.display_name()),
+                        vec![Change::Kind {
+                            id: obj.id,
+                            before,
+                            after: obj.kind.clone(),
+                        }],
+                    );
                     panels.respawns.write(RespawnPlaced::InPlace(entity));
                 }
             }
@@ -216,11 +223,8 @@ fn header(
     if response.lost_focus() {
         let trimmed = draft.trim();
         if trimmed != obj.name {
-            obj.name = trimmed.to_owned();
-            edits.write(PlacedEdited {
-                entity: info.entity,
-                what: EditKind::Name,
-            });
+            let before = std::mem::replace(&mut obj.name, trimmed.to_owned());
+            edits.write(PlacedEdited::name(info.entity, before));
         }
         return None;
     }
@@ -751,8 +755,13 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
 
     if env != before {
         // Writing through `ResMut` is what `apply_environment` listens for.
-        tw.metadata.environment = env;
+        tw.metadata.environment = env.clone();
         panels.lighting.stale = true;
+        panels.history.merge_or_push(
+            MergeKey::Environment,
+            "Edit environment",
+            Change::Environment { before, after: env },
+        );
     }
 
     ui.separator();

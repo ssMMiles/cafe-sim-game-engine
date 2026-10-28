@@ -10,8 +10,11 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use engine_api::Player;
 
+use engine_api::ScriptBindings;
+
 use super::camera::place_camera_at_spawn;
 use super::edits::RespawnPlaced;
+use super::history::{Change, History};
 use super::selection::{PlacedTree, Selection, ancestors, delete_placed, descendants};
 use super::tool::EditorTool;
 use super::ui::MenuState;
@@ -54,6 +57,8 @@ pub enum EditorAction {
     GroupSelection,
     /// Dissolve the selected group, re-filing its members under its parent.
     UngroupSelection,
+    Undo,
+    Redo,
 }
 
 /// Everything `world::switch_world` needs, plus the editor camera to re-seat.
@@ -214,8 +219,10 @@ pub fn apply_selection_actions(
     mut next_tool: ResMut<NextState<EditorTool>>,
     mut selection: ResMut<Selection>,
     mut registry: ResMut<PlacedObjectRegistry>,
+    mut history: ResMut<History>,
     mut respawns: MessageWriter<RespawnPlaced>,
     mut placed: PlacedTree,
+    bindings: Query<&ScriptBindings>,
 ) {
     for action in actions.read() {
         match action {
@@ -227,7 +234,15 @@ pub fn apply_selection_actions(
             EditorAction::DeleteSelection | EditorAction::DeleteSelectionRecursive => {
                 if let Some(entity) = selection.primary.take() {
                     let recursive = *action == EditorAction::DeleteSelectionRecursive;
-                    delete_placed(&mut commands, &mut registry, &mut placed, entity, recursive);
+                    delete_placed(
+                        &mut commands,
+                        &mut registry,
+                        &mut history,
+                        &mut placed,
+                        &bindings,
+                        entity,
+                        recursive,
+                    );
                 }
             }
             EditorAction::DuplicateSelection => {
@@ -242,7 +257,18 @@ pub fn apply_selection_actions(
                 selection.primary = None;
             }
             EditorAction::SetParent { child, parent } => {
-                set_parent(*child, *parent, &mut placed, &mut registry);
+                if let Some((id, before, after)) =
+                    set_parent(*child, *parent, &mut placed, &mut registry)
+                {
+                    let name = placed
+                        .get(*child)
+                        .map(|(_, o, _)| o.display_name())
+                        .unwrap_or_default();
+                    history.push(
+                        format!("Move '{name}' in outliner"),
+                        vec![Change::Parent { id, before, after }],
+                    );
+                }
             }
             EditorAction::GroupSelection => {
                 let Some(entity) = selection.primary else {
@@ -255,7 +281,8 @@ pub fn apply_selection_actions(
                 let Ok((_, obj, transform)) = placed.get(entity) else {
                     continue;
                 };
-                let (child_id, child_parent, chunk) = (obj.id, obj.parent, obj.chunk);
+                let (child_id, child_parent, chunk, child_name) =
+                    (obj.id, obj.parent, obj.chunk, obj.display_name());
                 let id = registry.alloc_id();
                 let record = PlacedEntityRecord::new(
                     id,
@@ -275,6 +302,17 @@ pub fn apply_selection_actions(
                     obj.parent = Some(id);
                 }
                 selection.primary = Some(group);
+                history.push(
+                    format!("Group '{child_name}'"),
+                    vec![
+                        Change::Spawn { chunk, record },
+                        Change::Parent {
+                            id: child_id,
+                            before: child_parent,
+                            after: Some(id),
+                        },
+                    ],
+                );
                 info!("Grouped placed id={child_id} under new group id={id}");
             }
             EditorAction::UngroupSelection => {
@@ -282,7 +320,15 @@ pub fn apply_selection_actions(
                     continue;
                 };
                 if placed.get(entity).is_ok_and(|(_, o, _)| o.kind.is_group()) {
-                    delete_placed(&mut commands, &mut registry, &mut placed, entity, false);
+                    delete_placed(
+                        &mut commands,
+                        &mut registry,
+                        &mut history,
+                        &mut placed,
+                        &bindings,
+                        entity,
+                        false,
+                    );
                 }
             }
             _ => {}
@@ -291,26 +337,27 @@ pub fn apply_selection_actions(
 }
 
 /// Re-file `child` under `parent`. Refuses anything that isn't a group, and
-/// any move that would make a group its own ancestor.
+/// any move that would make a group its own ancestor. Returns
+/// `(child id, old parent, new parent)` when something changed.
 fn set_parent(
     child: Entity,
     parent: Option<Entity>,
     placed: &mut PlacedTree,
     registry: &mut PlacedObjectRegistry,
-) {
+) -> Option<(u64, Option<u64>, Option<u64>)> {
     let Ok((_, child_obj, _)) = placed.get(child) else {
-        return;
+        return None;
     };
     let child_id = child_obj.id;
     let parent_id = match parent {
         None => None,
         Some(p) => {
             let Ok((_, parent_obj, _)) = placed.get(p) else {
-                return;
+                return None;
             };
             if !parent_obj.kind.is_group() {
                 info!("Only groups can contain entities");
-                return;
+                return None;
             }
             let parent_id = parent_obj.id;
             let parent_of = |e: Entity| placed.get(e).ok().and_then(|(_, o, _)| o.parent);
@@ -319,19 +366,21 @@ fn set_parent(
                 || ancestors(Some(parent_id), registry, parent_of).contains(&child)
             {
                 info!("Refusing to make a group its own ancestor");
-                return;
+                return None;
             }
             Some(parent_id)
         }
     };
     let Ok((_, mut obj, _)) = placed.get_mut(child) else {
-        return;
+        return None;
     };
     if obj.parent == parent_id {
-        return;
+        return None;
     }
+    let before = obj.parent;
     obj.parent = parent_id;
     registry.mark_dirty(obj.chunk);
+    Some((child_id, before, parent_id))
 }
 
 /// Keep the main menu's view of the project in step with the live one.

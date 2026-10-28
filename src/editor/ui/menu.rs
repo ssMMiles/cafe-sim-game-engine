@@ -65,6 +65,35 @@ pub fn menu_bar(ui: &mut egui::Ui, panels: &mut Panels) {
         });
 
         ui.menu_button("Edit", |ui| {
+            let undo = panels
+                .history
+                .undo_label()
+                .map(|l| format!("Undo {l}\tCtrl+Z"));
+            if ui
+                .add_enabled(
+                    undo.is_some(),
+                    egui::Button::new(undo.unwrap_or_else(|| "Undo\t\tCtrl+Z".into())),
+                )
+                .clicked()
+            {
+                panels.actions.write(EditorAction::Undo);
+                ui.close();
+            }
+            let redo = panels
+                .history
+                .redo_label()
+                .map(|l| format!("Redo {l}\tCtrl+Shift+Z"));
+            if ui
+                .add_enabled(
+                    redo.is_some(),
+                    egui::Button::new(redo.unwrap_or_else(|| "Redo\t\tCtrl+Shift+Z".into())),
+                )
+                .clicked()
+            {
+                panels.actions.write(EditorAction::Redo);
+                ui.close();
+            }
+            ui.separator();
             let has_selection = panels.selection.primary.is_some();
             if ui
                 .add_enabled(has_selection, egui::Button::new("Duplicate"))

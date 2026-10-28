@@ -12,6 +12,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
 use bevy::{log, prelude::*};
 use engine_api::{ScriptBinding, ScriptRegistry};
 
+use crate::editor::history::{Change, History};
 use crate::editor::input::{ScrollMod, scroll_modifier, scroll_notches};
 use crate::editor::picking::{EditorRay, ViewportInput};
 use crate::editor::selection::Selection;
@@ -45,6 +46,7 @@ pub fn handle_place_click(
     script_registry: Res<ScriptRegistry>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut selection: ResMut<Selection>,
+    mut history: ResMut<History>,
 ) {
     if viewport.clicked_px.is_none() {
         return;
@@ -96,6 +98,10 @@ pub fn handle_place_click(
     // is the placing caller's job.
     registry.dirty_chunks.insert(chunk);
     selection.primary = Some(entity);
+    history.push(
+        format!("Place {}", record.kind.label()),
+        vec![Change::Spawn { chunk, record }],
+    );
 }
 
 pub fn setup_placement_preview(
