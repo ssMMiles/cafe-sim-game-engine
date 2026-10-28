@@ -555,6 +555,18 @@ that may not exist.
 `save_exr` is gone — `store_lightmap` duplicated it exactly once the GPU path
 switched over.
 
+**Bug introduced and fixed in the same session, worth remembering.** Before the
+change, `run_bake`'s terrain phase was `#[cfg(not(wasm32))] if use_gpu { … }
+else { cpu }` followed by a *separate* `#[cfg(wasm32)]` unconditional CPU call —
+because the whole if/else vanished on wasm. Removing the gate from the if/else
+without deleting that second block made wasm run **both** paths: the full CPU
+bake (freezing the tab, the exact thing being fixed) and then the GPU bake
+overwriting its output. The giveaway in the log is
+`terrain.rs: Baked terrain lightmap for chunk (x, y)` (CPU) and
+`gpu.rs: GPU bake complete for terrain chunk (x, y)` for the same chunks in one
+pass. Only one of those two lines should appear per bake. When un-`cfg`-ing a
+branch, check for the sibling block that existed *because* it was `cfg`'d.
+
 Still CPU on every platform: the **object** bake. On wasm that means it is
 still serial and still on the main thread.
 

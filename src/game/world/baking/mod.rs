@@ -497,19 +497,6 @@ fn run_bake(
         );
     }
 
-    #[cfg(target_arch = "wasm32")]
-    terrain::bake_terrain_lightmaps(
-        &heightmap,
-        &terrain_world,
-        &config,
-        &region,
-        &scene.terrain_chunks,
-        &mut terrain_materials,
-        &mut images,
-        &lighting,
-        &bvh,
-    );
-
     // ── Phase 2: Placed objects (CPU, on the task pool) ─────────────────────
     //
     // Gathering has to happen here — it unwraps meshes, adds material assets
