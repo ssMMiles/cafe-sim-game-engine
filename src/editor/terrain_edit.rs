@@ -6,18 +6,22 @@
 //! its neighbourhood average). The brush follows [`EditorRay`], so it lands
 //! wherever the cursor is on the viewport.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use avian3d::prelude::Collider;
 use bevy::{
     camera::primitives::Aabb,
+    ecs::system::SystemParam,
     light::NotShadowCaster,
     picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
     prelude::*,
 };
 
+use crate::editor::history::{Change, History};
 use crate::editor::picking::{EditorRay, ViewportInput};
 use crate::game::world::terrain::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE, TerrainChunk,
+    bootstrap::heightfield_collider,
     mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::TerrainChunkRegistry,
 };
@@ -78,6 +82,9 @@ pub struct TerrainBrushHit {
     pub was_painting: bool,
     /// Flatten target, sampled under the cursor at stroke start.
     pub flatten_target: f32,
+    /// Height of every tile the current stroke has touched, as it was before
+    /// the stroke's first write to it. Becomes the stroke's undo record.
+    pub stroke_before: HashMap<(i32, i32), f32>,
 }
 
 /// Influence of the brush at `dist` from its centre: 1 inside the flat core,
@@ -214,10 +221,7 @@ pub fn apply_terrain_brush(
     viewport: Res<ViewportInput>,
     brush: Res<BrushSettings>,
     mut brush_hit: ResMut<TerrainBrushHit>,
-    heightmap: Option<ResMut<HeightmapData>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut chunk_query: Query<(&TerrainChunk, &mut Aabb)>,
-    mut registry: Option<ResMut<TerrainChunkRegistry>>,
+    mut terrain: TerrainChunks,
     time: Res<Time>,
 ) {
     let Some(hit_point) = brush_hit.hit else {
@@ -230,7 +234,7 @@ pub fn apply_terrain_brush(
         return;
     };
 
-    let Some(mut heightmap) = heightmap else {
+    let Some(heightmap) = terrain.heightmap.as_deref_mut() else {
         return;
     };
 
@@ -245,6 +249,7 @@ pub fn apply_terrain_brush(
     // moving brush spreads one plateau instead of chasing its own output.
     if !brush_hit.was_painting {
         brush_hit.flatten_target = heightmap.get_tile(center_tx, center_ty);
+        brush_hit.stroke_before.clear();
     }
 
     // Smooth reads neighbour averages from a snapshot taken before any write
@@ -307,78 +312,31 @@ pub fn apply_terrain_brush(
             if new_h == current {
                 continue;
             }
+            brush_hit.stroke_before.entry((tx, ty)).or_insert(current);
             heightmap.set_tile(tx, ty, new_h);
-
-            let cs = (CHUNK_SIZE - 1) as i32;
-            let cx = tx.div_euclid(cs);
-            let cy = ty.div_euclid(cs);
-            affected.insert((cx, cy));
-
-            if tx.rem_euclid(cs) == 0 {
-                affected.insert((cx - 1, cy));
-            }
-            if ty.rem_euclid(cs) == 0 {
-                affected.insert((cx, cy - 1));
-            }
-            if tx.rem_euclid(cs) == 0 && ty.rem_euclid(cs) == 0 {
-                affected.insert((cx - 1, cy - 1));
-            }
+            affected.extend(chunks_touching_tile(tx, ty));
         }
     }
 
-    let heightmap = heightmap.into_inner();
-    let mut registry = registry.as_deref_mut();
-
-    let cs = (CHUNK_SIZE - 1) as i32;
-    for &(cx, cy) in &affected {
-        let start_x = cx * cs;
-        let start_y = cy * cs;
-
-        let mut heights = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE);
-        for ly in 0..CHUNK_SIZE {
-            let gy = start_y + ly as i32;
-            for lx in 0..CHUNK_SIZE {
-                heights.push(heightmap.get_tile(start_x + lx as i32, gy));
-            }
-        }
-
-        if let Some(ref mut reg) = registry {
-            if let Some(&entity) = reg.loaded_chunks.get(&(cx, cy))
-                && let Ok((chunk, mut aabb)) = chunk_query.get_mut(entity)
-            {
-                let (new_mesh, new_aabb) = generate_lod_mesh(
-                    |gx, gy| {
-                        let lx = (gx - start_x) as usize;
-                        let ly = (gy - start_y) as usize;
-                        heights[ly * CHUNK_SIZE + lx]
-                    },
-                    start_x,
-                    start_y,
-                    CHUNK_SIZE,
-                    CHUNK_SIZE,
-                    TILE_SIZE,
-                    0,
-                );
-                if let Some(mut m) = meshes.get_mut(&chunk.lod_meshes[0]) {
-                    *m = new_mesh;
-                }
-                *aabb = new_aabb;
-            }
-            reg.dirty_chunks.insert((cx, cy));
-        }
-
-        brush_hit.pending_full_lod.insert((cx, cy));
+    // Only the mesh you can see moves per frame; the coarser LODs and the
+    // collider wait for the stroke to end (`finalize_terrain_stroke`).
+    for &chunk in &affected {
+        terrain.rebuild_meshes(chunk, 0..1);
+        terrain.mark_dirty(chunk);
+        brush_hit.pending_full_lod.insert(chunk);
     }
     brush_hit.was_painting = true;
 }
 
-pub fn finalize_terrain_lod(
+/// Stroke end (button released): regenerate the remaining LODs and the
+/// physics heightfield of every chunk the stroke touched, and record the
+/// stroke as one undo transaction.
+pub fn finalize_terrain_stroke(
     mouse_input: Res<ButtonInput<MouseButton>>,
+    brush: Res<BrushSettings>,
     mut brush_hit: ResMut<TerrainBrushHit>,
-    heightmap: Option<Res<HeightmapData>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    chunk_query: Query<&TerrainChunk>,
-    registry: Option<Res<TerrainChunkRegistry>>,
+    mut terrain: TerrainChunks,
+    mut history: ResMut<History>,
 ) {
     let painting = mouse_input.pressed(MouseButton::Left);
 
@@ -390,23 +348,82 @@ pub fn finalize_terrain_lod(
     }
     brush_hit.was_painting = false;
 
-    let Some(heightmap) = heightmap else { return };
-    let Some(registry) = registry else { return };
-
-    let cs = (CHUNK_SIZE - 1) as i32;
     let pending: Vec<(i32, i32)> = brush_hit.pending_full_lod.drain().collect();
+    for chunk in pending {
+        terrain.rebuild_meshes(chunk, 1..LOD_LEVELS);
+        terrain.rebuild_collider(chunk);
+    }
 
-    for (cx, cy) in pending {
-        let start_x = cx * cs;
-        let start_y = cy * cs;
+    let tiles: Vec<(i32, i32, f32, f32)> = match terrain.heightmap.as_deref() {
+        Some(heightmap) => brush_hit
+            .stroke_before
+            .drain()
+            .map(|((tx, ty), before)| (tx, ty, before, heightmap.get_tile(tx, ty)))
+            .collect(),
+        None => Vec::new(),
+    };
+    history.push(
+        format!("{} terrain", brush.mode.label()),
+        vec![Change::Terrain { tiles }],
+    );
+}
 
-        let Some(&entity) = registry.loaded_chunks.get(&(cx, cy)) else {
-            continue;
-        };
-        let Ok(chunk) = chunk_query.get(entity) else {
-            continue;
-        };
+/// Chunks whose meshes include tile `(tx, ty)`: its own, plus the neighbours
+/// that share it when it sits on a chunk edge.
+pub fn chunks_touching_tile(tx: i32, ty: i32) -> impl Iterator<Item = (i32, i32)> {
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let (cx, cy) = (tx.div_euclid(cs), ty.div_euclid(cs));
+    let on_x = tx.rem_euclid(cs) == 0;
+    let on_y = ty.rem_euclid(cs) == 0;
+    [
+        Some((cx, cy)),
+        on_x.then_some((cx - 1, cy)),
+        on_y.then_some((cx, cy - 1)),
+        (on_x && on_y).then_some((cx - 1, cy - 1)),
+    ]
+    .into_iter()
+    .flatten()
+}
 
+/// The loaded terrain, as the brush and the undo stack mutate it: heights in,
+/// meshes and colliders rebuilt from them.
+#[derive(SystemParam)]
+pub struct TerrainChunks<'w, 's> {
+    pub heightmap: Option<ResMut<'w, HeightmapData>>,
+    registry: Option<ResMut<'w, TerrainChunkRegistry>>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    chunks: Query<'w, 's, (&'static TerrainChunk, &'static mut Aabb)>,
+    children: Query<'w, 's, &'static Children>,
+    colliders: Query<'w, 's, (), With<Collider>>,
+    commands: Commands<'w, 's>,
+}
+
+impl TerrainChunks<'_, '_> {
+    pub fn is_loaded(&self, chunk: (i32, i32)) -> bool {
+        self.registry
+            .as_ref()
+            .is_some_and(|r| r.loaded_chunks.contains_key(&chunk))
+    }
+
+    pub fn mark_dirty(&mut self, chunk: (i32, i32)) {
+        if let Some(registry) = self.registry.as_deref_mut() {
+            registry.dirty_chunks.insert(chunk);
+        }
+    }
+
+    /// Write tiles straight into the heightmap (no brush shaping).
+    pub fn set_tiles(&mut self, tiles: impl IntoIterator<Item = ((i32, i32), f32)>) {
+        if let Some(heightmap) = self.heightmap.as_deref_mut() {
+            for ((tx, ty), h) in tiles {
+                heightmap.set_tile(tx, ty, h);
+            }
+        }
+    }
+
+    fn chunk_heights(&self, chunk: (i32, i32)) -> Option<Vec<f32>> {
+        let heightmap = self.heightmap.as_deref()?;
+        let cs = (CHUNK_SIZE - 1) as i32;
+        let (start_x, start_y) = (chunk.0 * cs, chunk.1 * cs);
         let mut heights = Vec::with_capacity(CHUNK_SIZE * CHUNK_SIZE);
         for ly in 0..CHUNK_SIZE {
             let gy = start_y + ly as i32;
@@ -414,24 +431,84 @@ pub fn finalize_terrain_lod(
                 heights.push(heightmap.get_tile(start_x + lx as i32, gy));
             }
         }
+        Some(heights)
+    }
 
-        for (lod, lod_mesh) in chunk.lod_meshes.iter().enumerate().take(LOD_LEVELS).skip(1) {
-            let (new_mesh, _) = generate_lod_mesh(
-                |gx, gy| {
-                    let lx = (gx - start_x) as usize;
-                    let ly = (gy - start_y) as usize;
-                    heights[ly * CHUNK_SIZE + lx]
-                },
-                start_x,
-                start_y,
-                CHUNK_SIZE,
-                CHUNK_SIZE,
-                TILE_SIZE,
-                lod,
+    /// Regenerate `lods` of a loaded chunk from the heightmap. LOD 0 also
+    /// refreshes the chunk's `Aabb`.
+    pub fn rebuild_meshes(&mut self, chunk: (i32, i32), lods: std::ops::Range<usize>) {
+        let Some(&entity) = self
+            .registry
+            .as_ref()
+            .and_then(|r| r.loaded_chunks.get(&chunk))
+        else {
+            return;
+        };
+        let Some(heights) = self.chunk_heights(chunk) else {
+            return;
+        };
+        let Ok((terrain_chunk, mut aabb)) = self.chunks.get_mut(entity) else {
+            return;
+        };
+        let cs = (CHUNK_SIZE - 1) as i32;
+        let (start_x, start_y) = (chunk.0 * cs, chunk.1 * cs);
+        let height_at = |gx: i32, gy: i32| {
+            let lx = (gx - start_x) as usize;
+            let ly = (gy - start_y) as usize;
+            heights[ly * CHUNK_SIZE + lx]
+        };
+        for lod in lods.clone().take(LOD_LEVELS) {
+            let (new_mesh, new_aabb) = generate_lod_mesh(
+                height_at, start_x, start_y, CHUNK_SIZE, CHUNK_SIZE, TILE_SIZE, lod,
             );
-            if let Some(mut m) = meshes.get_mut(lod_mesh) {
+            if let Some(mut m) = self.meshes.get_mut(&terrain_chunk.lod_meshes[lod]) {
                 *m = new_mesh;
             }
+            if lod == 0 {
+                *aabb = new_aabb;
+            }
         }
+    }
+
+    /// Replace the chunk's physics heightfield with one built from the
+    /// current heights. Without this the character keeps walking on the
+    /// pre-sculpt ground until the chunk is reloaded.
+    pub fn rebuild_collider(&mut self, chunk: (i32, i32)) {
+        let Some(&entity) = self
+            .registry
+            .as_ref()
+            .and_then(|r| r.loaded_chunks.get(&chunk))
+        else {
+            return;
+        };
+        let Some(heights) = self.chunk_heights(chunk) else {
+            return;
+        };
+        let Ok(children) = self.children.get(entity) else {
+            return;
+        };
+        let Some(collider_entity) = children.iter().find(|c| self.colliders.contains(*c)) else {
+            return;
+        };
+        let (collider, _) = heightfield_collider(|lx, ly| heights[ly * CHUNK_SIZE + lx], TILE_SIZE);
+        self.commands.entity(collider_entity).insert(collider);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_tiles_belong_to_their_neighbours_too() {
+        let cs = (CHUNK_SIZE - 1) as i32;
+        let interior: Vec<_> = chunks_touching_tile(5, 5).collect();
+        assert_eq!(interior, vec![(0, 0)]);
+        let mut corner: Vec<_> = chunks_touching_tile(cs, cs).collect();
+        corner.sort();
+        assert_eq!(corner, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+        let mut edge: Vec<_> = chunks_touching_tile(cs, 3).collect();
+        edge.sort();
+        assert_eq!(edge, vec![(0, 0), (1, 0)]);
     }
 }

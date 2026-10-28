@@ -40,15 +40,21 @@ use super::gizmo::GizmoInteraction;
 use super::grab::GrabbedEntity;
 use super::picking::ViewportInput;
 use super::selection::{PlacedTree, Selection};
+use super::terrain_edit::{TerrainBrushHit, TerrainChunks, chunks_touching_tile};
 use super::tool::EditorTool;
 use crate::game::world::objects::{
     PlacedEntityRecord, PlacedKind, PlacedObject, PlacedObjectRegistry, spawn_entity_record,
 };
 use crate::game::world::streaming::StreamingState;
+use crate::game::world::terrain::mesh::LOD_LEVELS;
 use crate::game::world::terrain::storage::{EnvironmentData, TerrainWorld, WorldConfig};
 
 /// Transactions kept per world; the oldest is evicted past this.
 pub const MAX_TRANSACTIONS: usize = 200;
+/// Terrain tiles held across a world's stacks, in bytes; the oldest
+/// terrain-bearing transactions are evicted past this. A 5 m stroke is
+/// ~25 KB, a 50 m one ~2.5 MB.
+pub const MAX_TERRAIN_BYTES: usize = 64 << 20;
 /// How long a status-bar notice ("Can't undo: …") stays up, in seconds.
 const NOTICE_SECONDS: f64 = 4.0;
 
@@ -96,6 +102,8 @@ pub enum Change {
         before: EnvironmentData,
         after: EnvironmentData,
     },
+    /// One brush stroke: only the tiles it touched, as `(tx, ty, before, after)`.
+    Terrain { tiles: Vec<(i32, i32, f32, f32)> },
 }
 
 impl Change {
@@ -108,6 +116,14 @@ impl Change {
             Change::Parent { before, after, .. } => before == after,
             Change::Scripts { before, after, .. } => before == after,
             Change::Environment { before, after } => before == after,
+            Change::Terrain { tiles } => tiles.iter().all(|(_, _, b, a)| b == a),
+        }
+    }
+
+    fn terrain_bytes(&self) -> usize {
+        match self {
+            Change::Terrain { tiles } => tiles.len() * std::mem::size_of::<(i32, i32, f32, f32)>(),
+            _ => 0,
         }
     }
 
@@ -120,17 +136,20 @@ impl Change {
             | Change::Kind { id, .. }
             | Change::Parent { id, .. }
             | Change::Scripts { id, .. } => Some(*id),
-            Change::Environment { .. } => None,
+            Change::Environment { .. } | Change::Terrain { .. } => None,
         }
     }
 
     /// Chunks this change needs resident regardless of where its entity is.
-    fn chunks(&self) -> impl Iterator<Item = (i32, i32)> {
+    fn chunks(&self) -> HashSet<(i32, i32)> {
         match self {
-            Change::Spawn { chunk, .. } | Change::Despawn { chunk, .. } => Some(*chunk),
-            _ => None,
+            Change::Spawn { chunk, .. } | Change::Despawn { chunk, .. } => HashSet::from([*chunk]),
+            Change::Terrain { tiles } => tiles
+                .iter()
+                .flat_map(|(tx, ty, _, _)| chunks_touching_tile(*tx, *ty))
+                .collect(),
+            _ => HashSet::new(),
         }
-        .into_iter()
     }
 
     /// Two changes to the same field of the same target coalesce: keep this
@@ -243,6 +262,17 @@ impl Stacks {
         self.undo.push(tx);
         if self.undo.len() > MAX_TRANSACTIONS {
             self.undo.remove(0);
+        }
+        // Terrain is the only change that can be large; shed the oldest
+        // strokes first rather than the oldest transactions.
+        let bytes = |tx: &Transaction| tx.changes.iter().map(Change::terrain_bytes).sum::<usize>();
+        while self.undo.iter().map(bytes).sum::<usize>() > MAX_TERRAIN_BYTES {
+            match self.undo.iter().position(|tx| bytes(tx) > 0) {
+                Some(i) if i + 1 < self.undo.len() => {
+                    self.undo.remove(i);
+                }
+                _ => break, // only the newest stroke is left; keep it
+            }
         }
     }
 }
@@ -403,6 +433,7 @@ pub struct LevelOps<'w, 's> {
     edits: MessageWriter<'w, PlacedEdited>,
     script_edits: MessageWriter<'w, ScriptEdit>,
     respawns: MessageWriter<'w, RespawnPlaced>,
+    terrain: TerrainChunks<'w, 's>,
 }
 
 impl LevelOps<'_, '_> {
@@ -443,6 +474,19 @@ impl LevelOps<'_, '_> {
                 .as_ref()
                 .map(|_| ())
                 .ok_or_else(|| "world not loaded".to_owned()),
+            Change::Terrain { .. } => {
+                if self.terrain.heightmap.is_none() {
+                    return Err("terrain not loaded".to_owned());
+                }
+                match change
+                    .chunks()
+                    .into_iter()
+                    .find(|c| !self.terrain.is_loaded(*c))
+                {
+                    Some(chunk) => Err(format!("terrain chunk {chunk:?} is not loaded")),
+                    None => Ok(()),
+                }
+            }
             other => {
                 let id = other.id().expect("entity-keyed");
                 self.entity_of(id)
@@ -555,6 +599,18 @@ impl LevelOps<'_, '_> {
                     self.lighting.stale = true;
                 }
             }
+            Change::Terrain { tiles } => {
+                self.terrain
+                    .set_tiles(tiles.iter().map(|(tx, ty, before, after)| {
+                        ((*tx, *ty), if undo { *before } else { *after })
+                    }));
+                for chunk in change.chunks() {
+                    self.terrain.rebuild_meshes(chunk, 0..LOD_LEVELS);
+                    self.terrain.rebuild_collider(chunk);
+                    self.terrain.mark_dirty(chunk);
+                }
+                self.lighting.stale = true;
+            }
         }
     }
 
@@ -644,12 +700,14 @@ pub fn undo_redo_hotkeys(
 /// Apply `EditorAction::Undo` / `Redo`. First in the edit chain so the
 /// messages it emits are committed the same frame.
 ///
-/// Refused while a gizmo drag is in progress; while an entity is carried the
-/// press puts it back (Escape semantics) and does nothing else.
+/// Refused while a gizmo drag or a terrain stroke is in progress; while an
+/// entity is carried the press puts it back (Escape semantics) and does
+/// nothing else.
 pub fn apply_undo_redo(
     mut actions: MessageReader<EditorAction>,
     mut history: ResMut<History>,
     gizmo: Res<GizmoInteraction>,
+    brush: Res<TerrainBrushHit>,
     grabbed: Res<GrabbedEntity>,
     mut next_tool: ResMut<NextState<EditorTool>>,
     time: Res<Time>,
@@ -661,7 +719,7 @@ pub fn apply_undo_redo(
             EditorAction::Redo => false,
             _ => continue,
         };
-        if gizmo.drag.is_some() {
+        if gizmo.drag.is_some() || brush.was_painting {
             continue;
         }
         if grabbed.0.is_some() {
@@ -958,6 +1016,7 @@ mod tests {
         PlacedEdited, ScriptEdit, apply_script_edits, commit_placed_edits, respawn_placed,
     };
     use crate::game::world::objects::PlacedObjectRegistry;
+    use crate::game::world::terrain::{HeightmapData, TILE_SIZE};
 
     fn test_app() -> App {
         let mut app = App::new();
@@ -974,6 +1033,8 @@ mod tests {
             .init_resource::<StreamingState>()
             .init_resource::<GizmoInteraction>()
             .init_resource::<GrabbedEntity>()
+            .init_resource::<TerrainBrushHit>()
+            .init_resource::<Assets<Mesh>>()
             .init_resource::<ViewportInput>()
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<engine_api::ScriptRegistry>();
@@ -1195,5 +1256,61 @@ mod tests {
         action(&mut app, EditorAction::Undo);
         assert_eq!(app.world().get::<PlacedObject>(b).unwrap().name, "");
         assert_eq!(app.world().resource::<Selection>().primary, Some(b));
+    }
+
+    #[test]
+    fn terrain_strokes_round_trip_through_the_heightmap() {
+        use crate::game::world::terrain::storage::TerrainChunkRegistry;
+        let mut app = test_app();
+        app.insert_resource(HeightmapData::new(TILE_SIZE));
+        // The chunk counts as loaded for the undo check even with no mesh
+        // entity behind it; rebuilds just find nothing to regenerate.
+        let mut registry = TerrainChunkRegistry::default();
+        registry.loaded_chunks.insert((0, 0), Entity::PLACEHOLDER);
+        app.insert_resource(registry);
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<HeightmapData>()
+            .set_tile(3, 4, 2.0);
+        app.world_mut().resource_mut::<History>().push(
+            "Sculpt terrain",
+            vec![Change::Terrain {
+                tiles: vec![(3, 4, 0.0, 2.0)],
+            }],
+        );
+        app.update();
+
+        action(&mut app, EditorAction::Undo);
+        assert_eq!(app.world().resource::<HeightmapData>().get_tile(3, 4), 0.0);
+        assert!(
+            app.world()
+                .resource::<TerrainChunkRegistry>()
+                .dirty_chunks
+                .contains(&(0, 0))
+        );
+        action(&mut app, EditorAction::Redo);
+        assert_eq!(app.world().resource::<HeightmapData>().get_tile(3, 4), 2.0);
+    }
+
+    #[test]
+    fn terrain_memory_cap_sheds_the_oldest_strokes_first() {
+        let mut h = History::default();
+        let big = || Change::Terrain {
+            tiles: vec![(0, 0, 0.0, 1.0); MAX_TERRAIN_BYTES / 16 / 2 + 1],
+        };
+        h.push("first stroke", vec![big()]);
+        h.push(
+            "rename",
+            vec![Change::Name {
+                id: 1,
+                before: "a".into(),
+                after: "b".into(),
+            }],
+        );
+        h.push("second stroke", vec![big()]);
+        h.push("third stroke", vec![big()]);
+        let labels: Vec<&str> = h.stacks().undo.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, vec!["rename", "third stroke"]);
     }
 }

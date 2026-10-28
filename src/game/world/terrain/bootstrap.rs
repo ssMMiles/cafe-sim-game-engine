@@ -155,28 +155,9 @@ pub fn compute_chunk_meshes(
     });
 
     // Build the heightfield collider off the main thread.
-    // Downsampled by HF_STRIDE — 64×64 is more than precise enough for character collision
-    // and is 16× less data for avian to build its BVH over.
     // parry3d::Shape: DowncastSync (Send + Sync), so Collider is safe to construct here.
-    const HF_STRIDE: usize = 4;
-    let hf_size = CHUNK_SIZE.div_ceil(HF_STRIDE);
-    let hf_heights: Vec<Vec<f32>> = (0..hf_size)
-        .map(|hx| {
-            let lx = (hx * HF_STRIDE).min(CHUNK_SIZE - 1);
-            (0..hf_size)
-                .map(|hy| {
-                    let ly = (hy * HF_STRIDE).min(CHUNK_SIZE - 1);
-                    heights[lx * CHUNK_SIZE + ly]
-                })
-                .collect()
-        })
-        .collect();
-
-    let physical_width = (CHUNK_SIZE - 1) as f32 * tile_size.0;
-    let physical_depth = (CHUNK_SIZE - 1) as f32 * tile_size.1;
-    let collider =
-        Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
-    let collider_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
+    let (collider, collider_offset) =
+        heightfield_collider(|lx, ly| heights[lx * CHUNK_SIZE + ly], tile_size);
 
     ChunkComputeResult {
         chunk_x,
@@ -187,6 +168,39 @@ pub fn compute_chunk_meshes(
         collider_offset,
         lightmap,
     }
+}
+
+/// The chunk's physics heightfield and its offset from the chunk origin.
+/// `height(lx, ly)` is the pre-scaled height at local tile coordinates.
+///
+/// Downsampled by `HF_STRIDE` — 64×64 is more than precise enough for
+/// character collision and is 16× less data for avian to build its BVH over.
+/// Shared by the streaming bootstrap and the editor (a sculpt stroke or an
+/// undo rebuilds the collider in place).
+pub fn heightfield_collider(
+    height: impl Fn(usize, usize) -> f32,
+    tile_size: (f32, f32),
+) -> (Collider, Vec3) {
+    const HF_STRIDE: usize = 4;
+    let hf_size = CHUNK_SIZE.div_ceil(HF_STRIDE);
+    let hf_heights: Vec<Vec<f32>> = (0..hf_size)
+        .map(|hx| {
+            let lx = (hx * HF_STRIDE).min(CHUNK_SIZE - 1);
+            (0..hf_size)
+                .map(|hy| {
+                    let ly = (hy * HF_STRIDE).min(CHUNK_SIZE - 1);
+                    height(lx, ly)
+                })
+                .collect()
+        })
+        .collect();
+
+    let physical_width = (CHUNK_SIZE - 1) as f32 * tile_size.0;
+    let physical_depth = (CHUNK_SIZE - 1) as f32 * tile_size.1;
+    let collider =
+        Collider::heightfield(hf_heights, Vec3::new(physical_width, 1.0, physical_depth));
+    let collider_offset = Vec3::new(physical_width * 0.5, 0.0, physical_depth * 0.5);
+    (collider, collider_offset)
 }
 
 /// Spawn a terrain chunk entity from pre-computed mesh data.

@@ -73,8 +73,9 @@ use selection::{
     select_on_click, update_hover, validate_selection,
 };
 use terrain_edit::{
-    BrushSettings, TerrainBrushHit, adjust_brush_size, apply_terrain_brush, finalize_terrain_lod,
-    raycast_terrain_hit, teardown_terrain_brush_preview, update_brush_preview,
+    BrushSettings, TerrainBrushHit, adjust_brush_size, apply_terrain_brush,
+    finalize_terrain_stroke, raycast_terrain_hit, teardown_terrain_brush_preview,
+    update_brush_preview,
 };
 use terrain_save::trigger_save_terrain;
 use tool::EditorTool;
@@ -268,7 +269,7 @@ impl Plugin for EditorPlugin {
                 adjust_brush_size.run_if(keyboard_free),
                 raycast_terrain_hit,
                 apply_terrain_brush,
-                finalize_terrain_lod,
+                finalize_terrain_stroke,
                 update_brush_preview,
             )
                 .chain()
@@ -372,6 +373,7 @@ mod tests {
         initializes("init_editor_camera", init_editor_camera);
         initializes("sync_render_target", sync_render_target);
         initializes("apply_terrain_brush", apply_terrain_brush);
+        initializes("finalize_terrain_stroke", finalize_terrain_stroke);
         initializes("raycast_terrain_hit", raycast_terrain_hit);
         initializes("update_brush_preview", terrain_edit::update_brush_preview);
         initializes("compute_editor_ray", compute_editor_ray);
