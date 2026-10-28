@@ -271,6 +271,7 @@ impl Plugin for EditorPlugin {
             thumbnails::drive_thumbnails.in_set(EditorSet::InGame),
         );
         app.add_systems(OnExit(AppState::InGame), thumbnails::reset_thumbnail_rig);
+        app.add_observer(thumbnails::on_thumbnail_readback);
         app.add_systems(Startup, request_asset_manifest);
         app.add_systems(Update, populate_asset_catalog.in_set(EditorSet::InGame));
 

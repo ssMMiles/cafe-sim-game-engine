@@ -598,7 +598,7 @@ Manifest round-trip is covered by tests (including quote/backslash escaping in
 user-entered names) — on wasm that serialize/parse pair is the only thing
 between "created a project" and "still there after a refresh".
 
-## Terrain lightmap seams at chunk edges — October 2026
+## Terrain lightmap seams at chunk edges + Windows thumbnail dropouts — October 2026
 
 **Shadow "line break" around spawn.** Stored lightmaps were checked by stitching the EXRs
 (a scratch exr→png tool; `exrheader` is on this machine, no Python EXR libs). Shadows
@@ -614,3 +614,12 @@ Note a residual, pre-existing asymmetry: secondary rays (bounce hit → shadow r
 run past one chunk's cache but not the neighbour's; it did not show up in the test.
 Things ruled out while looking: heightmap/GPU `floor` for negative tiles (fine), per-strip
 uniforms (one buffer per strip, fine), chunk transforms, mesh UV1.
+
+**Thumbnails blank on the Windows box, varying by mesh.** The rig rendered for a fixed 2
+frames; a mesh whose material needed a *new pipeline variant* (async compile — slow on
+DX12) or whose textures hadn't uploaded is simply skipped those frames, so the cached
+image was the clear colour. Metal compiles fast enough to hide it. Fix: wait for
+`is_loaded_with_dependencies` on each `WorldAssetRoot`, then keep rendering until a
+`Readback::texture` of the target (needs `COPY_SRC`) shows ≥1% non-background pixels,
+plus 2 grace frames; 600-frame timeout caches whatever is there with a warning.
+`on_thumbnail_readback` is a global observer gated on the rig's current readback entity.

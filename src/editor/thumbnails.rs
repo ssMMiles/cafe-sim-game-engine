@@ -9,10 +9,19 @@
 //! would sample a lightmap that doesn't exist for them).
 //!
 //! The job pipeline advances one state per frame: spawn the subject, wait for
-//! its meshes to load (`Aabb`s appear), frame them from a 3/4 view, let the
-//! camera render for two frames, then cache the image and despawn. A subject
-//! that never loads times out to its glyph. Only cells that are actually
-//! drawn request thumbnails, so a large catalog is rendered lazily.
+//! its meshes to load (`Aabb`s appear, and the scene's dependencies — its
+//! textures — are in), frame them from a 3/4 view, then render until a GPU
+//! readback of the target shows the subject actually drawn, plus a frame or
+//! two of grace, and cache the image and despawn. A subject that never loads
+//! or never draws times out to its glyph. Only cells that are actually drawn
+//! request thumbnails, so a large catalog is rendered lazily.
+//!
+//! The readback is what makes this robust: a mesh is skipped for the frame
+//! while its material's render pipeline is still compiling, or while a
+//! texture is still being uploaded, and on some drivers (Windows DX12 shader
+//! compilation in particular) that can take many frames. Counting frames
+//! produced thumbnails of the empty background there, depending on which
+//! mesh happened to need a new pipeline variant first.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -21,8 +30,11 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     image::ImageSampler,
     prelude::*,
-    render::render_resource::{
-        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    render::{
+        gpu_readback::{Readback, ReadbackComplete},
+        render_resource::{
+            Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        },
     },
 };
 
@@ -39,9 +51,16 @@ const THUMBNAIL_SIZE: u32 = 128;
 const RIG_ORIGIN: Vec3 = Vec3::new(0.0, -5000.0, 0.0);
 /// Frames to wait for a subject's meshes before giving up.
 const LOAD_TIMEOUT_FRAMES: u32 = 240;
-/// Frames the camera renders once framed: one for transform propagation
-/// and extraction, one to be safe.
+/// Frames to keep rendering for the subject to show up in the readback
+/// (pipeline compilation, texture upload) before taking whatever is there.
+const DRAW_TIMEOUT_FRAMES: u32 = 600;
+/// Frames the camera keeps rendering after the readback first shows the
+/// subject, so a second mesh whose pipeline landed a frame later is in too.
 const SETTLE_FRAMES: u32 = 2;
+/// A readback counts as "drawn" once this many pixels differ from the
+/// background: 1% of the image, well above any clear-colour dithering and
+/// well below the smallest framed subject.
+const DRAWN_PIXEL_THRESHOLD: usize = (THUMBNAIL_SIZE * THUMBNAIL_SIZE / 100) as usize;
 const FOV: f32 = std::f32::consts::PI / 5.0;
 
 #[derive(Resource, Default)]
@@ -108,12 +127,17 @@ enum RigState {
         /// Mesh descendants seen last frame, to detect a settled scene.
         seen: usize,
     },
-    /// Framed and rendering.
+    /// Framed and rendering until the readback shows the subject.
     Settling {
         key: String,
         root: Entity,
         target: Handle<Image>,
-        frames_left: u32,
+        /// Entity carrying the `Readback` of `target`.
+        readback: Entity,
+        frames: u32,
+        /// Frames still to render once the subject has been seen; `None`
+        /// until the readback shows it.
+        grace: Option<u32>,
     },
 }
 
@@ -137,8 +161,11 @@ fn thumbnail_target(images: &mut Assets<Image>) -> Handle<Image> {
             format: TextureFormat::Rgba8UnormSrgb,
             mip_level_count: 1,
             sample_count: 1,
+            // COPY_SRC: the rig reads the image back to check the subject
+            // was drawn.
             usage: TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_DST
+                | TextureUsages::COPY_SRC
                 | TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         },
@@ -263,6 +290,7 @@ pub fn drive_thumbnails(
     asset_server: Res<AssetServer>,
     prefabs: Res<PrefabLibrary>,
     children: Query<&Children>,
+    scenes: Query<&WorldAssetRoot>,
     meshes: Query<
         (
             Entity,
@@ -346,8 +374,15 @@ pub fn drive_thumbnails(
             }
 
             // Settled: the mesh count stopped changing, every mesh has bounds,
-            // and transforms have had a frame to propagate.
-            let settled = mesh_count > 0 && !unbounded && mesh_count == *seen && *frames > 2;
+            // transforms have had a frame to propagate, and every scene's
+            // dependencies (its textures) are loaded — a material whose
+            // texture is still loading isn't drawn at all.
+            let scenes_ready = children
+                .iter_descendants(*root)
+                .filter_map(|e| scenes.get(e).ok())
+                .all(|scene| asset_server.is_loaded_with_dependencies(scene.0.id()));
+            let settled =
+                mesh_count > 0 && !unbounded && mesh_count == *seen && *frames > 2 && scenes_ready;
             *seen = mesh_count;
 
             if settled {
@@ -365,11 +400,20 @@ pub fn drive_thumbnails(
                     camera.is_active = true;
                     *transform = frame(center, radius);
                 }
+                let readback = commands
+                    .spawn((
+                        GameEntity,
+                        Name::new("thumbnail readback"),
+                        Readback::texture(target.clone()),
+                    ))
+                    .id();
                 rig.state = RigState::Settling {
                     key: std::mem::take(key),
                     root: *root,
                     target,
-                    frames_left: SETTLE_FRAMES,
+                    readback,
+                    frames: 0,
+                    grace: None,
                 };
             } else if *frames > LOAD_TIMEOUT_FRAMES {
                 warn!("thumbnail '{key}': subject never loaded; keeping its glyph");
@@ -382,13 +426,29 @@ pub fn drive_thumbnails(
             key,
             root,
             target,
-            frames_left,
+            readback,
+            frames,
+            grace,
         } => {
-            *frames_left -= 1;
-            if *frames_left == 0 {
+            *frames += 1;
+            let finished = match grace {
+                Some(left) => {
+                    *left = left.saturating_sub(1);
+                    *left == 0
+                }
+                None if *frames > DRAW_TIMEOUT_FRAMES => {
+                    warn!(
+                        "thumbnail '{key}': subject never showed up in the render; caching as is"
+                    );
+                    true
+                }
+                None => false,
+            };
+            if finished {
                 if let Ok((mut camera, _, _)) = cameras.get_mut(rig.camera) {
                     camera.is_active = false;
                 }
+                commands.entity(*readback).despawn();
                 commands.entity(*root).despawn();
                 cache.images.insert(std::mem::take(key), target.clone());
                 rig.state = RigState::Idle;
@@ -397,10 +457,83 @@ pub fn drive_thumbnails(
     }
 }
 
+/// Observer: a readback of the current job's target arrived. Once the image
+/// holds something other than the clear colour, the subject has been drawn
+/// and the job can finish after [`SETTLE_FRAMES`] more frames.
+pub fn on_thumbnail_readback(event: On<ReadbackComplete>, rig: Option<ResMut<ThumbnailRig>>) {
+    let Some(mut rig) = rig else {
+        return;
+    };
+    let RigState::Settling {
+        readback, grace, ..
+    } = &mut rig.state
+    else {
+        return;
+    };
+    if event.entity != *readback || grace.is_some() {
+        return;
+    }
+    if image_has_content(&event.data) {
+        *grace = Some(SETTLE_FRAMES);
+    }
+}
+
+/// Does an `Rgba8` readback show anything but its background? The top-left
+/// pixel is taken as the background (the framing keeps the corners clear);
+/// "content" is enough pixels that differ from it by more than a hair.
+fn image_has_content(rgba: &[u8]) -> bool {
+    let Some(background) = rgba.get(..4) else {
+        return false;
+    };
+    let differs = |px: &[u8]| px.iter().zip(background).any(|(a, b)| a.abs_diff(*b) > 2);
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| differs(*px))
+        .count()
+        >= DRAWN_PIXEL_THRESHOLD
+}
+
 /// `OnExit(AppState::InGame)`: the rig's entities go with the world
 /// (`GameEntity` cleanup), so forget them; cached images stay valid.
 pub fn reset_thumbnail_rig(mut commands: Commands, rig: Option<Res<ThumbnailRig>>) {
     if rig.is_some() {
         commands.remove_resource::<ThumbnailRig>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(fill: [u8; 4], painted: usize, paint: [u8; 4]) -> Vec<u8> {
+        let n = (THUMBNAIL_SIZE * THUMBNAIL_SIZE) as usize;
+        (0..n)
+            .flat_map(|i| if i >= n - painted { paint } else { fill })
+            .collect()
+    }
+
+    #[test]
+    fn a_cleared_target_has_no_content() {
+        let bg = [41, 41, 46, 255];
+        assert!(!image_has_content(&image(bg, 0, bg)));
+        // Dithering-sized noise doesn't count either.
+        assert!(!image_has_content(&image(bg, 5000, [42, 40, 47, 255])));
+        assert!(!image_has_content(&[]));
+    }
+
+    #[test]
+    fn a_drawn_subject_is_content() {
+        let bg = [41, 41, 46, 255];
+        assert!(image_has_content(&image(
+            bg,
+            DRAWN_PIXEL_THRESHOLD,
+            [200, 180, 120, 255]
+        )));
+        assert!(!image_has_content(&image(
+            bg,
+            DRAWN_PIXEL_THRESHOLD - 1,
+            [200, 180, 120, 255]
+        )));
     }
 }
