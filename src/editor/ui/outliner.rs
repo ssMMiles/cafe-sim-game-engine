@@ -5,8 +5,14 @@
 //! isn't loaded is shown at the top level with a marker rather than hidden.
 //!
 //! Rows are drag sources and group rows are drop targets (egui's built-in
-//! drag-and-drop), the bottom strip drops to the top level, and right-click
-//! offers rename (inline), focus, grouping and delete.
+//! drag-and-drop); releasing anywhere else in the panel — another row, the
+//! space beside the rows or below them — files the entity at the top level.
+//! Right-click offers rename (inline), focus, grouping and delete.
+//!
+//! Rows are ordered by placed id (creation order), groups first at each
+//! level, so renaming never moves a row and filing one into a group only
+//! moves it under that group. Every row wears the same `○` marker: kind and
+//! id live in the hover text, and names are what tell entities apart.
 //!
 //! Rows sense click *and* drag on one widget and set the drag payload from
 //! their own response. `Ui::dnd_drag_source` is deliberately not used: it
@@ -21,7 +27,6 @@ use bevy_egui::egui;
 use super::Panels;
 use crate::editor::actions::EditorAction;
 use crate::editor::edits::PlacedEdited;
-use crate::game::world::objects::PlacedKind;
 
 #[derive(Resource, Default)]
 pub struct OutlinerState {
@@ -48,21 +53,10 @@ struct Row {
     parent: Option<u64>,
     name: String,
     kind: &'static str,
-    icon: &'static str,
     is_group: bool,
     is_instance_root: bool,
     scripts: usize,
     pending: bool,
-}
-
-fn icon(kind: &PlacedKind) -> &'static str {
-    match kind {
-        PlacedKind::Mesh { .. } => "▣",
-        PlacedKind::PointLight { .. } => "✦",
-        PlacedKind::SpotLight { .. } => "◤",
-        PlacedKind::Empty => "○",
-        PlacedKind::Group => "▤",
-    }
 }
 
 pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
@@ -75,19 +69,14 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
             parent: obj.parent,
             name: Panels::display_name(obj),
             kind: obj.kind.label(),
-            icon: icon(&obj.kind),
             is_group: obj.kind.is_group(),
             is_instance_root: obj.prefab.is_some(),
             scripts: bindings.map(|b| b.0.len()).unwrap_or(0),
             pending,
         })
         .collect();
-    rows.sort_by(|a, b| {
-        b.is_group
-            .cmp(&a.is_group)
-            .then(a.name.cmp(&b.name))
-            .then(a.id.cmp(&b.id))
-    });
+    // Groups first, then creation order: stable under renames and regrouping.
+    rows.sort_by(|a, b| b.is_group.cmp(&a.is_group).then(a.id.cmp(&b.id)));
     let total = rows.len();
 
     ui.horizontal(|ui| {
@@ -134,15 +123,14 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         draw_tree(ui, panels, row, &children, 0, *orphan, &mut HashSet::new());
     }
 
-    ui.add_space(6.0);
-    // Drop here to move something to the top level.
-    let frame = egui::Frame::new()
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .inner_margin(egui::Margin::same(6));
-    let (_, dropped) = ui.dnd_drop_zone::<Entity, ()>(frame, |ui| {
-        ui.weak("Drop here for top level");
-    });
-    if let Some(entity) = dropped {
+    // A release anywhere in the panel that no group row claimed (they take
+    // the payload as they draw, above) files the entity at the top level.
+    // `rect_contains_pointer` rather than `hovered`: hover is suppressed
+    // while something is being dragged.
+    if ui.rect_contains_pointer(ui.max_rect())
+        && ui.input(|i| i.pointer.any_released())
+        && let Some(entity) = egui::DragAndDrop::take_payload::<Entity>(ui.ctx())
+    {
         panels.actions.write(EditorAction::SetParent {
             child: *entity,
             parent: None,
@@ -210,10 +198,7 @@ fn draw_row(ui: &mut egui::Ui, panels: &mut Panels, row: &Row, depth: usize, orp
             return;
         }
 
-        let mut label = format!("{} {}", row.icon, row.name);
-        if row.is_instance_root {
-            label = format!("◆ {label}");
-        }
+        let mut label = format!("○ {}", row.name);
         if row.scripts > 0 {
             label.push_str(&format!("  ·{}", row.scripts));
         }
@@ -227,9 +212,14 @@ fn draw_row(ui: &mut egui::Ui, panels: &mut Panels, row: &Row, depth: usize, orp
             .add(egui::Button::selectable(is_selected, label).sense(egui::Sense::click_and_drag()));
         response.dnd_set_drag_payload(row.entity);
         let response = response.on_hover_text(format!(
-            "{}  id {}{}{}",
+            "{}  id {}{}{}{}",
             row.kind,
             row.id,
+            if row.is_instance_root {
+                "  (prefab instance)"
+            } else {
+                ""
+            },
             if row.pending {
                 "  (script awaiting plugin)"
             } else {

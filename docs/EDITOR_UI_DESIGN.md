@@ -424,15 +424,20 @@ invalidated automatically; the bake is still manual.
   "N entities · M loaded chunks" with a tooltip that unloaded chunks are not
   listed. Whole-world indexing (scanning `chunks/*.objects`) is deferred;
   the per-chunk file layout makes it straightforward later.
-- Rows: icon by kind, display name (`name` or `kind.label()`), id, script
-  badge count. Sorted by name then id; a text filter matches name, kind,
-  id, script name.
+- Rows: one `○` marker for every kind (kind, id and prefab-ness are hover
+  text), display name (`name` or `kind.label()`), script badge count.
+  Sorted by placed id, groups first at each level — creation order, so a
+  rename never moves a row (2026-10-28; was name-sorted with per-kind
+  icons, which drifted on rename and rendered as assorted boxes). A text
+  filter matches name, kind, id.
 - Interaction: click selects; double-click or `F` focuses the camera;
   `F2`/double-click on name edits inline (→ `PlacedEdited::Name`); right-click
   context menu: Focus, Rename, Duplicate (new id, same chunk logic as
   placement), Delete.
-- Group view (Phase 5): `CollapsingHeader` per group, egui `dnd_drag_source`
-  / `dnd_drop_zone` to reparent, "Group selection" action.
+- Group view (Phase 5): manual tree, rows are egui drag sources, group rows
+  drop targets; a release anywhere else in the panel files the entity at
+  the top level (the dedicated "drop here" strip is gone, 2026-10-28).
+  "Group selection" action.
 - Rebuilt every pass (immediate mode); the query is a few hundred rows at
   most, no caching.
 
