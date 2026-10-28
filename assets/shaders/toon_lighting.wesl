@@ -104,15 +104,26 @@ fn fragment(
     // Read base color from the material uniform directly to avoid
     // pbr_input_from_standard_material's dependency on uv (VERTEX_UVS_A) when
     // only VERTEX_UVS_B is defined on the mesh.
+    //
+    // `material_flags` is a `let` straight from the uniform, and the texture
+    // branch below tests *it*, never `pbr_input.material.flags`. WGSL's
+    // uniformity analysis treats a partial assignment to a `var` as keeping
+    // the variable's old dependencies, and `pbr_input` was built from `in`
+    // and `is_front`, so a condition read back out of it is non-uniform and
+    // `textureSampleBias` inside it is a compile error in WebGPU (Tint).
+    // naga skips that rule for fragment stages, so native never notices;
+    // this is the same reason bevy's own pbr_fragment branches on a local
+    // `flags` copy of the uniform.
+    let material_flags = pbr_bindings::material.flags;
     pbr_input.material.base_color = pbr_bindings::material.base_color;
-    pbr_input.material.flags = pbr_bindings::material.flags;
+    pbr_input.material.flags = material_flags;
 
     // Mix in base_color_texture when one is bound and the mesh ships a
     // primary UV channel. Mirrors the StandardMaterial path in
     // pbr_fragment::pbr_input_from_standard_material; guarded on
     // VERTEX_UVS_A so lightmap-only meshes still compile.
 @if(VERTEX_UVS_A)
-    if ((pbr_input.material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u) {
+    if ((material_flags & pbr_types::STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u) {
         let uv = (pbr_bindings::material.uv_transform * vec3<f32>(in.uv, 1.0)).xy;
         pbr_input.material.base_color = pbr_input.material.base_color * textureSampleBias(
             pbr_bindings::base_color_texture,

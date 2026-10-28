@@ -404,3 +404,43 @@ bevy_egui 0.43.1 / egui_dock 0.21.1 / egui 0.36.2 / wgpu+naga 30 / wesl 0.6.
 - **Process:** this worktree gets reset between sessions. Uncommitted work is
   destroyed — Phase 2 had to be redone once for exactly this reason. Commit
   each chunk as soon as it is green.
+
+## WASM parity: toon shader crashed WebGPU on mesh placement — October 2026
+
+Symptom: web build opened the editor and terrain editing worked, but placing a mesh
+crashed to black with `[Invalid ShaderModule] … While validating fragment stage …
+CreateRenderPipeline("pbr_opaque_mesh_pipeline")`. Terrain survived because its
+material never defines `VERTEX_UVS_A`; the first placed mesh compiled the
+`@if(VERTEX_UVS_A)` base-colour-texture branch of `toon_lighting.wesl` for the
+first time.
+
+Root cause: that branch tested `pbr_input.material.flags`. `pbr_input` is a `var`
+initialised from `pbr_input_from_vertex_output(in, is_front, …)`, i.e. from
+non-uniform fragment inputs, and WGSL's uniformity analysis keeps a `var`
+dependent on its old value across partial field assignments. So the `if` was
+non-uniform control flow and the `textureSampleBias` inside it is a hard error in
+Tint: `'textureSampleBias' must only be called from uniform control flow …
+builtin 'front' of 'fragment' may be non-uniform`. naga never flags it:
+`naga/src/valid/analyzer.rs` has `const DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE:
+bool = true;` (still so in naga 30), so **native can never catch this class of
+bug** — the earlier note above about naga catching the `fwidth` uniformity rule is
+wrong for fragment stages. Fix: `let material_flags = pbr_bindings::material.flags;`
+and branch on that — exactly what bevy's `pbr_fragment.wesl` does.
+
+Reproduced the Tint error and verified the fix without the app, using headless
+Chrome over the DevTools protocol (plain `--dump-dom` snapshots the DOM before the
+WebGPU promises settle, and `navigator.gpu` is undefined on `about:blank` — you
+must navigate to a `file://` page first):
+
+```
+chrome --headless=new --user-data-dir=/tmp/p --remote-debugging-port=9333 \
+       --enable-unsafe-webgpu --ignore-gpu-blocklist about:blank
+# node ≥22 (built-in WebSocket): GET http://127.0.0.1:9333/json → page.webSocketDebuggerUrl,
+# Page.navigate {url:"file:///tmp/blank.html"}, then Runtime.evaluate with
+# awaitPromise:true on an async IIFE that does requestAdapter → requestDevice →
+# createShaderModule({code}) → getCompilationInfo() and returns the messages.
+```
+
+Feed it a reduced WGSL that mirrors the suspicious structure (the full composed
+WESL isn't dumpable from bevy). The real adapter works in headless mode on macOS;
+the swiftshader flags do not.
