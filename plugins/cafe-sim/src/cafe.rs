@@ -19,7 +19,7 @@ pub fn enforce_closing_time(
     mut day_start: ResMut<DayStartBalance>,
 ) {
     let (hour, _) = game_time.hour_minute();
-    if hour >= CLOSING_HOUR || hour < DAY_START_HOUR {
+    if !(DAY_START_HOUR..CLOSING_HOUR).contains(&hour) {
         cafe_open.0 = false;
         game_time.start_next_day();
         // The day's earnings are now banked — the next day starts from here.

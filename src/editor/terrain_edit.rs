@@ -208,7 +208,6 @@ fn brush_sign(mouse: &ButtonInput<MouseButton>, keys: &ButtonInput<KeyCode>) -> 
     Some(if ctrl { -1.0 } else { 1.0 })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn apply_terrain_brush(
     mouse_input: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -416,7 +415,7 @@ pub fn finalize_terrain_lod(
             }
         }
 
-        for lod in 1..LOD_LEVELS {
+        for (lod, lod_mesh) in chunk.lod_meshes.iter().enumerate().take(LOD_LEVELS).skip(1) {
             let (new_mesh, _) = generate_lod_mesh(
                 |gx, gy| {
                     let lx = (gx - start_x) as usize;
@@ -430,7 +429,7 @@ pub fn finalize_terrain_lod(
                 TILE_SIZE,
                 lod,
             );
-            if let Some(mut m) = meshes.get_mut(&chunk.lod_meshes[lod]) {
+            if let Some(mut m) = meshes.get_mut(lod_mesh) {
                 *m = new_mesh;
             }
         }

@@ -242,7 +242,6 @@ fn spawn_agent(
 // Per-frame movement + barista AI
 // ----------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 pub fn tick_staff(
     mut commands: Commands,
     time: Res<Time>,
@@ -452,7 +451,6 @@ pub fn tick_staff(
 /// Replicate the correct-serve half of `handle_delivery_click`: deposit a drink
 /// cube on the counter, credit price + a friendliness tip, and arm the customer's
 /// served timer. No-op if the customer is no longer waiting at `counter`.
-#[allow(clippy::too_many_arguments)]
 fn serve(
     commands: &mut Commands,
     assets: &DeliveryAssets,

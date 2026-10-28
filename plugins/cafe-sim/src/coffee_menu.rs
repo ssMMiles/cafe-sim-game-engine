@@ -6,9 +6,10 @@
 //! Acts as a modal, so placement and cursor-lock systems all gate on the active
 //! menu.
 //!
-//! Once brewing, the machine sprouts a floating screen-space popup (drink name
-//! + progress bar, then "Ready!" when done), the same pattern customer popups
-//! use. While a machine is brewing, clicking it does not re-open the menu.
+//! Once brewing, the machine sprouts a floating screen-space popup showing the
+//! drink name and a progress bar, then "Ready!" when done — the same pattern
+//! customer popups use. While a machine is brewing, clicking it does not
+//! re-open the menu.
 
 use bevy::window::PrimaryWindow;
 use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};

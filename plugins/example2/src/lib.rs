@@ -1,8 +1,5 @@
 use bevy::{pbr::ExtendedMaterial, prelude::*};
-use engine_api::{
-    DefaultToonLightmap, DynamicPlugin, ScriptOwned, ToonMaterial, add,
-    create_default_toon_lightmap,
-};
+use engine_api::{DefaultToonLightmap, DynamicPlugin, ScriptOwned, ToonMaterial, add};
 use std::f32::consts::TAU;
 
 #[derive(Default)]

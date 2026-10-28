@@ -148,13 +148,7 @@ pub fn compute_chunk_meshes(
     let mut aabb_out = None;
     let lod_meshes: [Mesh; LOD_LEVELS] = std::array::from_fn(|lod| {
         let (mesh, aabb) = generate_lod_mesh(
-            &get_height,
-            start_x,
-            start_y,
-            CHUNK_SIZE,
-            CHUNK_SIZE,
-            tile_size,
-            lod,
+            get_height, start_x, start_y, CHUNK_SIZE, CHUNK_SIZE, tile_size, lod,
         );
         if lod == 0 {
             aabb_out = Some(aabb);

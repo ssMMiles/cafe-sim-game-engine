@@ -276,7 +276,9 @@ impl LightmapBuffer {
             return None;
         }
         let texels = bytes
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|px| {
                 let ch = |i: usize| f16::from_le_bytes([px[i], px[i + 1]]).to_f32();
                 Vec3::new(ch(0), ch(2), ch(4))
@@ -740,8 +742,8 @@ mod tests {
         buf.texels[0] = Vec3::splat(9.0); // unwritten garbage that must be overwritten
         buf.dilate(&mut written, 1);
         assert_eq!(buf.texels[4], Vec3::new(1.0, 0.5, 0.0));
-        for i in 0..9 {
-            assert_eq!(buf.texels[i], Vec3::new(1.0, 0.5, 0.0), "texel {i}");
+        for (i, texel) in buf.texels.iter().enumerate() {
+            assert_eq!(*texel, Vec3::new(1.0, 0.5, 0.0), "texel {i}");
         }
         assert!(written.iter().all(|w| *w));
     }

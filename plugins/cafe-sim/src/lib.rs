@@ -1,3 +1,12 @@
+// Bevy ECS signatures trip two clippy lints by construction: a system's
+// parameters are its dependency list, so eight or more `Res`/`Query` arguments
+// is normal and splitting them up to satisfy the limit would obscure the
+// dependencies rather than reveal them; and a `Query`'s type *is* the filter,
+// so it is unavoidably verbose. Both are allowed crate-wide rather than
+// sprinkled per-system. Where a query type is genuinely reusable, prefer a
+// type alias anyway (see `editor::ui::PlacedQuery`).
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 use bevy::prelude::*;
 use engine_api::{DynamicPlugin, Player, ScriptBinding, ScriptRegistry, ScriptSchema, add};
 
@@ -255,7 +264,6 @@ impl DynamicPlugin for CafeSimPlugin {
 /// Single transition system that despawns the outgoing screen UI and sets
 /// up the incoming one whenever [`CafePhase`] changes. Skips work when
 /// the phase is unchanged so it's cheap to run every frame.
-#[allow(clippy::too_many_arguments)]
 fn apply_phase_transitions(
     mut last: Local<Option<CafePhase>>,
     phase: Res<CafePhase>,

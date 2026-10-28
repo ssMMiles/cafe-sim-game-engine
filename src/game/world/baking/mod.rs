@@ -367,7 +367,6 @@ impl Plugin for BakingPlugin {
 /// Handles placed-object baking (always CPU) and terrain baking when `use_gpu`
 /// is false or on wasm. On native with `use_gpu` enabled, writes `GpuBakeTrigger`
 /// so `dispatch_gpu_terrain_bake` can do the GPU work in the same frame.
-#[allow(clippy::too_many_arguments)]
 fn run_bake(
     mut bake_messages: MessageReader<BakeMessage>,
     mut commands: Commands,
@@ -559,7 +558,6 @@ fn cancel_object_bake(mut object_bake: ResMut<ObjectBakeTask>) {
 ///
 /// Runs immediately after `run_bake` on non-wasm targets.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
 fn dispatch_gpu_terrain_bake(
     mut gpu_trigger: ResMut<GpuBakeTrigger>,
     config: Res<BakeConfig>,

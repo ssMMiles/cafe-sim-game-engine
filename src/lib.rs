@@ -2,6 +2,14 @@
 // pipeline resources) overflow the default 128-deep trait solver. The overflow
 // is currently a warning but is scheduled to become a hard error.
 #![recursion_limit = "256"]
+// Bevy ECS signatures trip two clippy lints by construction: a system's
+// parameters are its dependency list, so eight or more `Res`/`Query` arguments
+// is normal and splitting them up to satisfy the limit would obscure the
+// dependencies rather than reveal them; and a `Query`'s type *is* the filter,
+// so it is unavoidably verbose. Both are allowed crate-wide rather than
+// sprinkled per-system. Where a query type is genuinely reusable, prefer a
+// type alias anyway (see `editor::ui::PlacedQuery`).
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use avian3d::prelude::PhysicsPlugins;
 use bevy::{

@@ -51,7 +51,7 @@ pub struct MenuCamera;
 
 fn setup_menu(mut commands: Commands, mut next_state: ResMut<NextState<MenuScreen>>) {
     log::info!("Setting up menu");
-    commands.spawn((Camera2d::default(), MenuCamera));
+    commands.spawn((Camera2d, MenuCamera));
     next_state.set(MenuScreen::Main);
 }
 

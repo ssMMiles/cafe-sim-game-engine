@@ -326,7 +326,6 @@ pub fn add_gpu_baking_to_app(app: &mut App) {
 /// regardless of how many chunks are loaded, preventing OOM at high resolutions.
 ///
 /// Called from `dispatch_gpu_terrain_bake` in `mod.rs` when `use_gpu` is true.
-#[allow(clippy::too_many_arguments)]
 pub fn enqueue_terrain_bake_jobs(
     heightmap: &HeightmapData,
     terrain_world: &TerrainWorld,
@@ -540,7 +539,7 @@ pub fn top_up_gpu_bake(
 /// Extract pending jobs from the main world into the render world.
 fn extract_bake_jobs(mut main_world: ResMut<MainWorld>, mut extracted: ResMut<GpuBakeExtracted>) {
     let mut pending = main_world.resource_mut::<GpuBakePending>();
-    extracted.jobs.extend(pending.jobs.drain(..));
+    extracted.jobs.append(&mut pending.jobs);
 }
 
 // ============================================================================
@@ -883,6 +882,11 @@ mod tests {
         h
     }
 
+    // The long literals below are exact binary values (1 + 1/1024, 2^-14,
+    // 2^-24 …) chosen to sit on f16 mantissa and subnormal boundaries.
+    // Spelling them out in full is the point: it documents which boundary
+    // each one probes, so don't let clippy shorten them.
+    #[allow(clippy::excessive_precision)]
     #[test]
     fn wgsl_f16_packing_matches_half_crate() {
         let mut values: Vec<f32> = vec![

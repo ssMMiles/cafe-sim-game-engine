@@ -129,7 +129,6 @@ pub struct NeedsObjectLightmaps;
 /// and plugin scene hooks alike — because it keys off the materials that end
 /// up on the entities, not on who put them there.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
 pub fn apply_object_lightmaps(
     mut commands: Commands,
     terrain_world: Option<Res<crate::game::world::terrain::storage::TerrainWorld>>,

@@ -331,10 +331,10 @@ pub fn check_interactions(
         }
     }
 
-    if let Some(entity) = current_interaction {
-        if !marked_query.contains(entity) {
-            commands.entity(entity).insert(HoveredOver);
-        }
+    if let Some(entity) = current_interaction
+        && !marked_query.contains(entity)
+    {
+        commands.entity(entity).insert(HoveredOver);
     }
 }
 

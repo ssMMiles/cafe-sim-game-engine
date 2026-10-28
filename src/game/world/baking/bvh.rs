@@ -333,12 +333,12 @@ pub fn collect_occluder_triangles(
         };
         match mesh.indices() {
             Some(Indices::U32(idx)) => {
-                for t in idx.chunks_exact(3) {
+                for t in idx.as_chunks::<3>().0 {
                     push_tri(&mut out, t[0] as usize, t[1] as usize, t[2] as usize);
                 }
             }
             Some(Indices::U16(idx)) => {
-                for t in idx.chunks_exact(3) {
+                for t in idx.as_chunks::<3>().0 {
                     push_tri(&mut out, t[0] as usize, t[1] as usize, t[2] as usize);
                 }
             }

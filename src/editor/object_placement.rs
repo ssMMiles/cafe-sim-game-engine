@@ -35,7 +35,6 @@ pub struct PlacementPreview;
 pub struct PlacementPreviewEntity(pub Option<Entity>);
 
 /// LMB on the viewport places the configured entity at the preview.
-#[allow(clippy::too_many_arguments)]
 pub fn handle_place_click(
     mut commands: Commands,
     viewport: Res<ViewportInput>,

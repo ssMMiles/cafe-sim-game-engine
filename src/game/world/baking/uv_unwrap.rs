@@ -133,12 +133,12 @@ pub fn max_world_edge(mesh: &Mesh, world_from_local: &Mat4) -> f32 {
 
     match indices {
         Indices::U32(v) => {
-            for t in v.chunks_exact(3) {
+            for t in v.as_chunks::<3>().0 {
                 consider(t[0], t[1], t[2]);
             }
         }
         Indices::U16(v) => {
-            for t in v.chunks_exact(3) {
+            for t in v.as_chunks::<3>().0 {
                 consider(t[0] as u32, t[1] as u32, t[2] as u32);
             }
         }

@@ -387,16 +387,11 @@ impl InputLock {
 // Settings
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CameraView {
     FirstPerson,
+    #[default]
     ThirdPerson,
-}
-
-impl Default for CameraView {
-    fn default() -> Self {
-        CameraView::ThirdPerson
-    }
 }
 
 impl std::fmt::Display for CameraView {
@@ -408,16 +403,11 @@ impl std::fmt::Display for CameraView {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MovementMode {
     FreeCam,
+    #[default]
     FloorBased,
-}
-
-impl Default for MovementMode {
-    fn default() -> Self {
-        MovementMode::FloorBased
-    }
 }
 
 impl std::fmt::Display for MovementMode {

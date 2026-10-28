@@ -181,7 +181,6 @@ fn handle_sizes(cam_pos: Vec3, origin: Vec3) -> (f32, f32, f32) {
 }
 
 /// Hover detection, drag start/update/end, and Escape cancel.
-#[allow(clippy::too_many_arguments)]
 pub fn update_transform_gizmo(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,

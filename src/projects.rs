@@ -217,10 +217,10 @@ pub fn write_manifest(manifest: &ProjectManifest) -> std::io::Result<()> {
 fn serialize_manifest(m: &ProjectManifest) -> String {
     let mut out = String::new();
     out.push_str(&format!("name = {}\n", quote(&m.name)));
-    if let Some(desc) = m.description.as_deref() {
-        if !desc.is_empty() {
-            out.push_str(&format!("description = {}\n", quote(desc)));
-        }
+    if let Some(desc) = m.description.as_deref()
+        && !desc.is_empty()
+    {
+        out.push_str(&format!("description = {}\n", quote(desc)));
     }
     out.push_str(&format!("plugins = {}\n", quote_array(&m.plugins)));
     out.push_str(&format!("worlds = {}\n", quote_array(&m.worlds)));

@@ -406,13 +406,13 @@ pub fn launch_chunk_tasks(
                 ),
             };
 
-            if let Some(terrain_loaded) = terrain_state {
-                if objects_done {
-                    if terrain_loaded {
-                        ready_with_data.push(chunk);
-                    } else {
-                        ready_flat.push(chunk);
-                    }
+            if let Some(terrain_loaded) = terrain_state
+                && objects_done
+            {
+                if terrain_loaded {
+                    ready_with_data.push(chunk);
+                } else {
+                    ready_flat.push(chunk);
                 }
             }
         }
@@ -574,10 +574,10 @@ pub fn finalize_computed_chunks(
         );
 
         #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
-        if let Some(ref handle) = computing.objects_handle {
-            if let Some(asset) = chunk_objects_assets.get(handle) {
-                spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, &asset.0);
-            }
+        if let Some(ref handle) = computing.objects_handle
+            && let Some(asset) = chunk_objects_assets.get(handle)
+        {
+            spawn_chunk_objects(&mut commands, &asset_server, &mut obj_registry, &asset.0);
         }
 
         #[cfg(all(target_arch = "wasm32", feature = "opfs"))]

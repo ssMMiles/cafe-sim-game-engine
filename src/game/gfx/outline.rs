@@ -1,3 +1,12 @@
+//! Hover outlines for interactable objects.
+//!
+//! **Currently inert.** This was built on `bevy_mod_outline`; that dependency
+//! is gone and every `OutlineVolume` insert below is commented out, so
+//! `update_outline` walks entity hierarchies each frame without producing any
+//! visual effect, and `Shift+O` toggles a setting nothing reads. Either wire
+//! up a replacement or delete the module and its two system registrations
+//! (`gfx/mod.rs`, `editor/mod.rs`).
+
 use bevy::prelude::*;
 // use bevy_mod_outline::OutlineVolume;
 
@@ -63,20 +72,26 @@ pub fn update_outline(
     // Handle entities that are no longer being interacted with (remove outline)
     for entity in removed_interactions.read() {
         // Also remove outlines from children if this is a scene
-        if let Ok((_, children)) = all_interactables.get(entity) {
-            if let Some(children) = children {
-                propagate_outline_to_children(
-                    &mut commands,
-                    children,
-                    false,
-                    &mesh_query,
-                    &children_query,
-                );
-            }
+        if let Ok((_, children)) = all_interactables.get(entity)
+            && let Some(children) = children
+        {
+            propagate_outline_to_children(
+                &mut commands,
+                children,
+                false,
+                &mesh_query,
+                &children_query,
+            );
         }
     }
 }
 
+// NOTE: this walk is currently inert. The `OutlineVolume` inserts it existed to
+// perform were commented out when the `bevy_mod_outline` dependency was dropped,
+// so the body only recurses. Kept as scaffolding for a replacement outline
+// implementation; delete it (and `update_outline`'s registration) if none is
+// coming — see the note at the top of this file.
+#[allow(clippy::only_used_in_recursion)]
 fn propagate_outline_to_children(
     commands: &mut Commands,
     children: &Children,

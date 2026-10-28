@@ -307,6 +307,21 @@ impl Plugin for EditorPlugin {
     }
 }
 
+fn toggle_editor_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    current: Res<State<EditorMode>>,
+    mut next: ResMut<NextState<EditorMode>>,
+) {
+    if keys.just_pressed(KeyCode::F1) {
+        let target = match current.get() {
+            EditorMode::Editor => EditorMode::Gameplay,
+            EditorMode::Gameplay => EditorMode::Editor,
+        };
+        info!("EditorMode -> {target:?}");
+        next.set(target);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,20 +365,5 @@ mod tests {
         initializes("update_transform_gizmo", update_transform_gizmo);
         initializes("draw_transform_gizmo", draw_transform_gizmo);
         initializes("editor_ui", ui::editor_ui);
-    }
-}
-
-fn toggle_editor_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    current: Res<State<EditorMode>>,
-    mut next: ResMut<NextState<EditorMode>>,
-) {
-    if keys.just_pressed(KeyCode::F1) {
-        let target = match current.get() {
-            EditorMode::Editor => EditorMode::Gameplay,
-            EditorMode::Gameplay => EditorMode::Editor,
-        };
-        info!("EditorMode -> {target:?}");
-        next.set(target);
     }
 }

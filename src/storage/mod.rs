@@ -6,6 +6,11 @@ use bevy::prelude::*;
 // Error type
 // ============================================================================
 
+// Only the wasm backend has live call sites today (the native save/load paths
+// go through `terrain::storage` directly), so on a native build this and
+// `NativeStorage` look unused. They are the other half of the platform
+// abstraction `Storage` documents — keep them in step with `wasm.rs`.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum StorageError {
     /// Native I/O error (std::fs).

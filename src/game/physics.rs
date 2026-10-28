@@ -61,11 +61,9 @@ pub fn character_physics(
     // Input is suppressed while a plugin holds the input lock; gravity and
     // ground resolution still run so the character settles naturally.
     let mut wish_dir = Vec3::ZERO;
-    let jump_pressed;
-    let sprint;
-    if input_lock.is_locked() {
-        jump_pressed = false;
-        sprint = false;
+
+    let (jump_pressed, sprint) = if input_lock.is_locked() {
+        (false, false)
     } else {
         if keyboard_input.pressed(KeyCode::KeyW) {
             wish_dir += camera_tf.forward().as_vec3();
@@ -84,9 +82,11 @@ pub fn character_physics(
             wish_dir = wish_dir.normalize();
         }
 
-        jump_pressed = keyboard_input.pressed(KeyCode::Space);
-        sprint = keyboard_input.pressed(KeyCode::ShiftLeft);
-    }
+        (
+            keyboard_input.pressed(KeyCode::Space),
+            keyboard_input.pressed(KeyCode::ShiftLeft),
+        )
+    };
     let max_speed = if sprint {
         settings.movement_speed * 80.0
     } else {
@@ -152,7 +152,7 @@ pub fn character_physics(
         let capsule_center = player_tf.translation + Vec3::Y * (CHAR_HEIGHT * 0.5);
 
         if let Some(hit) = spatial_query.cast_shape(
-            &capsule_shape,
+            capsule_shape,
             capsule_center,
             Quat::IDENTITY,
             dir,
@@ -215,7 +215,7 @@ pub fn character_physics(
     let cast_origin = player_tf.translation + Vec3::Y * (CHAR_HEIGHT * 0.5);
     let shape_ground: Option<f32> = spatial_query
         .cast_shape(
-            &capsule_shape,
+            capsule_shape,
             cast_origin,
             Quat::IDENTITY,
             Dir3::NEG_Y,
@@ -238,11 +238,12 @@ pub fn character_physics(
 
     if let Some(ground_h) = effective_ground {
         let diff = player_tf.translation.y - ground_h;
-        if (0.0..GROUND_SNAP).contains(&diff) && state.velocity.y <= 0.0 {
-            player_tf.translation.y = ground_h;
-            state.velocity.y = 0.0;
-            state.grounded = true;
-        } else if diff < 0.0 {
+        // Two ways to end up standing on `ground_h`: falling onto it from
+        // within snap range, or already being below it and needing to be
+        // pushed back out. Both resolve the same way.
+        let settling =
+            ((0.0..GROUND_SNAP).contains(&diff) && state.velocity.y <= 0.0) || diff < 0.0;
+        if settling {
             player_tf.translation.y = ground_h;
             state.velocity.y = 0.0;
             state.grounded = true;
@@ -253,15 +254,13 @@ pub fn character_physics(
         // 7. Slope check — only when terrain is the active ground surface
         if state.grounded {
             let terrain_is_ground =
-                shape_ground.map_or(true, |sh| terrain_ground.map_or(false, |th| th >= sh));
-            if terrain_is_ground {
-                if let Some((normal, slope)) = terrain_normal {
-                    state.ground_normal = normal;
-                    if slope > MAX_SLOPE {
-                        let slide_dir = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
-                        state.velocity += slide_dir * GRAVITY * slope.sin() * dt;
-                        state.grounded = false;
-                    }
+                shape_ground.is_none_or(|sh| terrain_ground.is_some_and(|th| th >= sh));
+            if terrain_is_ground && let Some((normal, slope)) = terrain_normal {
+                state.ground_normal = normal;
+                if slope > MAX_SLOPE {
+                    let slide_dir = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+                    state.velocity += slide_dir * GRAVITY * slope.sin() * dt;
+                    state.grounded = false;
                 }
             }
         }

@@ -143,7 +143,7 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
         // window), above the sprite. Attached here rather than auto-created
         // because auto-creation would pick the main menu's camera.
         bevy_egui::PrimaryEguiContext,
-        Camera2d::default(),
+        Camera2d,
         // PixelZoom::FitSize {
         //         width: RENDER_TEXTURE_WIDTH as i32,
         //         height: RENDER_TEXTURE_HEIGHT as i32,
@@ -181,13 +181,13 @@ pub fn handle_camera_input(
         match settings.movement_mode {
             MovementMode::FreeCam => {
                 // Snap to terrain when switching to floor-based
-                if let Some(ref hm) = heightmap {
-                    if let Some(h) = hm.sample_height(
+                if let Some(ref hm) = heightmap
+                    && let Some(h) = hm.sample_height(
                         player_transform.translation.x,
                         player_transform.translation.z,
-                    ) {
-                        player_transform.translation.y = h;
-                    }
+                    )
+                {
+                    player_transform.translation.y = h;
                 }
             }
             MovementMode::FloorBased => {}
@@ -301,14 +301,13 @@ pub fn camera_follow(
                 player_transform.translation - offset_direction * settings.third_person_distance;
 
             // In FloorBased mode, prevent the camera from clipping into terrain.
-            if settings.movement_mode == MovementMode::FloorBased {
-                if let Some(ref hm) = heightmap {
-                    if let Some(terrain_h) = hm.sample_height(desired_pos.x, desired_pos.z) {
-                        let min_y = terrain_h + CAMERA_CLEARANCE;
-                        if desired_pos.y < min_y {
-                            desired_pos.y = min_y;
-                        }
-                    }
+            if settings.movement_mode == MovementMode::FloorBased
+                && let Some(ref hm) = heightmap
+                && let Some(terrain_h) = hm.sample_height(desired_pos.x, desired_pos.z)
+            {
+                let min_y = terrain_h + CAMERA_CLEARANCE;
+                if desired_pos.y < min_y {
+                    desired_pos.y = min_y;
                 }
             }
 
@@ -326,10 +325,10 @@ pub fn resize_render_texture_sprite(
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut sprite_query: Query<&mut Sprite, With<RenderTextureSprite>>,
 ) {
-    if let Ok(window) = window_query.single() {
-        if let Ok(mut sprite) = sprite_query.single_mut() {
-            sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
-        }
+    if let Ok(window) = window_query.single()
+        && let Ok(mut sprite) = sprite_query.single_mut()
+    {
+        sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
     }
 }
 

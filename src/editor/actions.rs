@@ -99,7 +99,6 @@ impl WorldSwitch<'_, '_> {
 }
 
 /// Save / bake / plugins / worlds / exit.
-#[allow(clippy::too_many_arguments)]
 pub fn apply_level_actions(
     mut actions: MessageReader<EditorAction>,
     mut commands: Commands,
@@ -206,7 +205,6 @@ pub fn apply_level_actions(
 }
 
 /// Tool and selection commands.
-#[allow(clippy::too_many_arguments)]
 pub fn apply_selection_actions(
     mut actions: MessageReader<EditorAction>,
     mut commands: Commands,

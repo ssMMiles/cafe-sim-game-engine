@@ -164,7 +164,6 @@ impl BakeHeightCache {
 ///
 /// Returns `0.0` if the ray is occluded (in shadow) or `1.0` if it reaches
 /// `max_dist` without hitting terrain or any triangle.
-#[allow(clippy::too_many_arguments)]
 pub fn cast_shadow_ray(
     origin: Vec3,
     mesh_origin: Vec3,
@@ -200,7 +199,6 @@ pub fn cast_shadow_ray(
 /// surface and the light itself.
 ///
 /// Returns `0.0` if occluded, `1.0` if the light is visible.
-#[allow(clippy::too_many_arguments)]
 pub fn cast_shadow_ray_segment(
     origin: Vec3,
     mesh_origin: Vec3,
@@ -241,7 +239,6 @@ pub fn cast_shadow_ray_segment(
 /// Returns the fraction of unoccluded rays ∈ [0, 1].  Uses a simple
 /// deterministic cosine-weighted hemisphere distribution built from the
 /// incoming normal so the result is stable across bakes.
-#[allow(clippy::too_many_arguments)]
 pub fn compute_ao(
     origin: Vec3,
     mesh_origin: Vec3,
@@ -313,7 +310,6 @@ pub fn compute_indirect_bounce(
     cache: &BakeHeightCache,
     bvh: &TriangleBvh,
     sun_dir: Vec3,
-    ao_radius: f32,
     shadow_max_dist: f32,
     n_rays: u32,
     steps: u32,
@@ -329,8 +325,8 @@ pub fn compute_indirect_bounce(
     // texels don't share the same 8 directions (prevents correlated stripe patterns).
     let azimuth_offset = float01(hash_u32(seed_offset)) * std::f32::consts::TAU;
 
-    // Use the full shadow reach for bounce marching, not just ao_radius.
-    // Back-of-hill surfaces need to see sunlit terrain that can be 4× further away.
+    // Bounce marching uses the full shadow reach, not the (shorter) AO radius:
+    // back-of-hill surfaces need to see sunlit terrain up to 4× further away.
     let step_size = shadow_max_dist / steps as f32;
     let mut accum = 0.0_f32;
 

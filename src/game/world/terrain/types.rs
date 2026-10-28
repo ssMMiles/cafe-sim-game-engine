@@ -33,11 +33,6 @@ impl HeightmapData {
         }
     }
 
-    /// Returns the number of non-zero height tiles currently loaded in memory.
-    pub fn tile_count(&self) -> usize {
-        self.heights.len()
-    }
-
     /// Get the pre-scaled height at tile coordinates (x, y). Returns 0.0 if not set.
     pub fn get_tile(&self, x: i32, y: i32) -> f32 {
         self.heights.get(&(x, y)).copied().unwrap_or(0.0)

@@ -53,7 +53,6 @@ pub struct GrabPayload {
 /// destroy/delete share `Delete`. As separate systems their relative order
 /// would be unconstrained, so a grab could be cancelled by the very press
 /// that created it.
-#[allow(clippy::too_many_arguments)]
 pub fn handle_grab_keys(
     mut commands: Commands,
     input: Res<ButtonInput<KeyCode>>,
@@ -123,7 +122,6 @@ pub fn handle_grab_keys(
 }
 
 /// Lift a placed entity into the preview.
-#[allow(clippy::too_many_arguments)]
 fn grab_entity(
     root: Entity,
     commands: &mut Commands,
@@ -182,7 +180,6 @@ fn grab_entity(
 ///
 /// Ordered before `handle_place_click` and clears the click, so the same
 /// click cannot also place a fresh entity on top of the one just dropped.
-#[allow(clippy::too_many_arguments)]
 pub fn place_grabbed_object(
     mut commands: Commands,
     mut viewport: ResMut<ViewportInput>,
@@ -272,7 +269,6 @@ pub fn release_grab(
 }
 
 /// Respawn the carried entity at its original transform and chunk.
-#[allow(clippy::too_many_arguments)]
 fn restore_grabbed(
     commands: &mut Commands,
     asset_server: &AssetServer,

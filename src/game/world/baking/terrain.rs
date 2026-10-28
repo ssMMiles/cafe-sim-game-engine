@@ -19,7 +19,6 @@ use crate::game::world::{
 /// For each chunk: generates a `BakeConfig::terrain_resolution²` HDR lightmap
 /// of outgoing radiance (see `lightmap.rs` for the model), saves it as EXR
 /// and swaps it into the chunk's material.
-#[allow(clippy::too_many_arguments)]
 pub fn bake_terrain_lightmaps(
     heightmap: &HeightmapData,
     terrain_world: &TerrainWorld,
@@ -117,7 +116,6 @@ pub fn bake_terrain_lightmaps(
                     &cache,
                     bvh,
                     sun_dir,
-                    config.ao_radius,
                     config.ao_radius * 4.0,
                     config.bounce_rays,
                     config.shadow_steps,

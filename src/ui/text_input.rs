@@ -48,7 +48,7 @@ pub fn spawn_text_input<M: Component>(
     marker: M,
     theme: &UiTheme,
 ) -> Entity {
-    let id = parent
+    parent
         .spawn(Node {
             width: Val::Px(theme.btn_width * 1.5),
             height: Val::Px(theme.btn_height),
@@ -109,8 +109,7 @@ pub fn spawn_text_input<M: Component>(
                 ));
             });
         })
-        .id();
-    id
+        .id()
 }
 
 // ---------------------------------------------------------------------------

@@ -25,17 +25,14 @@ use crate::ui::{ButtonVariant, UiExt, UiTheme};
 /// Top-level state machine the cafe-sim plugin walks through within a
 /// single engine `InGame` session. Only one variant is active at a time;
 /// each variant gates a disjoint set of systems via `run_if`.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CafePhase {
+    #[default]
     MainMenu,
     SlotPicker(SlotPickerMode),
-    Playing { slot: u8 },
-}
-
-impl Default for CafePhase {
-    fn default() -> Self {
-        Self::MainMenu
-    }
+    Playing {
+        slot: u8,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -173,7 +173,6 @@ impl Panels<'_, '_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn editor_ui(
     mut contexts: EguiContexts,
     mut dock: ResMut<DockLayout>,

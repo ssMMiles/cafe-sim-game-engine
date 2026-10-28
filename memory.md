@@ -384,6 +384,23 @@ bevy_egui 0.43.1 / egui_dock 0.21.1 / egui 0.36.2 / wgpu+naga 30 / wesl 0.6.
   stays press-down (bevy's own `ui_widgets::Button` convention is release via
   `Activate`); `clear_just_pressed(MouseButton::Left)` calls in cafe-sim
   handlers were left in place.
+- **The tree is clippy-clean as of 2026-10-27** (`cargo clippy --workspace
+  --all-targets`, 0 warnings) — keep it that way. `too_many_arguments` and
+  `type_complexity` are allowed **crate-wide** in `src/lib.rs` and
+  `plugins/cafe-sim/src/lib.rs` with a comment explaining why (Bevy system
+  signatures *are* their dependency lists); don't re-add per-function
+  `#[allow]`s for them, 23 of those were removed. Two deliberate local allows
+  remain, both documented at the site: `excessive_precision` on the f16
+  packing test (the long literals are exact binary boundary values and the
+  digits are the documentation) and `dead_code` on `storage/native.rs` +
+  `StorageError` (the native half of a platform abstraction whose only live
+  callers are wasm-gated — not actually dead).
+- **`src/game/gfx/outline.rs` is an inert stub.** It was built on
+  `bevy_mod_outline`; that dep is gone and every `OutlineVolume` insert is
+  commented out, so `update_outline` (registered in `gfx/mod.rs`, runs every
+  frame) walks entity hierarchies to no effect and `Shift+O` toggles a setting
+  nothing reads. Flagged to the user 2026-10-27, left in place as scaffolding.
+  Delete the module and its two registrations if no replacement is coming.
 - **Process:** this worktree gets reset between sessions. Uncommitted work is
   destroyed — Phase 2 had to be redone once for exactly this reason. Commit
   each chunk as soon as it is green.

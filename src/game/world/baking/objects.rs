@@ -102,7 +102,6 @@ impl MeshSnapshot {
 ///
 /// See `object_lightmaps.rs` for why lightmaps are per sub-mesh rather than
 /// per object.
-#[allow(clippy::too_many_arguments)]
 pub fn collect_object_bake_jobs(
     commands: &mut Commands,
     heightmap: &HeightmapData,
@@ -438,7 +437,7 @@ fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize) -> Vec<
     // outside the triangle loop rather than once per triangle.
     let norm_mat = world_mat.inverse().transpose();
 
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
 
         // World-space positions (transform by the instance matrix).

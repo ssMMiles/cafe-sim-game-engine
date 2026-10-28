@@ -90,7 +90,6 @@ pub fn place_camera_at_spawn(transform: &mut Transform, cam: &mut PlayerCamera, 
 
 /// Right-drag look + WASD/QE fly, and the wheel: speed while looking, dolly
 /// while hovering idle.
-#[allow(clippy::too_many_arguments)]
 pub fn editor_fly_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,

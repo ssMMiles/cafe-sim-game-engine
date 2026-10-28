@@ -7,11 +7,15 @@ use bevy::prelude::*;
 
 use super::StorageError;
 
+// See the note on `StorageError`: this is the native half of the `Storage`
+// abstraction, currently only exercised on the wasm path.
+#[allow(dead_code)]
 #[derive(Resource)]
 pub struct NativeStorage {
     base_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl NativeStorage {
     pub fn new() -> Self {
         Self {
@@ -61,6 +65,7 @@ impl NativeStorage {
     }
 }
 
+#[allow(dead_code)]
 fn collect_keys(dir: &Path, base: &Path, out: &mut Vec<String>) -> Result<(), StorageError> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
