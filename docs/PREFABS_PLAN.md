@@ -1,6 +1,20 @@
 # Prefabs (linked instances) + Prefab catalog tab — Plan
 
-Status: **draft 2026-10-28, awaiting decisions in §6.** Decisions already
+Status: **implemented 2026-10-28** (both phases; §4 decisions settled: rkyv
+in `assets/prefabs/`, in-place editing with Apply/Revert/Unpack, **section-
+level** override merge (transform/name/kind/scripts per member — the agreed
+middle ground between whole-member and per-field), expand-on-load, extras
+fold in on Apply, single-entity prefabs root-as-entity). Implementation
+deviations from the draft below: `member_ids` is explicit `(local, world)`
+pairs, not positional, so Apply can add/remove members without corrupting
+other instances; a **missing prefab file does not unpack** — the root spawns
+bare with its data intact and a status-bar warning, healing when the file
+returns; discovery is runtime (`read_dir` natively, OPFS listing on web)
+with no build-manifest involvement; the member edits in `.objects` are
+snapshotted as fresh overrides at save/delete/respawn/grab time.
+
+Original draft:
+Status: draft 2026-10-28, awaiting decisions in §6. Decisions already
 settled by the user: linked instances (edit the prefab, every instance
 updates), global scope, no nested prefabs for now, single-entity prefabs are
 allowed, placement goes through the Place tool, and the Place tab simply

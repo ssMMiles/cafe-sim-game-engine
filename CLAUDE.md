@@ -99,6 +99,7 @@ src/
 │   │                       #   EditorGizmoGroup (fat lines, depth_bias -1)
 │   ├── history.rs          # Undo/redo: per-world Transaction stacks of before/after Changes keyed by placed id;
 │   │                       #   LevelOps applies them through the same messages (flagged `replay`); chunk pinning
+│   ├── prefab_edit.rs      # PrefabAction {SaveSelectionAs, Apply, Revert, Unpack}; instance re-expansion
 │   ├── controls.rs         # ActiveControls: context-filtered key hints for the status bar
 │   ├── grab.rs             # R: lift a placed entity into the preview, drop it with its own id
 │   ├── input.rs            # keyboard_free (egui text focus), scroll modifier + notches
@@ -127,8 +128,10 @@ src/
         ├── sky.rs       # SkyDomeMaterial, 4-band toon gradient
         ├── streaming.rs # Chunk load/unload by player proximity
         ├── chunk_assets.rs  # Custom asset loaders (.terrain, .objects, world.meta)
-        ├── objects.rs   # PlacedObjectRegistry, PlacedEntityRecord/PlacedKind, spawn/despawn,
-        │                #   persistence, light gizmos (legacy module reads v2 files)
+        ├── objects.rs   # PlacedObjectRegistry, PlacedEntityRecord/PlacedKind, spawn/despawn
+        │                #   (prefab roots expand there), persistence, light gizmos, legacy readers
+        ├── prefabs.rs   # PrefabFile/PrefabInstanceData/PrefabOverride, PrefabLibrary (assets/prefabs,
+        │                #   OPFS on web), define/expand/diff helpers — see docs/PREFABS_PLAN.md
         ├── terrain/
         │   ├── types.rs      # TerrainChunk, HeightmapData (sparse HashMap)
         │   ├── constants.rs  # CHUNK_SIZE=256 vertices, TILE_SIZE=0.25 → 63.75 m chunks (CHUNK_WORLD_SIZE in objects.rs)
@@ -176,15 +179,18 @@ worlds/{id}/
                                #   + EnvironmentData (sun/ambient, intensities in lightmap units) + required_plugins + plugin_data
                                #   + next_entity_id (placed-entity id counter, seeds the registry on load)
   chunks/chunk_X_Y.terrain     # v2 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc
-  chunks/chunk_X_Y.objects     # v5: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty/Group;
+  chunks/chunk_X_Y.objects     # v6: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty/Group;
                                #   light intensity is in lightmap units, not lumens)
                                #   + Vec<ScriptBinding> with typed PropValue props + parent: Option<u64> (group id)
+                               #   + prefab: Option<PrefabInstanceData> on instance roots (members never stored)
   chunks/chunk_X_Y_lightmap.v6.exr, objects/obj_{id}_{k}_lightmap.v6.exr  (k = sub-mesh index)
                                # HDR OpenEXR (f16 RGB, ZIP) radiance; LIGHTMAP_FORMAT_VERSION is in the
                                #   file name, so older bakes are skipped (with a warning), never misread
+assets/prefabs/{name}.prefab   # prefab definitions (v1, global): records with local ids,
+                               #   root-relative transforms; OPFS `prefabs/` on web
 ```
 
-All rkyv; v2 and v4 `world.meta` (and v2/v3/v4 `.objects` files) are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
+All rkyv; v2 and v4 `world.meta` (and v2–v5 `.objects` files) are read via `legacy` modules and upgraded in memory, rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
 
 ## Shaders (`assets/shaders/`)
 
@@ -214,6 +220,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 - **The engine has no pause menu any more.** `pause_menu.rs`, `PauseMenuState`, `UiAnchors` and the bevy_ui slider are gone. In the editor, Escape backs out one level (put a carried entity back → Select tool → deselect). `SimulationState::Paused` still exists for plugins. The engine never pauses on its own.
 - Environment (sun azimuth/elevation, colours, intensities) is edited in the inspector when nothing is selected, by writing `TerrainWorld.metadata.environment`; `apply_environment` reacts to the resource change and Shift+S persists it.
 - **Undo/redo (`history.rs`, `docs/UNDO_REDO_PLAN.md`).** `History` holds per-world stacks of `Transaction`s, each a list of `Change`s: before/after pairs of plain data keyed by **placed id**, never `Entity` (grab, respawn and streaming all mint new entities). Recording happens at the choke points, not in panels: `PlacedEdited` carries the value it replaced (`PlacedEdited::transform(entity, before)` etc.), so `commit_placed_edits` records transform/name/kind edits — drags coalesce into one open transaction per `(kind, id)` that `settle_history` closes when the pointer is up and egui is idle (`ViewportInput.egui_busy`), and a group move folds every member's exact before/after into the group's transaction so undo never re-runs the cascade. `apply_script_edits`, `delete_placed`, place, duplicate, grab drop/destroy, group/parent actions, the terrain stroke end and the environment panel record too. Undo applies in reverse through `LevelOps`, re-using the same messages flagged as replays (`PlacedEdited.replay`, `ScriptEdit::Replace`) so nothing is recorded twice. Each transaction restores the selection it touched. Chunks the stacks reference are pinned against streaming unload (`History::pinned`, checked in `update_streaming_ring`); if a target still isn't loaded the whole transaction is skipped and dropped with a status-bar notice. Caps: 200 transactions and 64 MB of terrain tiles per world. Switching worlds swaps stacks; nothing clears them. A terrain stroke also rebuilds the chunk's heightfield collider (`TerrainChunks::rebuild_collider`), which sculpting used to leave stale until reload.
+- **Prefabs are linked instances (`world/prefabs.rs`, `editor/prefab_edit.rs`, `docs/PREFABS_PLAN.md`).** A definition lives in `assets/prefabs/` (library loaded at startup; OPFS on web, saves are fire-and-forget there). Only the instance **root** is stored in a chunk file; `spawn_entity_record` expands members from the library into the root's chunk, the root's own kind/name/scripts come from the definition (so editing the prefab updates every instance on next load, or immediately via Apply), and `(local, world)` member-id pairs keep ids stable across re-expansion. Overrides are **section-level** per member and recomputed by diffing live state at every snapshot point (save, delete, respawn, grab). `save_placed_objects` skips member ids. Apply rewrites the definition keeping surviving locals (so other instances' pairs stay meaningful), folds extras in, and re-expands other loaded instances with their deviations preserved; Revert drops deviations; Unpack severs the link (entities become plain level data). All three are undoable (`Change::PrefabDefinition`, `Change::PrefabInstance`). Missing prefab file → bare roots + status-bar warning, healing when the file returns; nested prefabs are refused; members can't be re-filed; instance roots can't be ungrouped.
 - **Groups are organisational, not transform parents.** `PlacedKind::Group` is a placed entity like any other (transform, chunk, id); members carry `PlacedObject.parent = Some(group id)` and keep *world* transforms, no ECS `ChildOf`. The outliner draws the id tree (members whose group isn't loaded show at top level with ⤴), rows drag onto groups, a bottom strip drops to top level. Moving a group in the inspector applies the delta to its loaded members (`commit_placed_edits` keeps a per-group transform snapshot to measure the delta). Deleting a group re-files members under its parent; Shift+Delete / "Delete with members" is recursive. Groups aren't viewport-pickable; Alt+click a member to select its outermost group. `selection::{descendants, ancestors, PlacedTree}` are the tree helpers.
 
 ## Key Systems & Keybinds
