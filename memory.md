@@ -444,3 +444,17 @@ chrome --headless=new --user-data-dir=/tmp/p --remote-debugging-port=9333 \
 Feed it a reduced WGSL that mirrors the suspicious structure (the full composed
 WESL isn't dumpable from bevy). The real adapter works in headless mode on macOS;
 the swiftshader flags do not.
+
+That loop is now `tools/tint-check.mjs` (node 22+, Chrome; `CHROME_PATH` to
+override). `node tools/tint-check.mjs a.wgsl b.wgsl`, or WGSL on stdin; exits
+non-zero if Tint reports an error.
+
+**Why there is no `cargo test` for this.** The tool needs WGSL, but our shaders
+are WESL and only become WGSL inside bevy's `ShaderCache`, which drives
+`wesl::compile` through a private `ShaderResolver` over shader sources embedded
+in bevy_pbr/bevy_render via `load_shader_library!`. Reproducing that outside a
+running `App` means re-implementing the resolver; the alternative, hand-written
+stubs for the bevy declarations we import, drifts against bevy and would give
+false confidence. Considered and rejected 2026-10-27 — revisit if bevy ever
+exposes composed WGSL (or capture real composed output via `WGPU_TRACE` from a
+native run and check that in as fixtures).
