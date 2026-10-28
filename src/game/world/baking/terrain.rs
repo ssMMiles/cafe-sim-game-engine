@@ -7,7 +7,7 @@ use bevy::{pbr::ExtendedMaterial, prelude::*};
 use rayon::prelude::*;
 
 use super::bvh::TriangleBvh;
-use super::lightmap::{BakeLighting, LightmapBuffer, terrain_lightmap_path};
+use super::lightmap::{BakeLighting, LightmapBuffer, store_lightmap, terrain_lightmap_location};
 use super::{BakeConfig, BakeRegion, raycast};
 use crate::game::world::{
     objects::CHUNK_WORLD_SIZE,
@@ -151,13 +151,11 @@ pub fn bake_terrain_lightmaps(
 
         // A failed write is logged but doesn't stop the live material from
         // picking up the result — the bake is still useful for this session.
-        let path = terrain_lightmap_path(&terrain_world.world_path, chunk.chunk_x, chunk.chunk_y);
-        if let Err(e) = lightmap.save_exr(&path) {
+        let location = terrain_lightmap_location(terrain_world, chunk.chunk_x, chunk.chunk_y);
+        if let Err(e) = store_lightmap(&location, &lightmap) {
             error!(
-                "Failed to save terrain lightmap for chunk ({}, {}) to {}: {e}",
-                chunk.chunk_x,
-                chunk.chunk_y,
-                path.display()
+                "Failed to save terrain lightmap for chunk ({}, {}): {e}",
+                chunk.chunk_x, chunk.chunk_y,
             );
         }
 

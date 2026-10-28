@@ -51,6 +51,60 @@ pub fn terrain_lightmap_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
         .join(lightmap_file_name(&format!("chunk_{cx}_{cy}")))
 }
 
+/// OPFS key of a terrain chunk's lightmap.
+///
+/// OPFS has no notion of a world *directory* on disk, so the wasm side
+/// addresses everything by `world_id` under a `worlds/` prefix — exactly the
+/// key layout `terrain/save.rs` and `streaming.rs` already use for `.terrain`
+/// and `.objects`. Defined on every platform so the native test suite can
+/// hold it to the same file name as [`terrain_lightmap_path`].
+///
+/// Only wasm calls this outside tests — the same shape as `storage/native.rs`,
+/// where one half of a platform abstraction looks dead on the other platform.
+#[allow(dead_code)]
+pub fn terrain_lightmap_key(world_id: &str, cx: i32, cy: i32) -> String {
+    format!(
+        "worlds/{world_id}/chunks/{}",
+        lightmap_file_name(&format!("chunk_{cx}_{cy}"))
+    )
+}
+
+/// Where a lightmap is *stored*, in whichever namespace this platform's
+/// storage backend speaks: a filesystem path natively, an OPFS key on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub type LightmapLocation = PathBuf;
+#[cfg(target_arch = "wasm32")]
+pub type LightmapLocation = String;
+
+/// What a loader needs in order to produce an `Image`.
+///
+/// Natively this is the file's location, read on the spot inside whatever
+/// task is doing the loading. On wasm it is the bytes *already* fetched: OPFS
+/// reads are async and `!Send`, so the fetch has to have happened earlier,
+/// off in a `spawn_local` future, and all that reaches the decoder is a
+/// buffer.
+#[cfg(not(target_arch = "wasm32"))]
+pub type LightmapSource = PathBuf;
+#[cfg(target_arch = "wasm32")]
+pub type LightmapSource = Vec<u8>;
+
+/// Storage location of a terrain chunk's lightmap, so call sites don't need
+/// their own `#[cfg]` to pick between a path and an OPFS key.
+pub fn terrain_lightmap_location(
+    world: &crate::game::world::terrain::storage::TerrainWorld,
+    cx: i32,
+    cy: i32,
+) -> LightmapLocation {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        terrain_lightmap_path(&world.world_path, cx, cy)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        terrain_lightmap_key(&world.metadata.world_id, cx, cy)
+    }
+}
+
 // ============================================================================
 // Lighting model
 // ============================================================================
@@ -477,43 +531,55 @@ impl LightmapBuffer {
         }
     }
 
-    /// Write as OpenEXR (f16 RGB, ZIP16). Creates parent directories.
-    pub fn save_exr(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    /// Encode as OpenEXR (f16 RGB, ZIP16) into memory.
+    ///
+    /// Encoding is separate from storing because the two platforms store very
+    /// differently — native writes bytes to a file, wasm hands them to OPFS
+    /// through an async, `!Send` web API — while wanting byte-for-byte the
+    /// same payload.
+    pub fn to_exr_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         use exr::prelude::{Encoding, Image as ExrImage, SpecificChannels, WritableImage};
 
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let res = self.res;
         let channels = SpecificChannels::rgb(|pos: exr::math::Vec2<usize>| {
             let t = self.texels[pos.1 * res + pos.0];
             (f16::from_f32(t.x), f16::from_f32(t.y), f16::from_f32(t.z))
         });
+        let mut cursor = std::io::Cursor::new(Vec::new());
         ExrImage::from_encoded_channels((res, res), Encoding::SMALL_LOSSLESS, channels)
             .write()
-            .to_file(path)?;
-        Ok(())
+            .to_buffered(&mut cursor)?;
+        Ok(cursor.into_inner())
     }
 
-    /// Read a square EXR written by [`Self::save_exr`].
-    pub fn load_exr(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let image = exr::prelude::read_first_rgba_layer_from_file(
-            path,
-            |size: exr::math::Vec2<usize>, _channels| LightmapBuffer {
-                res: size.0,
-                texels: vec![Vec3::ZERO; size.0 * size.1],
-            },
-            |buf: &mut LightmapBuffer,
-             pos: exr::math::Vec2<usize>,
-             (r, g, b, _a): (f32, f32, f32, f32)| {
-                buf.texels[pos.1 * buf.res + pos.0] = Vec3::new(r, g, b);
-            },
-        )?;
+    /// Decode a square EXR produced by [`Self::to_exr_bytes`].
+    pub fn from_exr_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        // The builder methods live on these traits; `read_first_rgba_layer_from_file`
+        // (the file-only convenience we used to call) has them in scope already.
+        use exr::image::read::{layers::ReadChannels, image::ReadLayers};
+
+        let image = exr::prelude::read()
+            .no_deep_data()
+            .largest_resolution_level()
+            .rgba_channels(
+                |size: exr::math::Vec2<usize>, _channels| LightmapBuffer {
+                    res: size.0,
+                    texels: vec![Vec3::ZERO; size.0 * size.1],
+                },
+                |buf: &mut LightmapBuffer,
+                 pos: exr::math::Vec2<usize>,
+                 (r, g, b, _a): (f32, f32, f32, f32)| {
+                    buf.texels[pos.1 * buf.res + pos.0] = Vec3::new(r, g, b);
+                },
+            )
+            .first_valid_layer()
+            .all_attributes()
+            .from_buffered(std::io::Cursor::new(bytes))?;
+
         let buf = image.layer_data.channel_data.pixels;
         if buf.texels.len() != buf.res * buf.res {
             return Err(format!(
-                "lightmap {} is not square ({} texels for res {})",
-                path.display(),
+                "lightmap is not square ({} texels for res {})",
                 buf.texels.len(),
                 buf.res
             )
@@ -521,61 +587,164 @@ impl LightmapBuffer {
         }
         Ok(buf)
     }
+
+    /// Write as OpenEXR to a file. Creates parent directories.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_exr(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, self.to_exr_bytes()?)?;
+        Ok(())
+    }
+
+    /// Read a square EXR written by [`Self::save_exr`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_exr(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_exr_bytes(&std::fs::read(path)?)
+    }
 }
 
 // ============================================================================
-// Loading helpers (native only — wasm has no synchronous file access yet)
+// Storing
 // ============================================================================
 
-/// Load a saved lightmap as a GPU-ready `Image`. `None` if the file is
-/// absent; decode failures are logged and also yield `None` so the surface
-/// falls back to the default (unbaked) lightmap. Safe to call off the main
-/// thread — the terrain streamer decodes chunk lightmaps in its compute task.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn try_load_lightmap(path: &Path) -> Option<Image> {
-    if !path.exists() {
-        return None;
+/// Persist a finished lightmap to wherever this platform keeps them.
+///
+/// Native: a synchronous write, safe to call from a task-pool thread (which
+/// is where the object bake calls it from, to keep EXR encoding off the main
+/// thread).
+///
+/// Wasm: OPFS is async *and* `!Send`, so this encodes synchronously, hands the
+/// bytes to a `spawn_local` future and returns immediately — a write failure
+/// is logged from inside the future, not reported back here. That makes it
+/// fire-and-forget, the same bargain `terrain/save.rs` already strikes for
+/// chunk data. It must therefore be called from the main thread; bevy's wasm
+/// task pool runs its futures there too, so a bake task qualifies.
+pub fn store_lightmap(
+    location: &LightmapLocation,
+    buffer: &LightmapBuffer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = buffer.to_exr_bytes()?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Some(dir) = location.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(location, bytes)?;
     }
-    match LightmapBuffer::load_exr(path) {
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let key = location.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::storage::wasm::WasmStorage.save(&key, &bytes).await {
+                bevy::log::error!("OPFS lightmap save failed for {key}: {e}");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Loading helpers
+// ============================================================================
+
+/// Decode a saved lightmap into a GPU-ready `Image`.
+///
+/// `None` if there is nothing to load; decode failures are logged and also
+/// yield `None`, so the surface falls back to the default (unbaked) lightmap
+/// rather than failing the whole chunk or object.
+///
+/// Safe to call off the main thread — the terrain streamer decodes chunk
+/// lightmaps inside its compute task on both platforms. See
+/// [`LightmapSource`] for why the input is a path natively and bytes on wasm.
+pub fn try_load_lightmap(src: &LightmapSource) -> Option<Image> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let decoded = {
+        if !src.exists() {
+            return None;
+        }
+        LightmapBuffer::load_exr(src)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let decoded = LightmapBuffer::from_exr_bytes(src);
+
+    match decoded {
         Ok(buf) => Some(buf.into_image()),
         Err(e) => {
-            warn!("Ignoring unreadable lightmap {}: {e}", path.display());
+            warn!("Ignoring unreadable lightmap: {e}");
             None
         }
     }
 }
 
 /// [`try_load_lightmap`] plus registration in `Assets<Image>`.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn try_load_lightmap_image(path: &Path, images: &mut Assets<Image>) -> Option<Handle<Image>> {
-    try_load_lightmap(path).map(|image| images.add(image))
+pub fn try_load_lightmap_image(
+    src: &LightmapSource,
+    images: &mut Assets<Image>,
+) -> Option<Handle<Image>> {
+    try_load_lightmap(src).map(|image| images.add(image))
 }
 
-/// Count lightmap files in a world that don't match the current format
-/// version and warn once. Stale bakes are silently skipped by the loaders;
-/// this is what tells the user *why* the world looks unbaked.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn warn_stale_lightmaps(world_path: &Path) {
-    let suffix = format!("_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr");
-    let mut stale = 0usize;
-    for dir in ["chunks", "objects"] {
-        let Ok(entries) = std::fs::read_dir(world_path.join(dir)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.contains("_lightmap") && !name.ends_with(&suffix) {
-                stale += 1;
-            }
-        }
-    }
+/// True for a file name that is a lightmap from some *older* bake format.
+fn is_stale_lightmap_name(name: &str) -> bool {
+    name.contains("_lightmap") && !name.ends_with(&format!("_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr"))
+}
+
+fn warn_stale_count(stale: usize, world: &str) {
     if stale > 0 {
         warn!(
-            "World '{}' has {stale} lightmap file(s) from an older bake format; they are ignored. \
-             Press Shift+B to re-bake.",
-            world_path.display()
+            "World '{world}' has {stale} lightmap file(s) from an older bake format; they are \
+             ignored. Press Shift+B to re-bake."
         );
+    }
+}
+
+/// Count lightmaps in a world that don't match the current format version and
+/// warn once. Stale bakes are silently skipped by the loaders; this is what
+/// tells the user *why* the world looks unbaked.
+///
+/// On wasm the enumeration is an async OPFS directory walk, so the warning
+/// arrives a few frames after the world loads rather than inline.
+pub fn warn_stale_lightmaps(world: &crate::game::world::terrain::storage::TerrainWorld) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let world_path = &world.world_path;
+        let mut stale = 0usize;
+        for dir in ["chunks", "objects"] {
+            let Ok(entries) = std::fs::read_dir(world_path.join(dir)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if is_stale_lightmap_name(&entry.file_name().to_string_lossy()) {
+                    stale += 1;
+                }
+            }
+        }
+        warn_stale_count(stale, &world_path.display().to_string());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let world_id = world.metadata.world_id.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let storage = crate::storage::wasm::WasmStorage;
+            let mut stale = 0usize;
+            for dir in ["chunks", "objects"] {
+                let prefix = format!("worlds/{world_id}/{dir}");
+                let Ok(keys) = storage.list_keys(&prefix).await else {
+                    continue;
+                };
+                stale += keys
+                    .iter()
+                    .filter(|k| is_stale_lightmap_name(k.rsplit('/').next().unwrap_or(k)))
+                    .count();
+            }
+            warn_stale_count(stale, &world_id);
+        });
     }
 }
 
@@ -901,5 +1070,60 @@ mod tests {
         assert!(p.ends_with(format!(
             "objects/obj_7_3_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr"
         )));
+    }
+
+    /// The native path and the wasm OPFS key must name the *same file*, or a
+    /// world baked on one platform reads as unbaked on the other. Only the
+    /// directory prefix may differ: a real world directory natively, a
+    /// `worlds/{id}` key prefix on OPFS (which has no such directory).
+    #[test]
+    fn opfs_keys_match_the_native_file_names() {
+        use super::super::object_lightmaps::{object_lightmap_key, object_lightmap_path};
+
+        let key = terrain_lightmap_key("my-world", -1, 2);
+        let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
+        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v6.exr");
+        assert_eq!(
+            key.rsplit('/').next(),
+            path.file_name().and_then(|n| n.to_str())
+        );
+
+        let key = object_lightmap_key("my-world", 7, 3);
+        let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
+        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v6.exr");
+        assert_eq!(
+            key.rsplit('/').next(),
+            path.file_name().and_then(|n| n.to_str())
+        );
+    }
+
+    /// The wasm path never touches the filesystem: it encodes to bytes, ships
+    /// them to OPFS, and decodes whatever comes back. That codec has to be
+    /// the same one `save_exr`/`load_exr` use, so a world stays readable
+    /// across platforms.
+    #[test]
+    fn exr_byte_round_trip_matches_the_file_round_trip() {
+        let buf = gradient(8);
+        let bytes = buf.to_exr_bytes().unwrap();
+        let back = LightmapBuffer::from_exr_bytes(&bytes).unwrap();
+        assert_eq!(back.res, 8);
+        for (a, b) in buf.texels.iter().zip(&back.texels) {
+            assert!((*a - *b).abs().max_element() < 1e-2, "{a} vs {b}");
+        }
+
+        // And the bytes are exactly what the file path writes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lm.exr");
+        buf.save_exr(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    /// A truncated or garbage payload (a half-written OPFS record, say) must
+    /// degrade to "unbaked", not panic the chunk task.
+    #[test]
+    fn corrupt_exr_bytes_are_rejected_not_panicked() {
+        assert!(LightmapBuffer::from_exr_bytes(b"not an exr at all").is_err());
+        let truncated = gradient(8).to_exr_bytes().unwrap();
+        assert!(LightmapBuffer::from_exr_bytes(&truncated[..truncated.len() / 2]).is_err());
     }
 }

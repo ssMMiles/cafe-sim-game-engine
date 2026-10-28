@@ -209,8 +209,7 @@ fn apply_environment(
 
     if terrain_world.is_added() {
         warn_missing_plugins(&terrain_world, active.as_deref());
-        #[cfg(not(target_arch = "wasm32"))]
-        baking::lightmap::warn_stale_lightmaps(&terrain_world.world_path);
+        baking::lightmap::warn_stale_lightmaps(&terrain_world);
     }
 }
 

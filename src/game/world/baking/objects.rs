@@ -8,13 +8,12 @@ use bevy::{
 };
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use super::bvh::TriangleBvh;
-use super::lightmap::{BakeLighting, LightmapBuffer};
+use super::lightmap::{BakeLighting, LightmapBuffer, LightmapLocation, store_lightmap};
 use super::object_lightmaps::{
-    ToonMat, ToonMeshQuery, collect_toon_meshes, object_lightmap_path, unique_material,
+    ToonMat, ToonMeshQuery, collect_toon_meshes, object_lightmap_location, unique_material,
 };
 use super::raycast::BakeHeightCache;
 use super::uv_unwrap::{
@@ -44,7 +43,8 @@ pub struct ObjectBakeJob {
     /// Resolved on the main world — `unique_material` may *add* an asset, so
     /// it cannot run off-thread.
     material: Handle<ToonMat>,
-    path: PathBuf,
+    /// Where the finished EXR goes: a file path natively, an OPFS key on wasm.
+    dest: LightmapLocation,
 }
 
 /// A finished sub-mesh lightmap on its way back to the ECS.
@@ -211,7 +211,7 @@ pub fn collect_object_bake_jobs(
                     bbox_max.z + ray_reach,
                 ),
                 material,
-                path: object_lightmap_path(&terrain_world.world_path, placed_obj.id, k),
+                dest: object_lightmap_location(terrain_world, placed_obj.id, k),
             });
         }
     }
@@ -300,12 +300,10 @@ pub fn run_object_bake_jobs(
         // A failed write is logged but doesn't stop the live material from
         // picking up the result.
         let t_io = Instant::now();
-        if let Err(e) = lightmap.save_exr(&job.path) {
+        if let Err(e) = store_lightmap(&job.dest, &lightmap) {
             error!(
-                "Failed to save object lightmap for id={} sub-mesh {} to {}: {e}",
-                job.object_id,
-                job.sub_mesh,
-                job.path.display()
+                "Failed to save object lightmap for id={} sub-mesh {}: {e}",
+                job.object_id, job.sub_mesh,
             );
         }
         stats.io += t_io.elapsed();

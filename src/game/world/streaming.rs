@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use crate::game::WorldFocus;
 
 use super::{
-    baking::lightmap::terrain_lightmap_path,
+    baking::lightmap::LightmapSource,
     chunk_assets::{ChunkDataAsset, ChunkObjectsAsset},
     objects::{
         PlacedObject, PlacedObjectRegistry, despawn_chunk_objects, spawn_chunk_objects,
@@ -99,6 +99,9 @@ impl Default for ChunkStreamingConfig {
 type TerrainSlot = std::sync::Arc<std::sync::Mutex<Option<Option<ChunkData>>>>;
 #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
 type ObjectsSlot = std::sync::Arc<std::sync::Mutex<Option<Option<ChunkObjectsFile>>>>;
+/// Raw EXR bytes; decoding happens in the compute task, as it does natively.
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+type LightmapSlot = std::sync::Arc<std::sync::Mutex<Option<Option<Vec<u8>>>>>;
 
 /// A chunk that has been requested but is still loading its data.
 pub struct PendingChunk {
@@ -113,6 +116,8 @@ pub struct PendingChunk {
     pub opfs_terrain: TerrainSlot,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     pub opfs_objects: ObjectsSlot,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    pub opfs_lightmap: LightmapSlot,
 }
 
 /// A chunk whose mesh-generation task is running in the background.
@@ -280,6 +285,7 @@ pub fn update_streaming_ring(
 
             let terrain_slot: TerrainSlot = Arc::new(Mutex::new(None));
             let objects_slot: ObjectsSlot = Arc::new(Mutex::new(None));
+            let lightmap_slot: LightmapSlot = Arc::new(Mutex::new(None));
 
             // Terrain: only load if there is saved data; otherwise immediately mark flat.
             if has_terrain_file {
@@ -338,11 +344,34 @@ pub fn update_streaming_ring(
                 });
             }
 
+            // Lightmap: raw bytes only. Absent or unreadable simply means
+            // "unbaked", so every failure collapses to `None`.
+            {
+                let s = crate::storage::wasm::WasmStorage;
+                let key = super::baking::lightmap::terrain_lightmap_key(
+                    &metadata.world_id,
+                    cx,
+                    cy,
+                );
+                let slot = lightmap_slot.clone();
+                spawn_local(async move {
+                    let result = match s.load(&key).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            log::warn!("OPFS lightmap load error for ({cx},{cy}): {e}");
+                            None
+                        }
+                    };
+                    *slot.lock().unwrap() = Some(result);
+                });
+            }
+
             state.pending.insert(
                 (cx, cy),
                 PendingChunk {
                     opfs_terrain: terrain_slot,
                     opfs_objects: objects_slot,
+                    opfs_lightmap: lightmap_slot,
                 },
             );
         }
@@ -367,12 +396,17 @@ pub fn launch_chunk_tasks(
     let Some(mut heightmap) = heightmap else {
         return;
     };
-    // Where this chunk's baked lightmap lives, decoded inside the task.
-    let lightmap_path = |cx: i32, cy: i32| {
-        terrain_world
-            .as_ref()
-            .map(|w| terrain_lightmap_path(&w.world_path, cx, cy))
+    // Natively, where this chunk's baked lightmap lives — the task reads and
+    // decodes it. On wasm the bytes have already been fetched from OPFS into
+    // the chunk's slot, so this closure is unused there.
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+    let lightmap_src = |cx: i32, cy: i32| -> Option<LightmapSource> {
+        terrain_world.as_ref().map(|w| {
+            super::baking::lightmap::terrain_lightmap_path(&w.world_path, cx, cy)
+        })
     };
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    let _ = &terrain_world;
 
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
     {
@@ -437,9 +471,9 @@ pub fn launch_chunk_tasks(
                     asset.0.clone()
                 });
 
-            let lm_path = lightmap_path(cx, cy);
+            let lm = lightmap_src(cx, cy);
             let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE, lm_path) });
+                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE, lm) });
 
             state.computing.insert(
                 chunk_coord,
@@ -457,9 +491,9 @@ pub fn launch_chunk_tasks(
             };
             let (cx, cy) = chunk_coord;
 
-            let lm_path = lightmap_path(cx, cy);
+            let lm = lightmap_src(cx, cy);
             let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm_path) });
+                .spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm) });
 
             state.computing.insert(
                 chunk_coord,
@@ -478,7 +512,9 @@ pub fn launch_chunk_tasks(
             .pending
             .iter()
             .filter(|(_, p)| {
-                p.opfs_terrain.lock().unwrap().is_some() && p.opfs_objects.lock().unwrap().is_some()
+                p.opfs_terrain.lock().unwrap().is_some()
+                    && p.opfs_objects.lock().unwrap().is_some()
+                    && p.opfs_lightmap.lock().unwrap().is_some()
             })
             .map(|(&coord, _)| coord)
             .collect();
@@ -502,9 +538,10 @@ pub fn launch_chunk_tasks(
                 apply_chunk_to_heightmap(&mut heightmap, data);
             }
 
-            let lm_path = lightmap_path(cx, cy);
+            let lm: Option<LightmapSource> =
+                pending.opfs_lightmap.lock().unwrap().take().flatten();
             let task = thread_pool.spawn(async move {
-                compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm_path)
+                compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm)
             });
 
             state

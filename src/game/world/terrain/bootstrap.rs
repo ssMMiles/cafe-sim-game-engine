@@ -111,8 +111,8 @@ fn heights_from_chunk_data(chunk_data: Option<&ChunkData>) -> Vec<f32> {
 ///
 /// `chunk_data` is the optional saved terrain data for this chunk. Heights are
 /// reconstructed from it off the main thread — no `HeightmapData` access required.
-/// `lightmap_path` is where the chunk's baked lightmap would live; decoding it
-/// here keeps the (potentially tens of MB) EXR work off the main thread.
+/// `lightmap` is the chunk's baked lightmap, if it has one; decoding it here
+/// keeps the (potentially tens of MB) EXR work off the main thread.
 ///
 /// This function is designed to run off the main thread (no Bevy world access).
 pub fn compute_chunk_meshes(
@@ -120,17 +120,15 @@ pub fn compute_chunk_meshes(
     chunk_x: i32,
     chunk_y: i32,
     tile_size: (f32, f32),
-    lightmap_path: Option<std::path::PathBuf>,
+    lightmap: Option<crate::game::world::baking::lightmap::LightmapSource>,
 ) -> ChunkComputeResult {
-    #[cfg(not(target_arch = "wasm32"))]
-    let lightmap = lightmap_path
-        .as_deref()
+    // Natively this reads the EXR off disk; on wasm the bytes were already
+    // fetched from OPFS by the streamer, and this only decodes them. Either
+    // way it happens here, inside the compute task, rather than on the main
+    // thread.
+    let lightmap = lightmap
+        .as_ref()
         .and_then(crate::game::world::baking::lightmap::try_load_lightmap);
-    #[cfg(target_arch = "wasm32")]
-    let lightmap = {
-        let _ = lightmap_path;
-        None
-    };
 
     let heights = heights_from_chunk_data(chunk_data.as_ref());
     let cs = (CHUNK_SIZE - 1) as i32;

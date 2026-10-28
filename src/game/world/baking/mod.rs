@@ -340,12 +340,27 @@ impl Plugin for BakingPlugin {
         app.add_systems(OnExit(crate::AppState::InGame), cancel_object_bake);
 
         // Saved object lightmaps are applied once each placed object's scene
-        // has toon materials; wasm has no synchronous file access yet.
+        // has toon materials.
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,
             object_lightmaps::apply_object_lightmaps.in_set(WorldSet::InGame),
         );
+        // On wasm the read is an async OPFS fetch, so it splits in two: kick
+        // off, then apply whatever has landed.
+        #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+        {
+            app.init_resource::<object_lightmaps::PendingObjectLightmaps>();
+            app.add_systems(
+                Update,
+                (
+                    object_lightmaps::fetch_object_lightmaps,
+                    object_lightmaps::apply_object_lightmaps,
+                )
+                    .chain()
+                    .in_set(WorldSet::InGame),
+            );
+        }
 
         // GPU dispatch runs after run_bake has written GpuBakeTrigger.
         #[cfg(not(target_arch = "wasm32"))]
