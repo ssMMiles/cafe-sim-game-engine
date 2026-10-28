@@ -1,5 +1,16 @@
 # Assets Browser — Findings and Implementation Plan
 
+Status: **implemented 2026-10-28** (phases 1–3; phase 4 drag-and-drop
+deliberately skipped). §7 decisions: separate Meshes and Built-ins
+categories; the Place panel lists no assets (just what it's placing and an
+Assets… shortcut); Tool docked under the Inspector, Assets in the strip under
+the viewport; neutral `StandardMaterial` thumbnails with a linear sampler;
+global `assets/`; no thumbnail persistence. Deviation from the draft: the
+thumbnail rig is spawned lazily on the first request and torn down with the
+world (`GameEntity`), and the manifest excludes prefabs entirely (the library
+is the source of truth).
+
+Original draft:
 Status: draft 2026-10-28, awaiting decisions in §7. Builds on
 `docs/UNDO_REDO_PLAN.md` §8 and the shipped prefab system
 (`docs/PREFABS_PLAN.md`: `PrefabLibrary` keyed by name, loaded from

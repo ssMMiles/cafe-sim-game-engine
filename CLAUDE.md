@@ -82,12 +82,17 @@ src/
 │   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment when nothing selected
 │   │   ├── tool_panel.rs   #   "Tool" tab: shows the active tool's settings (Select: none yet)
 │   │   ├── history_panel.rs #  "History" tab: undo/redo stacks, click an entry to jump
-│   │   ├── place.rs        #   Place body: catalog grid, placement scale/yaw, stamp script picker
+│   │   ├── assets.rs       #   "Assets" tab: catalog by category (meshes/built-ins/prefabs/textures/audio),
+│   │   │                   #   search, thumbnail grid; click arms placement + Place tool; save-as-prefab
+│   │   ├── place.rs        #   Place body: what's being placed, Assets… shortcut, scale/yaw/stamp
 │   │   └── terrain.rs      #   Terrain body: brush mode (sculpt/flatten/smooth), radius, strength, falloff
 │   ├── edits.rs            # PlacedEdited → commit_placed_edits (chunk re-derive, dirty, name sync, LightingState);
 │   │                       #   ScriptEdit (attach/detach/set props → detach_binding + NeedsHydration); RespawnPlaced
 │   ├── actions.rs          # EditorAction (save, bake, worlds, plugins, exit, selection ops) applied in Update
-│   ├── catalog.rs          # MeshCatalog: manifest meshes + lights + empty + plugin presets; select() arms stamps
+│   ├── catalog.rs          # AssetCatalog/AssetKind/AssetEntry: manifest (meshes/textures/audio) + built-ins
+│   │                       #   + PrefabLibrary + plugin presets; select() arms placement and stamps
+│   ├── previews.rs         # PreviewImages: bevy Image → egui TextureId hand-off (bound in editor_ui)
+│   ├── thumbnails.rs       # ThumbnailCache + offscreen rig (layer 7 camera + light) rendering catalog entries
 │   ├── picking.rs          # ViewportInput (pointer in texture px) → EditorRay; PlacedPicker
 │   ├── camera.rs           # Fly camera (RMB look, WASD/QE), cursor lock while looking,
 │   │                       #   FlyLock (viewport button → fly without holding RMB, Esc exits),
@@ -288,7 +293,12 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 
 ## Build System
 
-`build.rs` generates `assets/meshes/manifest.manifest` at compile time by scanning `assets/meshes/` (excluding `character/`). Pipe-delimited `name|asset_path` format, loaded async via custom `MeshManifestLoader`.
+`build.rs` generates `assets/asset_manifest.manifest` at compile time: `kind|name|asset_path` lines for meshes (first glTF per `assets/meshes/*/`, excluding `character/`), textures (`assets/textures/*.{png,jpg,jpeg}`) and audio (`assets/audio/*.{ogg,wav,mp3}`), loaded async via `AssetManifestLoader`. It exists because WASM cannot list directories. Prefabs are *not* in it — the `PrefabLibrary` discovers them at runtime.
+
+## Assets Browser (`docs/ASSET_BROWSER_PLAN.md`)
+
+- `EditorTab::Assets` (default dock: the strip under the viewport; Tool sits under the Inspector) draws `AssetCatalog` by `AssetKind`. Placeable entries (meshes, built-ins, prefabs, plugin presets) arm `PlacementConfig` through `AssetCatalog::select` — the preset stamp disarm logic from the old `MeshCatalog` is preserved and tested — and switch to the Place tool. Textures are inspect-only (nothing in the level consumes one yet); audio is listed only. The Place panel no longer lists assets.
+- Thumbnails: `thumbnails::drive_thumbnails` runs one job per frame-step on a persistent rig — `Camera3d` + `DirectionalLight` on `RenderLayers::layer(7)` at `RIG_ORIGIN` (y = −5000) — rendering into a 128 px `Rgba8UnormSrgb` image with an explicit **linear** sampler (the app default is nearest). Subjects are spawned **without** `ConvertToToon`, so they keep glTF `StandardMaterial`s; `RenderLayers` is not inherited, so the driver stamps layer 7 onto `Mesh3d` descendants as they appear. Framing waits for `Aabb`s (`PostUpdate`), so a settled scene is detected a frame late by design; a subject that never loads times out to its glyph and is not retried. Only drawn cells request thumbnails; presets share their mesh's thumbnail (`AssetEntry::thumbnail_key`). `PreviewImages` is the bevy→egui texture hand-off: panels register handles, `editor_ui` binds the unbound ones each pass (`EguiTextureHandle::Weak`).
 
 ## Platform Differences
 
