@@ -406,6 +406,7 @@ mod tests {
                     name: String::new(),
                     kind: PlacedKind::mesh("x.gltf"),
                     parent: None,
+                    prefab: None,
                 },
                 root_tf,
             ))

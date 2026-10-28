@@ -122,6 +122,7 @@ impl MeshCatalog {
             .and_then(|e| e.preset_script.clone());
 
         config.kind = entry.kind.clone();
+        config.prefab = None;
         config.scale = Vec3::ONE;
         if entry.preset_script.is_some() {
             config.stamp_script = entry.preset_script.clone();

@@ -21,6 +21,7 @@ use super::history::{Change, History};
 use super::picking::{PlacedPicker, ViewportInput};
 use crate::game::gfx::camera::PlayerCamera;
 use crate::game::world::objects::{PlacedEntityRecord, PlacedObject, PlacedObjectRegistry};
+use crate::game::world::prefabs::{PrefabLibrary, compute_instance_overrides};
 
 const SELECTED_COLOR: Color = Color::srgb(1.0, 0.75, 0.2);
 const HOVER_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
@@ -259,6 +260,7 @@ pub fn delete_selected(
     mut selection: ResMut<Selection>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut history: ResMut<History>,
+    prefabs: Res<PrefabLibrary>,
     mut placed: PlacedTree,
     bindings: Query<&ScriptBindings>,
 ) {
@@ -273,6 +275,7 @@ pub fn delete_selected(
         &mut commands,
         &mut registry,
         &mut history,
+        &prefabs,
         &mut placed,
         &bindings,
         entity,
@@ -289,6 +292,7 @@ pub fn delete_placed(
     commands: &mut Commands,
     registry: &mut PlacedObjectRegistry,
     history: &mut History,
+    prefabs: &PrefabLibrary,
     placed: &mut PlacedTree,
     bindings: &Query<&ScriptBindings>,
     entity: Entity,
@@ -310,21 +314,48 @@ pub fn delete_placed(
         obj.kind.is_group(),
     );
     let display = obj.display_name();
-    let Some(record) = record_of(placed, entity) else {
+    let Some(mut record) = record_of(placed, entity) else {
         return;
     };
+    // A prefab-instance root always takes its expanded members with it (they
+    // have no independent life), and its record is snapshotted with fresh
+    // overrides so undo restores member edits exactly. Only *extras* — user
+    // entities parented under the instance that aren't part of the prefab —
+    // get their own Despawn changes; undoing the root's Despawn re-expands
+    // the real members.
+    let instance_member_ids: std::collections::HashSet<u64> = record
+        .prefab
+        .as_ref()
+        .map(|inst| inst.member_world_ids().collect())
+        .unwrap_or_default();
+    if let Some(inst) = record.prefab.clone()
+        && let Some(def) = prefabs.get(&inst.name)
+    {
+        let lookup = |mid: u64| {
+            registry
+                .by_id
+                .get(&mid)
+                .and_then(|e| placed.get(*e).ok())
+                .map(|(e, o, t)| o.to_record(t, bindings.get(e).ok()))
+        };
+        let overrides = compute_instance_overrides(def, &inst, &record, lookup);
+        record.prefab.as_mut().expect("checked").overrides = overrides;
+    }
+    let recursive = recursive || record.prefab.is_some();
     // Member changes first, the group itself last: undo runs in reverse, so
     // the group exists again before its members are re-filed / re-spawned.
     let mut changes = Vec::new();
 
-    if is_group {
+    if is_group || !instance_member_ids.is_empty() {
         if recursive {
             for member in descendants(id, placed) {
                 let Ok((_, m, _)) = placed.get(member) else {
                     continue;
                 };
                 let (m_id, m_chunk) = (m.id, m.chunk);
-                if let Some(record) = record_of(placed, member) {
+                if !instance_member_ids.contains(&m_id)
+                    && let Some(record) = record_of(placed, member)
+                {
                     changes.push(Change::Despawn {
                         chunk: m_chunk,
                         record,
@@ -370,6 +401,7 @@ mod tests {
                 name: String::new(),
                 kind,
                 parent,
+                prefab: None,
             },
             Transform::default(),
         )
@@ -422,6 +454,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<PlacedObjectRegistry>();
         world.init_resource::<History>();
+        world.init_resource::<PrefabLibrary>();
         let outer = world.spawn(placed(1, PlacedKind::Group, None)).id();
         let inner = world.spawn(placed(2, PlacedKind::Group, Some(1))).id();
         let leaf = world.spawn(placed(3, PlacedKind::Empty, Some(2))).id();
@@ -430,6 +463,7 @@ mod tests {
             |mut commands: Commands,
              mut registry: ResMut<PlacedObjectRegistry>,
              mut history: ResMut<History>,
+             prefabs: Res<PrefabLibrary>,
              mut placed: PlacedTree,
              bindings: Query<&ScriptBindings>| {
                 let target = placed
@@ -441,6 +475,7 @@ mod tests {
                     &mut commands,
                     &mut registry,
                     &mut history,
+                    &prefabs,
                     &mut placed,
                     &bindings,
                     target,
@@ -472,6 +507,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<PlacedObjectRegistry>();
         world.init_resource::<History>();
+        world.init_resource::<PrefabLibrary>();
         let group = world.spawn(placed(1, PlacedKind::Group, None)).id();
         let leaf = world.spawn(placed(2, PlacedKind::Empty, Some(1))).id();
         let other = world.spawn(placed(3, PlacedKind::Empty, None)).id();
@@ -480,12 +516,14 @@ mod tests {
             move |mut commands: Commands,
                   mut registry: ResMut<PlacedObjectRegistry>,
                   mut history: ResMut<History>,
+                  prefabs: Res<PrefabLibrary>,
                   mut placed: PlacedTree,
                   bindings: Query<&ScriptBindings>| {
                 delete_placed(
                     &mut commands,
                     &mut registry,
                     &mut history,
+                    &prefabs,
                     &mut placed,
                     &bindings,
                     group,

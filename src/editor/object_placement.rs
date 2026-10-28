@@ -22,6 +22,7 @@ use crate::game::world::objects::{
     PlacedEntityRecord, PlacedKind, PlacedObjectRegistry, PlacementConfig, spawn_entity_record,
     world_pos_to_chunk,
 };
+use crate::game::world::prefabs::{PrefabInstanceData, PrefabLibrary};
 use crate::game::world::terrain::TerrainChunk;
 
 /// How far above the terrain hit a light preview (and the placed light) sits.
@@ -47,6 +48,7 @@ pub fn handle_place_click(
     mut registry: ResMut<PlacedObjectRegistry>,
     mut selection: ResMut<Selection>,
     mut history: ResMut<History>,
+    prefabs: Res<PrefabLibrary>,
 ) {
     if viewport.clicked_px.is_none() {
         return;
@@ -80,10 +82,26 @@ pub fn handle_place_click(
 
     let mut record = PlacedEntityRecord::new(id, config.kind.clone(), &transform);
 
+    // Prefab mode: the record becomes an instance root with fresh member
+    // ids; the definition supplies kind/name/scripts at expansion.
+    if let Some(def) = config.prefab.as_ref().and_then(|n| prefabs.get(n)) {
+        record.kind = def.entities[0].kind.clone();
+        record.prefab = Some(PrefabInstanceData {
+            name: def.name.clone(),
+            member_ids: def.entities[1..]
+                .iter()
+                .map(|m| (m.id, registry.alloc_id()))
+                .collect(),
+            overrides: Vec::new(),
+        });
+    }
+
     // Stamp mode: seed the binding with the script's schema defaults. If the
     // plugin isn't loaded right now the binding still gets attached with no
     // props — it hydrates when the plugin shows up.
-    if let Some((plugin, script)) = &config.stamp_script {
+    if config.prefab.is_none()
+        && let Some((plugin, script)) = &config.stamp_script
+    {
         let props = script_registry
             .get(plugin, script)
             .map(|r| r.schema.default_props())
@@ -93,15 +111,23 @@ pub fn handle_place_click(
         ]);
     }
 
-    let entity = spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
+    let entity = spawn_entity_record(
+        &mut commands,
+        &asset_server,
+        &mut registry,
+        &prefabs,
+        chunk,
+        &record,
+    );
     // Streaming must not dirty a chunk just by loading it, so marking dirty
     // is the placing caller's job.
     registry.dirty_chunks.insert(chunk);
     selection.primary = Some(entity);
-    history.push(
-        format!("Place {}", record.kind.label()),
-        vec![Change::Spawn { chunk, record }],
-    );
+    let label = match &config.prefab {
+        Some(name) => format!("Place prefab '{name}'"),
+        None => format!("Place {}", record.kind.label()),
+    };
+    history.push(label, vec![Change::Spawn { chunk, record }]);
 }
 
 pub fn setup_placement_preview(
@@ -109,6 +135,7 @@ pub fn setup_placement_preview(
     mut preview_entity: ResMut<PlacementPreviewEntity>,
     asset_server: Res<AssetServer>,
     config: Res<PlacementConfig>,
+    prefabs: Res<PrefabLibrary>,
 ) {
     if preview_entity.0.is_some() {
         return;
@@ -117,6 +144,47 @@ pub fn setup_placement_preview(
     let transform = Transform::from_translation(Vec3::new(0.0, 0.05, 0.0))
         .with_rotation(config.rotation)
         .with_scale(config.effective_scale());
+
+    // Prefab: one root the cursor moves, with a ghost scene per mesh in the
+    // definition (root included, for single-entity prefabs) as ECS children
+    // at their local transforms — transform propagation carries them.
+    if let Some(def) = config.prefab.as_ref().and_then(|n| prefabs.get(n)) {
+        let root = commands
+            .spawn((
+                GameEntity,
+                PlacementPreview,
+                transform,
+                GlobalTransform::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        for entity_def in &def.entities {
+            let PlacedKind::Mesh { asset_path, .. } = &entity_def.kind else {
+                continue;
+            };
+            let scene: Handle<WorldAsset> = asset_server.load(asset_path);
+            spawn_interactable_scene(
+                &mut commands,
+                (
+                    GameEntity,
+                    ChildOf(root),
+                    WorldAssetRoot(scene),
+                    entity_def.transform(),
+                    GlobalTransform::default(),
+                    Visibility::Inherited,
+                    PendingMaterial {
+                        base_color: Color::srgba(0.8, 0.8, 0.8, 0.4),
+                        metallic: 0.0,
+                        perceptual_roughness: 0.9,
+                        alpha_mode: AlphaMode::Blend,
+                    },
+                ),
+            );
+        }
+        preview_entity.0 = Some(root);
+        log::info!("Placement preview entity created (prefab '{}')", def.name);
+        return;
+    }
 
     let entity = match &config.kind {
         PlacedKind::Mesh { asset_path, .. } => {
@@ -267,7 +335,7 @@ pub fn adjust_placement_scale(
     }
 
     let delta = scroll_notches(&viewport);
-    if delta == 0.0 || !config.kind.is_mesh() {
+    if delta == 0.0 || !(config.kind.is_mesh() || config.prefab.is_some()) {
         return;
     }
 

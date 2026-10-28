@@ -26,9 +26,10 @@ use crate::editor::picking::{PlacedPicker, ViewportInput};
 use crate::editor::selection::Selection;
 use crate::editor::tool::EditorTool;
 use crate::game::world::objects::{
-    PlacedEntityRecord, PlacedObject, PlacedObjectRegistry, PlacementConfig, spawn_entity_record,
-    world_pos_to_chunk,
+    PlacedEntityRecord, PlacedObject, PlacedObjectRegistry, PlacementConfig,
+    refresh_instance_overrides, spawn_entity_record, world_pos_to_chunk,
 };
+use crate::game::world::prefabs::PrefabLibrary;
 
 /// The entity currently held by the editor, if any.
 #[derive(Resource, Default)]
@@ -65,6 +66,7 @@ pub fn handle_grab_keys(
     mut config: ResMut<PlacementConfig>,
     mut selection: ResMut<Selection>,
     mut history: ResMut<History>,
+    prefabs: Res<PrefabLibrary>,
     mut picker: PlacedPicker,
     placed_query: Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
 ) {
@@ -77,6 +79,7 @@ pub fn handle_grab_keys(
                 &mut commands,
                 &asset_server,
                 &mut registry,
+                &prefabs,
                 &mut config,
                 Some(&mut next_tool),
                 &mut selection,
@@ -94,6 +97,7 @@ pub fn handle_grab_keys(
                 &mut commands,
                 &mut grabbed,
                 &mut registry,
+                &prefabs,
                 &mut config,
                 *tool.get(),
                 &mut next_tool,
@@ -136,6 +140,7 @@ fn grab_entity(
     commands: &mut Commands,
     grabbed: &mut GrabbedEntity,
     registry: &mut PlacedObjectRegistry,
+    prefabs: &PrefabLibrary,
     config: &mut PlacementConfig,
     current_tool: EditorTool,
     next_tool: &mut NextState<EditorTool>,
@@ -149,7 +154,10 @@ fn grab_entity(
         return;
     }
 
-    let record = obj.to_record(transform, bindings);
+    let mut record = obj.to_record(transform, bindings);
+    // A single-entity instance root rides along with fresh overrides so its
+    // re-expansion on drop keeps any unsaved edits.
+    refresh_instance_overrides(&mut record, prefabs, registry, placed_query);
     let origin_chunk = obj.chunk;
 
     registry.by_id.remove(&record.id);
@@ -161,6 +169,7 @@ fn grab_entity(
     // grabbed mesh — which is exactly what we want under the cursor.
     let previous_config = config.clone();
     config.kind = record.kind.clone();
+    config.prefab = None;
     config.scale = Vec3::from(record.scale);
     config.rotation = Quat::from_array(record.rotation);
     // Stamp mode must not fire on drop: the entity already carries its own
@@ -198,6 +207,7 @@ pub fn place_grabbed_object(
     mut next_tool: ResMut<NextState<EditorTool>>,
     mut selection: ResMut<Selection>,
     mut history: ResMut<History>,
+    prefabs: Res<PrefabLibrary>,
     asset_server: Res<AssetServer>,
     preview_query: Query<(&Transform, &Visibility), With<PlacementPreview>>,
 ) {
@@ -230,7 +240,14 @@ pub fn place_grabbed_object(
         preview_transform.translation.x,
         preview_transform.translation.z,
     );
-    let entity = spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
+    let entity = spawn_entity_record(
+        &mut commands,
+        &asset_server,
+        &mut registry,
+        &prefabs,
+        chunk,
+        &record,
+    );
     registry.dirty_chunks.insert(chunk);
     registry.dirty_chunks.insert(payload.origin_chunk);
     selection.primary = Some(entity);
@@ -272,6 +289,7 @@ pub fn release_grab(
     mut registry: ResMut<PlacedObjectRegistry>,
     mut config: ResMut<PlacementConfig>,
     mut selection: ResMut<Selection>,
+    prefabs: Res<PrefabLibrary>,
     asset_server: Res<AssetServer>,
 ) {
     if grabbed.0.is_none() {
@@ -281,6 +299,7 @@ pub fn release_grab(
         &mut commands,
         &asset_server,
         &mut registry,
+        &prefabs,
         &mut config,
         None,
         &mut selection,
@@ -294,6 +313,7 @@ fn restore_grabbed(
     commands: &mut Commands,
     asset_server: &AssetServer,
     registry: &mut PlacedObjectRegistry,
+    prefabs: &PrefabLibrary,
     config: &mut PlacementConfig,
     next_tool: Option<&mut NextState<EditorTool>>,
     selection: &mut Selection,
@@ -307,6 +327,7 @@ fn restore_grabbed(
         commands,
         asset_server,
         registry,
+        prefabs,
         payload.origin_chunk,
         &payload.record,
     );

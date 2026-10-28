@@ -15,6 +15,7 @@ use super::Panels;
 use crate::editor::actions::EditorAction;
 use crate::editor::edits::{PlacedEdited, RespawnPlaced, ScriptEdit};
 use crate::editor::history::{Change, MergeKey};
+use crate::editor::prefab_edit::PrefabAction;
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -77,7 +78,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         return;
     };
     let bindings: Vec<ScriptBinding> = bindings.map(|b| b.0.clone()).unwrap_or_default();
-    let (is_mesh, id) = {
+    let header_info = {
         let state = &mut *panels.inspector;
         state.props.retain(|d| d.entity == entity);
 
@@ -135,8 +136,27 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
             }
         });
 
-        (obj.kind.is_mesh(), obj.id)
+        (
+            obj.kind.is_mesh(),
+            obj.id,
+            obj.prefab.as_ref().map(|i| i.name.clone()),
+        )
     };
+    let (is_mesh, id, instance_of) = header_info;
+
+    // ── Prefab instance ──────────────────────────────────────────────────────
+    if let Some(name) = &instance_of {
+        prefab_root_section(ui, entity, name, panels);
+    } else if let Some((root, root_name)) = prefab_root_of(id, panels) {
+        ui.horizontal(|ui| {
+            ui.label(format!("◆ Part of prefab '{root_name}'"));
+            if ui.small_button("Select instance root").clicked() {
+                panels.selection.primary = Some(root);
+            }
+        });
+        ui.weak("Edits here become this instance's overrides on save.");
+        ui.separator();
+    }
 
     // ── Scripts ──────────────────────────────────────────────────────────────
     ui.collapsing_header_default_open("Scripts", |ui| {
@@ -691,6 +711,58 @@ fn empty_reason(panels: &Panels) -> String {
         "No scripts — {} loaded but none export any scripts",
         active.0.plugins.join(", ")
     )
+}
+
+// ── Prefab instance section ──────────────────────────────────────────────────
+
+/// The instance root (and prefab name) a member entity belongs to, if any.
+fn prefab_root_of(id: u64, panels: &Panels) -> Option<(Entity, String)> {
+    panels.placed.iter().find_map(|(e, obj, _, _, _)| {
+        let inst = obj.prefab.as_ref()?;
+        inst.member_world_ids()
+            .any(|m| m == id)
+            .then(|| (e, inst.name.clone()))
+    })
+}
+
+fn prefab_root_section(ui: &mut egui::Ui, entity: Entity, name: &str, panels: &mut Panels) {
+    let known = panels.prefabs.get(name).is_some();
+    ui.horizontal(|ui| {
+        ui.label(format!("◆ Instance of prefab '{name}'"));
+    });
+    if !known {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 120, 120),
+            "Prefab file missing — members not expanded. Restore the file or Unpack.",
+        );
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(known, egui::Button::new("Apply to prefab"))
+            .on_hover_text("Rewrite the prefab from this instance; every instance follows.")
+            .clicked()
+        {
+            panels.prefab_actions.write(PrefabAction::Apply(entity));
+        }
+        if ui
+            .add_enabled(known, egui::Button::new("Revert"))
+            .on_hover_text("Drop this instance's deviations and match the prefab again.")
+            .clicked()
+        {
+            panels.prefab_actions.write(PrefabAction::Revert(entity));
+        }
+        if ui
+            .button("Unpack")
+            .on_hover_text("Sever the link: entities stay, saved as plain level data.")
+            .clicked()
+        {
+            panels.prefab_actions.write(PrefabAction::Unpack(entity));
+        }
+    });
+    if let Some(err) = &panels.prefab_edit.error {
+        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+    }
+    ui.separator();
 }
 
 // ── Environment (nothing selected) ───────────────────────────────────────────

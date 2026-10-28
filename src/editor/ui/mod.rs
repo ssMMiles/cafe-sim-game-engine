@@ -35,12 +35,14 @@ use super::edits::{LightingState, PlacedEdited, RespawnPlaced, ScriptEdit};
 use super::grab::GrabbedEntity;
 use super::history::History;
 use super::picking::ViewportInput;
+use super::prefab_edit::{PrefabAction, PrefabEditState};
 use super::selection::Selection;
 use super::terrain_edit::BrushSettings;
 use super::tool::EditorTool;
 use crate::AppState;
 use crate::game::gfx::camera::{GameRenderTarget, PlayerCamera};
 use crate::game::world::objects::{PlacedObject, PlacedObjectRegistry, PlacementConfig};
+use crate::game::world::prefabs::PrefabLibrary;
 use crate::game::world::terrain::storage::{TerrainWorld, WorldConfig};
 use crate::projects::ActiveProject;
 use crate::script_host::{LoadedPluginIds, NeedsHydration};
@@ -159,6 +161,9 @@ pub struct Panels<'w, 's> {
     pub lighting: ResMut<'w, LightingState>,
     pub history: ResMut<'w, History>,
     pub registry: Res<'w, PlacedObjectRegistry>,
+    pub prefabs: Res<'w, PrefabLibrary>,
+    pub prefab_edit: ResMut<'w, PrefabEditState>,
+    pub prefab_actions: MessageWriter<'w, PrefabAction>,
     pub grabbed: Res<'w, GrabbedEntity>,
     pub cam_settings: Res<'w, EditorCameraSettings>,
     pub fly_lock: ResMut<'w, FlyLock>,
@@ -271,6 +276,24 @@ pub(super) fn editor_ui(
                 );
             } else {
                 ui.weak("lighting baked");
+            }
+            // Instances whose prefab the library doesn't have: they spawned
+            // bare and heal when the prefab file reappears.
+            let mut missing: Vec<&str> = panels
+                .placed
+                .iter()
+                .filter_map(|(_, obj, _, _, _)| obj.prefab.as_ref())
+                .filter(|inst| panels.prefabs.get(&inst.name).is_none())
+                .map(|inst| inst.name.as_str())
+                .collect();
+            missing.sort_unstable();
+            missing.dedup();
+            if !missing.is_empty() {
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 120, 120),
+                    format!("missing prefab(s): {}", missing.join(", ")),
+                );
             }
             if let Some(notice) = panels.history.notice() {
                 ui.separator();

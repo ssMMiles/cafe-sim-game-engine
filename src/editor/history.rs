@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use engine_api::ScriptBinding;
+use engine_api::{ScriptBinding, ScriptBindings};
 
 use super::actions::EditorAction;
 use super::edits::{LightingState, PlacedEdited, RespawnPlaced, ScriptEdit};
@@ -45,6 +45,7 @@ use super::tool::EditorTool;
 use crate::game::world::objects::{
     PlacedEntityRecord, PlacedKind, PlacedObject, PlacedObjectRegistry, spawn_entity_record,
 };
+use crate::game::world::prefabs::{PrefabFile, PrefabInstanceData, PrefabLibrary, store_prefab};
 use crate::game::world::streaming::StreamingState;
 use crate::game::world::terrain::mesh::LOD_LEVELS;
 use crate::game::world::terrain::storage::{EnvironmentData, TerrainWorld, WorldConfig};
@@ -104,6 +105,20 @@ pub enum Change {
     },
     /// One brush stroke: only the tiles it touched, as `(tx, ty, before, after)`.
     Terrain { tiles: Vec<(i32, i32, f32, f32)> },
+    /// A prefab definition was rewritten ("Apply to prefab"). Applying swaps
+    /// the library + file and re-expands every loaded instance.
+    PrefabDefinition {
+        name: String,
+        before: PrefabFile,
+        after: PrefabFile,
+    },
+    /// An instance root's link changed: saved-as (None → Some), reverted,
+    /// applied (overrides cleared), or unpacked (Some → None).
+    PrefabInstance {
+        id: u64,
+        before: Option<PrefabInstanceData>,
+        after: Option<PrefabInstanceData>,
+    },
 }
 
 impl Change {
@@ -117,6 +132,8 @@ impl Change {
             Change::Scripts { before, after, .. } => before == after,
             Change::Environment { before, after } => before == after,
             Change::Terrain { tiles } => tiles.iter().all(|(_, _, b, a)| b == a),
+            Change::PrefabDefinition { before, after, .. } => before == after,
+            Change::PrefabInstance { before, after, .. } => before == after,
         }
     }
 
@@ -135,8 +152,11 @@ impl Change {
             | Change::Name { id, .. }
             | Change::Kind { id, .. }
             | Change::Parent { id, .. }
-            | Change::Scripts { id, .. } => Some(*id),
-            Change::Environment { .. } | Change::Terrain { .. } => None,
+            | Change::Scripts { id, .. }
+            | Change::PrefabInstance { id, .. } => Some(*id),
+            Change::Environment { .. }
+            | Change::Terrain { .. }
+            | Change::PrefabDefinition { .. } => None,
         }
     }
 
@@ -439,6 +459,7 @@ pub struct LevelOps<'w, 's> {
     registry: ResMut<'w, PlacedObjectRegistry>,
     streaming: Res<'w, StreamingState>,
     placed: PlacedTree<'w, 's>,
+    bindings: Query<'w, 's, &'static ScriptBindings>,
     selection: ResMut<'w, Selection>,
     lighting: ResMut<'w, LightingState>,
     terrain_world: Option<ResMut<'w, TerrainWorld>>,
@@ -446,6 +467,7 @@ pub struct LevelOps<'w, 's> {
     script_edits: MessageWriter<'w, ScriptEdit>,
     respawns: MessageWriter<'w, RespawnPlaced>,
     terrain: TerrainChunks<'w, 's>,
+    prefabs: ResMut<'w, PrefabLibrary>,
 }
 
 impl LevelOps<'_, '_> {
@@ -486,6 +508,7 @@ impl LevelOps<'_, '_> {
                 .as_ref()
                 .map(|_| ())
                 .ok_or_else(|| "world not loaded".to_owned()),
+            Change::PrefabDefinition { .. } => Ok(()),
             Change::Terrain { .. } => {
                 if self.terrain.heightmap.is_none() {
                     return Err("terrain not loaded".to_owned());
@@ -517,6 +540,7 @@ impl LevelOps<'_, '_> {
                         &mut self.commands,
                         &self.asset_server,
                         &mut self.registry,
+                        &self.prefabs,
                         *chunk,
                         record,
                     );
@@ -527,6 +551,16 @@ impl LevelOps<'_, '_> {
                         .get(entity)
                         .map(|(_, o, _)| o.chunk)
                         .unwrap_or(*chunk);
+                    // A prefab-instance root takes its expanded members with
+                    // it — they have no record of their own to despawn by.
+                    if let Some(inst) = &record.prefab {
+                        for id in inst.member_world_ids() {
+                            if let Some(member) = self.entity_of(id) {
+                                self.registry.by_id.remove(&id);
+                                self.commands.entity(member).despawn();
+                            }
+                        }
+                    }
                     self.registry.by_id.remove(&record.id);
                     self.registry.mark_dirty(chunk);
                     self.commands.entity(entity).despawn();
@@ -621,6 +655,63 @@ impl LevelOps<'_, '_> {
                     self.terrain.rebuild_collider(chunk);
                     self.terrain.mark_dirty(chunk);
                 }
+                self.lighting.stale = true;
+            }
+            Change::PrefabDefinition {
+                name,
+                before,
+                after,
+            } => {
+                let target = if undo { before } else { after };
+                // Each loaded instance's deviations are measured against the
+                // definition being replaced, then pinned through the rebuild.
+                let current = self.prefabs.get(name).cloned();
+                let fresh = current
+                    .as_ref()
+                    .map(|def| {
+                        super::prefab_edit::collect_fresh_instances(
+                            name,
+                            None,
+                            def,
+                            &self.registry,
+                            &self.placed,
+                            &self.bindings,
+                        )
+                    })
+                    .unwrap_or_default();
+                if let Err(e) = store_prefab(&mut self.prefabs, target.clone()) {
+                    error!("Failed to rewrite prefab '{name}': {e}");
+                    return;
+                }
+                for (entity, inst) in fresh {
+                    super::prefab_edit::set_instance_and_reexpand(
+                        entity,
+                        Some(inst),
+                        &mut self.commands,
+                        &self.asset_server,
+                        &mut self.registry,
+                        &self.prefabs,
+                        &mut self.placed,
+                        &self.bindings,
+                    );
+                }
+                self.lighting.stale = true;
+            }
+            Change::PrefabInstance { id, before, after } => {
+                let target = if undo { before } else { after };
+                let Some(entity) = self.entity_of(*id) else {
+                    return;
+                };
+                super::prefab_edit::set_instance_and_reexpand(
+                    entity,
+                    target.clone(),
+                    &mut self.commands,
+                    &self.asset_server,
+                    &mut self.registry,
+                    &self.prefabs,
+                    &mut self.placed,
+                    &self.bindings,
+                );
                 self.lighting.stale = true;
             }
         }
@@ -1039,6 +1130,8 @@ mod tests {
         ));
         app.init_state::<EditorTool>();
         app.init_resource::<History>()
+            .init_resource::<crate::game::world::prefabs::PrefabLibrary>()
+            .init_resource::<super::super::prefab_edit::PrefabEditState>()
             .init_resource::<Selection>()
             .init_resource::<LightingState>()
             .init_resource::<PlacedObjectRegistry>()
@@ -1053,13 +1146,15 @@ mod tests {
         app.add_message::<PlacedEdited>()
             .add_message::<ScriptEdit>()
             .add_message::<RespawnPlaced>()
-            .add_message::<EditorAction>();
+            .add_message::<EditorAction>()
+            .add_message::<super::super::prefab_edit::PrefabAction>();
         app.add_systems(
             Update,
             (
                 prepare_history,
                 apply_undo_redo,
                 apply_selection_actions,
+                super::super::prefab_edit::apply_prefab_actions,
                 commit_placed_edits,
                 apply_script_edits,
                 respawn_placed,
@@ -1092,6 +1187,7 @@ mod tests {
                     name: String::new(),
                     kind: record.kind.clone(),
                     parent,
+                    prefab: None,
                 },
                 at,
             ))
@@ -1324,5 +1420,154 @@ mod tests {
         h.push("third stroke", vec![big()]);
         let labels: Vec<&str> = h.stacks().undo.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(labels, vec!["rename", "third stroke"]);
+    }
+
+    // ── Prefab instances ─────────────────────────────────────────────────────
+
+    use bevy::ecs::system::IntoSystem;
+
+    use crate::game::world::prefabs::{PrefabInstanceData, PrefabLibrary, define_from_records};
+
+    /// A two-entity prefab in the library, plus a live instance of it spawned
+    /// through the real spawn path.
+    fn spawn_instance(app: &mut App, root_id: u64, member_id: u64) -> (Entity, u64) {
+        let mut def_root = PlacedEntityRecord::new(0, PlacedKind::Group, &t(0.0));
+        def_root.name = "combo".into();
+        let member = PlacedEntityRecord::new(1, PlacedKind::Empty, &t(1.0));
+        let (def, _) = define_from_records("combo", &def_root, &[member]);
+        app.world_mut()
+            .resource_mut::<PrefabLibrary>()
+            .prefabs
+            .insert("combo".into(), def);
+
+        let mut record = PlacedEntityRecord::new(root_id, PlacedKind::Group, &t(5.0));
+        record.prefab = Some(PrefabInstanceData {
+            name: "combo".into(),
+            member_ids: vec![(1, member_id)],
+            overrides: Vec::new(),
+        });
+        let mut system = IntoSystem::into_system(
+            move |mut commands: Commands,
+                  asset_server: Res<AssetServer>,
+                  prefabs: Res<PrefabLibrary>,
+                  mut registry: ResMut<PlacedObjectRegistry>|
+                  -> Entity {
+                registry.ids_seeded = true;
+                registry.observe_id(root_id.max(member_id));
+                spawn_entity_record(
+                    &mut commands,
+                    &asset_server,
+                    &mut registry,
+                    &prefabs,
+                    (0, 0),
+                    &record,
+                )
+            },
+        );
+        system.initialize(app.world_mut());
+        let root = system.run((), app.world_mut()).unwrap();
+        system.apply_deferred(app.world_mut());
+        app.update();
+        (root, member_id)
+    }
+
+    #[test]
+    fn an_instance_expands_its_members_in_the_roots_chunk() {
+        let mut app = test_app();
+        let (root, member_id) = spawn_instance(&mut app, 10, 11);
+        let member = entity_of(&mut app, member_id).expect("member expanded");
+        let obj = app.world().get::<PlacedObject>(member).unwrap();
+        assert_eq!(obj.parent, Some(10), "member filed under the root");
+        assert_eq!(obj.chunk, (0, 0), "member lives in the root's chunk");
+        assert_eq!(
+            transform_of(&mut app, member_id),
+            t(6.0),
+            "root at 5 + local 1"
+        );
+        let root_obj = app.world().get::<PlacedObject>(root).unwrap();
+        assert_eq!(
+            root_obj.name, "combo",
+            "root identity comes from the definition"
+        );
+    }
+
+    #[test]
+    fn deleting_an_instance_root_takes_members_and_undo_restores_both_ids() {
+        let mut app = test_app();
+        let (root, member_id) = spawn_instance(&mut app, 10, 11);
+        app.world_mut().resource_mut::<Selection>().primary = Some(root);
+        app.update();
+
+        action(&mut app, EditorAction::DeleteSelection);
+        assert!(entity_of(&mut app, 10).is_none());
+        assert!(
+            entity_of(&mut app, member_id).is_none(),
+            "member went with the root"
+        );
+        assert_eq!(
+            app.world().resource::<History>().undo_len(),
+            1,
+            "one transaction; the expanded member has no change of its own"
+        );
+
+        action(&mut app, EditorAction::Undo);
+        assert!(entity_of(&mut app, 10).is_some());
+        assert!(
+            entity_of(&mut app, member_id).is_some(),
+            "undo re-expanded the member with its stable id"
+        );
+    }
+
+    #[test]
+    fn duplicating_an_instance_allocates_fresh_member_ids() {
+        let mut app = test_app();
+        let (root, member_id) = spawn_instance(&mut app, 10, 11);
+        app.world_mut().resource_mut::<Selection>().primary = Some(root);
+        app.update();
+        action(&mut app, EditorAction::DuplicateSelection);
+        app.update(); // respawn_placed ran; commands applied
+
+        let copy = app
+            .world()
+            .resource::<Selection>()
+            .primary
+            .expect("copy selected");
+        let copy_obj = app.world().get::<PlacedObject>(copy).unwrap();
+        let inst = copy_obj.prefab.as_ref().expect("copy is an instance");
+        assert_ne!(copy_obj.id, 10);
+        assert_eq!(inst.member_ids.len(), 1);
+        let copy_member = inst.world_id_of(1).unwrap();
+        assert_ne!(copy_member, member_id, "no shared member ids");
+        assert!(entity_of(&mut app, copy_member).is_some());
+    }
+
+    #[test]
+    fn unpack_and_its_undo_round_trip_the_link() {
+        use super::super::prefab_edit::PrefabAction;
+        let mut app = test_app();
+        let (root, member_id) = spawn_instance(&mut app, 10, 11);
+        app.world_mut().write_message(PrefabAction::Unpack(root));
+        app.update();
+        assert!(
+            app.world()
+                .get::<PlacedObject>(root)
+                .unwrap()
+                .prefab
+                .is_none(),
+            "link severed"
+        );
+        assert!(entity_of(&mut app, member_id).is_some(), "entities stay");
+
+        action(&mut app, EditorAction::Undo);
+        let root = entity_of(&mut app, 10).expect("root survives (possibly respawned)");
+        assert!(
+            app.world()
+                .get::<PlacedObject>(root)
+                .unwrap()
+                .prefab
+                .is_some(),
+            "undo restores the link"
+        );
+        assert!(entity_of(&mut app, member_id).is_some());
     }
 }

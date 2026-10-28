@@ -24,6 +24,7 @@ use crate::game::world;
 use crate::game::world::baking::BakeMessage;
 use crate::game::world::objects::{PlacedEntityRecord, PlacedKind, spawn_entity_record};
 use crate::game::world::objects::{PlacedObject, PlacedObjectRegistry};
+use crate::game::world::prefabs::PrefabLibrary;
 use crate::game::world::streaming::StreamingState;
 use crate::game::world::terrain::{
     TerrainChunk, bootstrap::TerrainSetupMarker, save::SaveTerrainMessage, storage::WorldConfig,
@@ -220,6 +221,7 @@ pub fn apply_selection_actions(
     mut selection: ResMut<Selection>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut history: ResMut<History>,
+    prefabs: Res<PrefabLibrary>,
     mut respawns: MessageWriter<RespawnPlaced>,
     mut placed: PlacedTree,
     bindings: Query<&ScriptBindings>,
@@ -238,6 +240,7 @@ pub fn apply_selection_actions(
                         &mut commands,
                         &mut registry,
                         &mut history,
+                        &prefabs,
                         &mut placed,
                         &bindings,
                         entity,
@@ -294,6 +297,7 @@ pub fn apply_selection_actions(
                     &mut commands,
                     &asset_server,
                     &mut registry,
+                    &prefabs,
                     chunk,
                     &record,
                 );
@@ -319,11 +323,15 @@ pub fn apply_selection_actions(
                 let Some(entity) = selection.primary.take() else {
                     continue;
                 };
-                if placed.get(entity).is_ok_and(|(_, o, _)| o.kind.is_group()) {
+                if placed.get(entity).is_ok_and(|(_, o, _)| o.prefab.is_some()) {
+                    info!("This group is a prefab instance; use Unpack in the inspector");
+                    selection.primary = Some(entity);
+                } else if placed.get(entity).is_ok_and(|(_, o, _)| o.kind.is_group()) {
                     delete_placed(
                         &mut commands,
                         &mut registry,
                         &mut history,
+                        &prefabs,
                         &mut placed,
                         &bindings,
                         entity,
@@ -349,6 +357,16 @@ fn set_parent(
         return None;
     };
     let child_id = child_obj.id;
+    // A prefab member's place in the tree belongs to the definition; moving
+    // it would be silently undone by the next expansion.
+    let is_member = placed
+        .iter()
+        .filter_map(|(_, o, _)| o.prefab.as_ref())
+        .any(|inst| inst.member_world_ids().any(|id| id == child_id));
+    if is_member {
+        info!("Prefab members can't be re-filed; edit the prefab instead");
+        return None;
+    }
     let parent_id = match parent {
         None => None,
         Some(p) => {

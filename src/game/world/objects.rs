@@ -15,6 +15,8 @@
 //! - v3: `entities: Vec<PlacedEntityRecord>` with a `kind` and `scripts`.
 //! - v4: light `intensity` in lightmap units (same layout as v3).
 //! - v5: `parent: Option<u64>` for editor grouping, and `PlacedKind::Group`.
+//! - v6: `prefab: Option<PrefabInstanceData>` on the root of a prefab
+//!   instance (members are expanded from the library, never stored).
 //!
 //! Older files are still read (see [`legacy`]) and upgraded in memory; they
 //! are rewritten as the current version the next time the chunk is saved.
@@ -34,6 +36,7 @@ use crate::game::{
     world::terrain::storage::StorageError,
 };
 
+use crate::game::world::prefabs::{PrefabInstanceData, PrefabLibrary, expand_records};
 use crate::game::world::terrain::storage::TerrainWorld;
 use crate::game::world::terrain::{CHUNK_SIZE, TILE_SIZE};
 
@@ -44,7 +47,7 @@ const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 /// reinterpreted from bevy photometric units into lightmap units for the
 /// baked lighting pipeline. Version 5: `parent` (editor grouping) and the
 /// `Group` kind. Versions 2–4 are still readable.
-pub const CHUNK_OBJECTS_VERSION: u32 = 5;
+pub const CHUNK_OBJECTS_VERSION: u32 = 6;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
 pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
@@ -72,6 +75,11 @@ pub struct PlacedEntityRecord {
     /// parenting, and the entity streams with its own chunk regardless of
     /// where the group lives (see `docs/EDITOR_UI_DESIGN.md` §7).
     pub parent: Option<u64>,
+    /// Set on the root of a prefab instance. Members are expanded from the
+    /// prefab library at spawn and never written to chunk files, which is
+    /// what makes a prefab edit reach every instance
+    /// (`docs/PREFABS_PLAN.md`).
+    pub prefab: Option<PrefabInstanceData>,
 }
 
 impl PlacedEntityRecord {
@@ -87,6 +95,7 @@ impl PlacedEntityRecord {
             kind,
             scripts: Vec::new(),
             parent: None,
+            prefab: None,
         }
     }
 
@@ -244,6 +253,51 @@ pub mod legacy {
     use engine_api::ScriptBinding;
     use rkyv::{Archive, Deserialize, Serialize};
 
+    /// v5 record: no `prefab`.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct PlacedEntityRecordV5 {
+        pub id: u64,
+        pub name: String,
+        pub position: [f32; 3],
+        pub rotation: [f32; 4],
+        pub scale: [f32; 3],
+        pub kind: PlacedKind,
+        pub scripts: Vec<ScriptBinding>,
+        pub parent: Option<u64>,
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct ChunkObjectsFileV5 {
+        pub version: u32,
+        pub chunk_x: i32,
+        pub chunk_y: i32,
+        pub entities: Vec<PlacedEntityRecordV5>,
+    }
+
+    /// v5 → v6: nothing was a prefab instance yet.
+    pub fn upgrade_v5(old: ChunkObjectsFileV5) -> ChunkObjectsFile {
+        ChunkObjectsFile {
+            version: super::CHUNK_OBJECTS_VERSION,
+            chunk_x: old.chunk_x,
+            chunk_y: old.chunk_y,
+            entities: old
+                .entities
+                .into_iter()
+                .map(|e| PlacedEntityRecord {
+                    id: e.id,
+                    name: e.name,
+                    position: e.position,
+                    rotation: e.rotation,
+                    scale: e.scale,
+                    kind: e.kind,
+                    scripts: e.scripts,
+                    parent: e.parent,
+                    prefab: None,
+                })
+                .collect(),
+        }
+    }
+
     /// v3/v4 record: no `parent`. (`PlacedKind` gained `Group` in v5, but as
     /// an appended variant it reads old files unchanged.)
     #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
@@ -283,6 +337,7 @@ pub mod legacy {
                     kind: e.kind,
                     scripts: e.scripts,
                     parent: None,
+                    prefab: None,
                 })
                 .collect(),
         }
@@ -352,6 +407,7 @@ pub mod legacy {
                     },
                     scripts: Vec::new(),
                     parent: None,
+                    prefab: None,
                 })
                 .collect(),
         }
@@ -374,6 +430,10 @@ pub struct PlacedObject {
     /// Outliner group this entity is filed under (a `PlacedKind::Group`'s
     /// id). Organisational only — see [`PlacedEntityRecord::parent`].
     pub parent: Option<u64>,
+    /// Mirrors [`PlacedEntityRecord::prefab`]: present on instance roots.
+    /// Members are ordinary entities whose ids appear in a root's
+    /// `member_ids` — `PlacedObjectRegistry::prefab_member_ids` is the set.
+    pub prefab: Option<PrefabInstanceData>,
 }
 
 impl PlacedObject {
@@ -406,6 +466,7 @@ impl PlacedObject {
             kind: self.kind.clone(),
             scripts: bindings.map(|b| b.0.clone()).unwrap_or_default(),
             parent: self.parent,
+            prefab: self.prefab.clone(),
         }
     }
 }
@@ -446,6 +507,48 @@ impl PlacedObjectRegistry {
     }
 }
 
+/// Recompute an instance root record's overrides from its live members
+/// (section-level diff against the definition). No-op for non-instances and
+/// instances whose prefab is missing.
+pub fn refresh_instance_overrides(
+    record: &mut PlacedEntityRecord,
+    prefabs: &PrefabLibrary,
+    registry: &PlacedObjectRegistry,
+    placed_query: &Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
+) {
+    let Some(inst) = record.prefab.clone() else {
+        return;
+    };
+    let Some(def) = prefabs.get(&inst.name) else {
+        return;
+    };
+    let member_record_of = |id: u64| {
+        registry
+            .by_id
+            .get(&id)
+            .and_then(|e| placed_query.get(*e).ok())
+            .map(|(obj, transform, bindings)| obj.to_record(transform, bindings))
+    };
+    let overrides = crate::game::world::prefabs::compute_instance_overrides(
+        def,
+        &inst,
+        record,
+        member_record_of,
+    );
+    if let Some(inst) = record.prefab.as_mut() {
+        inst.overrides = overrides;
+    }
+}
+
+/// Ids of every loaded prefab-instance member: the entities that are
+/// expanded rather than stored, so saving and snapshotting skip them.
+pub fn prefab_member_ids<'a>(roots: impl Iterator<Item = &'a PlacedObject>) -> HashSet<u64> {
+    roots
+        .filter_map(|o| o.prefab.as_ref())
+        .flat_map(|inst| inst.member_ids.iter().map(|&(_, id)| id))
+        .collect()
+}
+
 /// What the editor places on the next click.
 ///
 /// `Clone` so the grab tool can stash the current settings while it borrows
@@ -454,6 +557,10 @@ impl PlacedObjectRegistry {
 pub struct PlacementConfig {
     /// Kind (and kind-specific defaults) of the next placed entity.
     pub kind: PlacedKind,
+    /// When set, the next click places an instance of this prefab instead of
+    /// a bare `kind` (which mirrors the definition root's kind so previews
+    /// and labels stay truthful).
+    pub prefab: Option<String>,
     pub scale: Vec3,
     /// Yaw-only in practice (Alt+Scroll steps it), but stored as a full
     /// quaternion because that is what the record persists and what a grabbed
@@ -470,6 +577,7 @@ impl Default for PlacementConfig {
     fn default() -> Self {
         Self {
             kind: PlacedKind::mesh("meshes/rock/bigrock.gltf#Scene0"),
+            prefab: None,
             scale: Vec3::splat(0.75),
             rotation: Quat::IDENTITY,
             stamp_script: None,
@@ -482,7 +590,7 @@ impl PlacementConfig {
     /// forcing it to one keeps a stale mesh scale from leaking into a light's
     /// gizmo or a later record.
     pub fn effective_scale(&self) -> Vec3 {
-        if self.kind.is_mesh() {
+        if self.kind.is_mesh() || self.prefab.is_some() {
             self.scale
         } else {
             Vec3::ONE
@@ -501,7 +609,7 @@ pub fn world_pos_to_chunk(world_x: f32, world_z: f32) -> (i32, i32) {
 }
 
 #[inline]
-fn quat_to_array(q: Quat) -> [f32; 4] {
+pub(crate) fn quat_to_array(q: Quat) -> [f32; 4] {
     [q.x, q.y, q.z, q.w]
 }
 
@@ -519,7 +627,44 @@ fn quat_from_array(q: [f32; 4]) -> Quat {
 ///
 /// Does **not** mark the chunk dirty — the caller decides, since streaming
 /// must not dirty a chunk merely by loading it.
+/// Spawn one record — expanding it first when it is a prefab-instance root.
+///
+/// Expansion replaces the root's kind/name/scripts with the definition's (plus
+/// this instance's overrides) and spawns the members in the **root's chunk**
+/// (they are saved and despawned with it). A root whose prefab is missing
+/// from the library spawns bare, data intact, so it heals when the prefab
+/// shows up; the status bar flags it meanwhile.
 pub fn spawn_entity_record(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    registry: &mut PlacedObjectRegistry,
+    prefabs: &PrefabLibrary,
+    chunk: (i32, i32),
+    record: &PlacedEntityRecord,
+) -> Entity {
+    if let Some(inst) = &record.prefab {
+        match prefabs.get(&inst.name) {
+            Some(def) => {
+                let expanded = expand_records(def, record);
+                let root =
+                    spawn_single_record(commands, asset_server, registry, chunk, &expanded[0]);
+                for member in &expanded[1..] {
+                    spawn_single_record(commands, asset_server, registry, chunk, member);
+                }
+                return root;
+            }
+            None => {
+                warn!(
+                    "Placed id={} is an instance of missing prefab '{}'; spawned bare",
+                    record.id, inst.name
+                );
+            }
+        }
+    }
+    spawn_single_record(commands, asset_server, registry, chunk, record)
+}
+
+fn spawn_single_record(
     commands: &mut Commands,
     asset_server: &AssetServer,
     registry: &mut PlacedObjectRegistry,
@@ -533,6 +678,7 @@ pub fn spawn_entity_record(
         name: record.name.clone(),
         kind: record.kind.clone(),
         parent: record.parent,
+        prefab: record.prefab.clone(),
     };
 
     let entity = match &record.kind {
@@ -616,11 +762,12 @@ pub fn spawn_chunk_objects(
     commands: &mut Commands,
     asset_server: &AssetServer,
     registry: &mut PlacedObjectRegistry,
+    prefabs: &PrefabLibrary,
     chunk_objects: &ChunkObjectsFile,
 ) {
     let chunk = (chunk_objects.chunk_x, chunk_objects.chunk_y);
     for record in &chunk_objects.entities {
-        spawn_entity_record(commands, asset_server, registry, chunk, record);
+        spawn_entity_record(commands, asset_server, registry, prefabs, chunk, record);
     }
 }
 
@@ -731,6 +878,7 @@ pub fn save_placed_objects(
     mut messages: MessageReader<crate::game::world::terrain::save::SaveTerrainMessage>,
     terrain_world: Option<Res<TerrainWorld>>,
     mut registry: ResMut<PlacedObjectRegistry>,
+    prefabs: Res<PrefabLibrary>,
     placed_query: Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
 ) {
@@ -754,12 +902,19 @@ pub fn save_placed_objects(
     let world_id = terrain_world.metadata.world_id.clone();
     let mut writes: Vec<(String, Vec<u8>, i32, i32)> = Vec::new();
 
+    // Prefab members are expanded from their root, never stored; roots are
+    // stored with freshly diffed overrides so member edits persist.
+    let member_ids = prefab_member_ids(placed_query.iter().map(|(o, _, _)| o));
     for (cx, cy) in &dirty {
         let (cx, cy) = (*cx, *cy);
         let entities: Vec<PlacedEntityRecord> = placed_query
             .iter()
-            .filter(|(obj, _, _)| obj.chunk == (cx, cy))
-            .map(|(obj, transform, bindings)| obj.to_record(transform, bindings))
+            .filter(|(obj, _, _)| obj.chunk == (cx, cy) && !member_ids.contains(&obj.id))
+            .map(|(obj, transform, bindings)| {
+                let mut record = obj.to_record(transform, bindings);
+                refresh_instance_overrides(&mut record, &prefabs, &registry, &placed_query);
+                record
+            })
             .collect();
 
         let file = ChunkObjectsFile {
@@ -901,6 +1056,15 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
         return Ok(file);
     }
 
+    if version == 5 {
+        let archived = rkyv::access::<legacy::ArchivedChunkObjectsFileV5, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::ChunkObjectsFileV5 =
+            rkyv::deserialize::<legacy::ChunkObjectsFileV5, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v5(old));
+    }
+
     let archived = rkyv::access::<ArchivedChunkObjectsFile, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let mut file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
@@ -946,6 +1110,7 @@ mod tests {
                         ],
                     }],
                     parent: Some(9),
+                    prefab: None,
                 },
                 PlacedEntityRecord {
                     id: 2,
@@ -961,6 +1126,7 @@ mod tests {
                     },
                     scripts: Vec::new(),
                     parent: None,
+                    prefab: None,
                 },
                 PlacedEntityRecord {
                     id: 9,
@@ -971,6 +1137,7 @@ mod tests {
                     kind: PlacedKind::Group,
                     scripts: Vec::new(),
                     parent: None,
+                    prefab: None,
                 },
             ],
         }
@@ -1210,6 +1377,31 @@ mod tests {
             PlacedKind::PointLight { intensity, .. } => assert_eq!(*intensity, 1.5),
             other => panic!("expected a point light, got {other:?}"),
         }
+    }
+
+    /// v5 is what grouped worlds were saved as before prefabs existed: it
+    /// must load with its parents intact and no instance data.
+    #[test]
+    fn v5_file_upgrades_with_no_prefabs() {
+        let old = legacy::ChunkObjectsFileV5 {
+            version: 5,
+            chunk_x: 1,
+            chunk_y: 1,
+            entities: vec![legacy::PlacedEntityRecordV5 {
+                id: 4,
+                name: "rock".into(),
+                position: [1.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+                kind: PlacedKind::mesh("meshes/rock/bigrock.gltf#Scene0"),
+                scripts: Vec::new(),
+                parent: Some(9),
+            }],
+        };
+        let loaded = parse_chunk_objects_from_bytes(&frame(&old, 5, (1, 1))).unwrap();
+        assert_eq!(loaded.version, CHUNK_OBJECTS_VERSION);
+        assert_eq!(loaded.entities[0].parent, Some(9));
+        assert_eq!(loaded.entities[0].prefab, None);
     }
 
     #[test]

@@ -50,6 +50,7 @@ struct Row {
     kind: &'static str,
     icon: &'static str,
     is_group: bool,
+    is_instance_root: bool,
     scripts: usize,
     pending: bool,
 }
@@ -76,6 +77,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
             kind: obj.kind.label(),
             icon: icon(&obj.kind),
             is_group: obj.kind.is_group(),
+            is_instance_root: obj.prefab.is_some(),
             scripts: bindings.map(|b| b.0.len()).unwrap_or(0),
             pending,
         })
@@ -209,6 +211,9 @@ fn draw_row(ui: &mut egui::Ui, panels: &mut Panels, row: &Row, depth: usize, orp
         }
 
         let mut label = format!("{} {}", row.icon, row.name);
+        if row.is_instance_root {
+            label = format!("◆ {label}");
+        }
         if row.scripts > 0 {
             label.push_str(&format!("  ·{}", row.scripts));
         }

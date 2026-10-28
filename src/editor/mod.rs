@@ -33,6 +33,7 @@ mod lightmap_toggle;
 mod object_placement;
 mod physics_debug;
 mod picking;
+mod prefab_edit;
 mod selection;
 mod terrain_edit;
 mod terrain_save;
@@ -68,6 +69,7 @@ use object_placement::{
 };
 use physics_debug::{sync_physics_debug, toggle_physics_debug};
 use picking::{EditorRay, ViewportInput, compute_editor_ray, viewport_pointer_free};
+use prefab_edit::{PrefabAction, PrefabEditState, apply_prefab_actions};
 use selection::{
     Selection, clear_hover, delete_selected, draw_selection_gizmos, focus_selection,
     select_on_click, update_hover, validate_selection,
@@ -142,6 +144,8 @@ impl Plugin for EditorPlugin {
         app.add_message::<ScriptEdit>();
         app.add_message::<RespawnPlaced>();
         app.add_message::<EditorAction>();
+        app.add_message::<PrefabAction>();
+        app.init_resource::<PrefabEditState>();
         app.init_resource::<LightingState>();
         app.init_resource::<History>();
         // Undo/redo first: the messages it emits are committed below in the
@@ -153,6 +157,7 @@ impl Plugin for EditorPlugin {
                 apply_undo_redo,
                 apply_level_actions,
                 apply_selection_actions,
+                apply_prefab_actions,
                 commit_placed_edits,
                 apply_script_edits,
                 respawn_placed,
@@ -356,6 +361,7 @@ mod tests {
         initializes("settle_history", settle_history);
         initializes("prepare_history", prepare_history);
         initializes("apply_level_actions", apply_level_actions);
+        initializes("apply_prefab_actions", apply_prefab_actions);
         initializes("apply_selection_actions", apply_selection_actions);
         initializes("commit_placed_edits", commit_placed_edits);
         initializes("apply_script_edits", apply_script_edits);

@@ -29,8 +29,10 @@ use super::selection::{PlacedTree, Selection, descendants};
 use crate::game::gltf_loading::Interactable;
 use crate::game::world::baking::BakeMessage;
 use crate::game::world::objects::{
-    PlacedKind, PlacedObject, PlacedObjectRegistry, spawn_entity_record, world_pos_to_chunk,
+    PlacedKind, PlacedObject, PlacedObjectRegistry, refresh_instance_overrides,
+    spawn_entity_record, world_pos_to_chunk,
 };
+use crate::game::world::prefabs::PrefabLibrary;
 use crate::script_host::NeedsHydration;
 
 /// What changed on a placed entity. Sent after the component was mutated,
@@ -434,6 +436,7 @@ pub fn respawn_placed(
     mut selection: ResMut<Selection>,
     mut lighting: ResMut<LightingState>,
     mut history: ResMut<History>,
+    prefabs: Res<PrefabLibrary>,
     placed: Query<(&PlacedObject, &Transform, Option<&ScriptBindings>)>,
 ) {
     for request in requests.read() {
@@ -445,6 +448,9 @@ pub fn respawn_placed(
             continue;
         };
         let mut record = obj.to_record(transform, bindings);
+        // An instance root re-expands on respawn; carry fresh overrides so
+        // member edits survive the round trip.
+        refresh_instance_overrides(&mut record, &prefabs, &registry, &placed);
         let chunk = world_pos_to_chunk(transform.translation.x, transform.translation.z);
 
         if duplicate {
@@ -453,6 +459,14 @@ pub fn respawn_placed(
                 continue;
             }
             record.id = registry.alloc_id();
+            // A duplicate is its own instance: same prefab, fresh member ids.
+            if let Some(inst) = record.prefab.as_mut() {
+                inst.member_ids = inst
+                    .member_ids
+                    .iter()
+                    .map(|&(local, _)| (local, registry.alloc_id()))
+                    .collect();
+            }
             // Nudge so the copy is visibly a copy and not a z-fighting twin.
             record.position[0] += 1.0;
         } else {
@@ -461,8 +475,14 @@ pub fn respawn_placed(
             commands.entity(entity).despawn();
         }
 
-        let new_entity =
-            spawn_entity_record(&mut commands, &asset_server, &mut registry, chunk, &record);
+        let new_entity = spawn_entity_record(
+            &mut commands,
+            &asset_server,
+            &mut registry,
+            &prefabs,
+            chunk,
+            &record,
+        );
         registry.mark_dirty(chunk);
         lighting.stale = true;
         selection.primary = Some(new_entity);

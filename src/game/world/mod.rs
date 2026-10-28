@@ -3,6 +3,7 @@ use bevy::{light::NotShadowCaster, prelude::*};
 pub mod baking;
 pub mod chunk_assets;
 pub mod objects;
+pub mod prefabs;
 mod sky;
 pub mod streaming;
 pub mod terrain;
@@ -44,6 +45,7 @@ impl Plugin for WorldPlugin {
 
         app.add_plugins(terrain::TerrainPlugin);
         app.add_plugins(baking::BakingPlugin);
+        app.add_plugins(prefabs::PrefabsPlugin);
 
         // Register chunk asset types and their loaders.
         app.init_asset::<ChunkDataAsset>();

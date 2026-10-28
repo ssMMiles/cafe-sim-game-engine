@@ -41,6 +41,7 @@ use super::{
         PlacedObject, PlacedObjectRegistry, despawn_chunk_objects, spawn_chunk_objects,
         world_pos_to_chunk,
     },
+    prefabs::PrefabLibrary,
     terrain::{
         HeightmapData, TILE_SIZE,
         bootstrap::{
@@ -568,6 +569,7 @@ pub fn finalize_computed_chunks(
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
     mut images: ResMut<Assets<Image>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
+    prefabs: Res<PrefabLibrary>,
     asset_server: Res<AssetServer>,
 ) {
     let (Some(mut chunk_registry), Some(render_assets)) = (chunk_registry, render_assets) else {
@@ -613,12 +615,24 @@ pub fn finalize_computed_chunks(
         if let Some(ref handle) = computing.objects_handle
             && let Some(asset) = chunk_objects_assets.get(handle)
         {
-            spawn_chunk_objects(&mut commands, &asset_server, &mut obj_registry, &asset.0);
+            spawn_chunk_objects(
+                &mut commands,
+                &asset_server,
+                &mut obj_registry,
+                &prefabs,
+                &asset.0,
+            );
         }
 
         #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
         if let Some(ref objects) = computing.objects_data {
-            spawn_chunk_objects(&mut commands, &*asset_server, &mut obj_registry, objects);
+            spawn_chunk_objects(
+                &mut commands,
+                &*asset_server,
+                &mut obj_registry,
+                &prefabs,
+                objects,
+            );
         }
 
         state.loaded.insert(chunk_coord);
