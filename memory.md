@@ -623,3 +623,17 @@ image was the clear colour. Metal compiles fast enough to hide it. Fix: wait for
 `Readback::texture` of the target (needs `COPY_SRC`) shows ≥1% non-background pixels,
 plus 2 grace frames; 600-frame timeout caches whatever is there with a warning.
 `on_thumbnail_readback` is a global observer gated on the rig's current readback entity.
+
+## egui glyphs rendered as boxes on every platform — October 2026
+
+egui rasterises its own embedded fonts, so this was never a platform problem. The
+proportional family falls back Ubuntu-Light → NotoEmoji → emoji-icon-font; none has the
+geometric-shapes block, and egui's replacement glyph is `◻` — literally the "empty square"
+the user saw. Hack (bundled, monospace family only) has the whole block, so `install_fonts`
+in `editor/ui/mod.rs` inserts "Hack" at index 1 of the proportional chain (ahead of the
+emoji fonts so ○/▣ come from one face too). `✦` is in *no* bundled font → lights use `◉`.
+Checking coverage: `Font::has_glyph` is a false negative for everything Hack owns once
+Hack is in the chain (it compares against the face that owns `◻`, now Hack) — use
+`Font::characters()` (the test does). Scratch tool: `/tmp/exrseam/src/bin/glyphs.rs`
+(ttf-parser) prints per-font coverage of a glyph list; fonts live in
+`~/.cargo/registry/src/*/epaint_default_fonts-0.36.2/fonts`.

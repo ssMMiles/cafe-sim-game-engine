@@ -22,6 +22,8 @@ pub struct EditorTabs<'a, 'w, 's> {
     was_looking: bool,
     texture: Option<egui::TextureId>,
     pixels_per_point: f32,
+    /// Status line shown as the viewport tab's title (built in `editor_ui`).
+    viewport_title: egui::WidgetText,
     panels: &'a mut Panels<'w, 's>,
 }
 
@@ -31,6 +33,7 @@ impl<'a, 'w, 's> EditorTabs<'a, 'w, 's> {
         was_looking: bool,
         texture: Option<egui::TextureId>,
         pixels_per_point: f32,
+        viewport_title: egui::WidgetText,
         panels: &'a mut Panels<'w, 's>,
     ) -> Self {
         Self {
@@ -38,6 +41,7 @@ impl<'a, 'w, 's> EditorTabs<'a, 'w, 's> {
             was_looking,
             texture,
             pixels_per_point,
+            viewport_title,
             panels,
         }
     }
@@ -160,7 +164,10 @@ impl TabViewer for EditorTabs<'_, '_, '_> {
     }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        tab.title().into()
+        match tab {
+            EditorTab::Viewport => self.viewport_title.clone(),
+            _ => tab.title().into(),
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {

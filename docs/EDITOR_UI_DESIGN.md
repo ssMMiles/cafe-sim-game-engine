@@ -511,7 +511,13 @@ picking are gated to the Select tool.
   while the viewport has focus; Shift+E / Shift+G keep working as toggles
   for muscle memory).
 - **Plugins**: loaded list with Remove, Add…, Reload all (Shift+R).
-- **Status bar**: FPS, camera position, current chunk, tool hint
+- **Status bar**: FPS, camera position, current chunk, tool hint.
+  2026-10-28: fps / camera / save / bake state moved into the viewport
+  tab's *title* (`TabViewer::title` returns a `LayoutJob`; egui_dock only
+  supplies a fallback colour, so warning colours survive) — the tab had no
+  better use for the word "Viewport". The bottom panel keeps key hints and
+  warnings. Same pass: Hack added to the proportional font chain, since
+  egui's defaults can't draw the geometric-shapes markers.
   (contents of today's `ControlsCache` rows for the active tool), dirty
   chunk count, lighting state, hover target name.
 

@@ -198,8 +198,65 @@ impl Panels<'_, '_> {
     }
 }
 
+/// Put Hack right behind the proportional face in the fallback chain.
+///
+/// egui's proportional family falls back Ubuntu-Light → NotoEmoji →
+/// emoji-icon-font, and none of those has the geometric-shapes block the
+/// panels use for markers (▸ ▾ ◆ ▤ ○ …): they rendered as the replacement
+/// box on every platform, since egui rasterises its own embedded fonts.
+/// Hack — already bundled, for the monospace family — has the whole block,
+/// so it goes in ahead of the emoji fonts and every such marker comes from
+/// one face. Emoji still fall through to NotoEmoji. See `glyph_is_in_hack`.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(1.min(family.len()), "Hack".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// The viewport tab's title: frame rate, camera, save and bake state. This
+/// is the "status bar" — the viewport has no other heading to spend on the
+/// word "Viewport".
+fn viewport_title(
+    panels: &Panels,
+    diagnostics: &DiagnosticsStore,
+    camera: Option<&Transform>,
+    style: &egui::Style,
+) -> egui::WidgetText {
+    let font = egui::TextStyle::Button.resolve(style);
+    let dim = style.visuals.weak_text_color();
+    let warn = egui::Color32::from_rgb(255, 200, 80);
+    let mut job = egui::text::LayoutJob::default();
+    let mut append = |text: String, color: egui::Color32| {
+        job.append(&text, 0.0, egui::TextFormat::simple(font.clone(), color));
+    };
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|d| d.smoothed())
+        .unwrap_or(0.0);
+    append(format!("{fps:>4.0} fps"), dim);
+    if let Some(t) = camera {
+        let p = t.translation;
+        append(format!("   cam {:.1} {:.1} {:.1}", p.x, p.y, p.z), dim);
+    }
+    let dirty = panels.registry.dirty_chunks.len();
+    if dirty > 0 {
+        append(format!("   {dirty} unsaved chunk(s) · Shift+S"), warn);
+    } else {
+        append("   all saved".to_owned(), dim);
+    }
+    if panels.lighting.stale {
+        append("   lighting out of date · Shift+B".to_owned(), warn);
+    } else {
+        append("   lighting baked".to_owned(), dim);
+    }
+    job.into()
+}
+
 pub(super) fn editor_ui(
     mut contexts: EguiContexts,
+    mut fonts_installed: Local<bool>,
     mut dock: ResMut<DockLayout>,
     mut viewport: ResMut<ViewportInput>,
     target: Option<Res<GameRenderTarget>>,
@@ -226,6 +283,9 @@ pub(super) fn editor_ui(
         return;
     };
     let ctx = ctx.clone();
+    if !std::mem::replace(&mut *fonts_installed, true) {
+        install_fonts(&ctx);
+    }
 
     // Start from a blank slate every pass; the viewport tab fills in what it
     // saw. `size_px` carries over so the render target isn't shrunk to 1×1
@@ -267,6 +327,8 @@ pub(super) fn editor_ui(
     // `Window` is a free-floating area, not a panel — it still takes a `&Context`.
     menu::dialogs(&ctx, &mut panels);
 
+    // Key hints, plus warnings when there are any. Frame rate, camera and
+    // save/bake state live in the viewport tab's title instead.
     egui::Panel::bottom("editor_status").show(&mut root, |ui| {
         ui.horizontal_wrapped(|ui| {
             for (keys, action) in controls.rows(panels.fly_lock.0, panels.brush.mode) {
@@ -275,65 +337,46 @@ pub(super) fn editor_ui(
                 ui.add_space(8.0);
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            let fps = diagnostics
-                .get(&FrameTimeDiagnosticsPlugin::FPS)
-                .and_then(|d| d.smoothed())
-                .unwrap_or(0.0);
-            ui.monospace(format!("{fps:>4.0} fps"));
-            if let Ok(t) = camera.single() {
-                let p = t.translation;
-                ui.monospace(format!("cam {:.1} {:.1} {:.1}", p.x, p.y, p.z));
-            }
-            ui.separator();
-            let dirty = panels.registry.dirty_chunks.len();
-            if dirty > 0 {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 200, 80),
-                    format!("{dirty} unsaved chunk(s) · Shift+S"),
-                );
-            } else {
-                ui.weak("all saved");
-            }
-            ui.separator();
-            if panels.lighting.stale {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 200, 80),
-                    "lighting out of date · Shift+B",
-                );
-            } else {
-                ui.weak("lighting baked");
-            }
-            // Instances whose prefab the library doesn't have: they spawned
-            // bare and heal when the prefab file reappears.
-            let mut missing: Vec<&str> = panels
-                .placed
-                .iter()
-                .filter_map(|(_, obj, _, _, _)| obj.prefab.as_ref())
-                .filter(|inst| panels.prefabs.get(&inst.name).is_none())
-                .map(|inst| inst.name.as_str())
-                .collect();
-            missing.sort_unstable();
-            missing.dedup();
-            if !missing.is_empty() {
-                ui.separator();
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 120, 120),
-                    format!("missing prefab(s): {}", missing.join(", ")),
-                );
-            }
-            if let Some(notice) = panels.history.notice() {
-                ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), notice);
-            }
-        });
+        // Instances whose prefab the library doesn't have: they spawned
+        // bare and heal when the prefab file reappears.
+        let mut missing: Vec<&str> = panels
+            .placed
+            .iter()
+            .filter_map(|(_, obj, _, _, _)| obj.prefab.as_ref())
+            .filter(|inst| panels.prefabs.get(&inst.name).is_none())
+            .map(|inst| inst.name.as_str())
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        let notice = panels.history.notice();
+        if !missing.is_empty() || notice.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                let red = egui::Color32::from_rgb(255, 120, 120);
+                if !missing.is_empty() {
+                    ui.colored_label(red, format!("missing prefab(s): {}", missing.join(", ")));
+                }
+                if let Some(notice) = notice {
+                    if !missing.is_empty() {
+                        ui.separator();
+                    }
+                    ui.colored_label(red, notice);
+                }
+            });
+        }
     });
 
+    let title = viewport_title(
+        &panels,
+        &diagnostics,
+        camera.single().ok(),
+        root.style().as_ref(),
+    );
     let mut tabs = EditorTabs::new(
         &mut current,
         previous.look_active,
         texture,
         ctx.pixels_per_point(),
+        title,
         &mut panels,
     );
 
@@ -354,4 +397,42 @@ pub(super) fn editor_ui(
         || ctx.egui_wants_keyboard_input();
 
     *viewport = current;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every marker glyph the panels draw must be owned by a face in the
+    /// proportional fallback chain. This is the regression that had kind
+    /// icons and the outliner's collapse arrows rendering as squares on every
+    /// platform — the square *is* egui's replacement glyph `◻` — and
+    /// `install_fonts` is the fix.
+    ///
+    /// Checked through the family's character map rather than
+    /// `Font::has_glyph`: that compares against the face that owns `◻`, which
+    /// with Hack in the chain is Hack itself, so it misreports every glyph
+    /// Hack supplies.
+    #[test]
+    fn editor_glyphs_are_in_the_proportional_font_chain() {
+        use egui::epaint::text::{Fonts, TextOptions};
+
+        let mut fonts = egui::FontDefinitions::default();
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            family.insert(1.min(family.len()), "Hack".to_owned());
+        }
+        let mut fonts = Fonts::new(TextOptions::default(), fonts);
+        let mut font = fonts.fonts.font(&egui::FontFamily::Proportional);
+        let owned = font.characters();
+
+        // Markers used across the panels (outliner, assets, inspector,
+        // history, status), plus the punctuation the labels lean on.
+        let used = "▸▾◆▤▦○▣◉♪▶⤴🔗·×—…°";
+        let missing: String = used.chars().filter(|c| !owned.contains_key(c)).collect();
+        assert!(missing.is_empty(), "no proportional face has: {missing}");
+
+        // The one that started this: ✦ is in none of the bundled fonts,
+        // which is why the light marker became ◉.
+        assert!(!owned.contains_key(&'✦'));
+    }
 }

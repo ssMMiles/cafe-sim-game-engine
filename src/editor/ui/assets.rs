@@ -207,7 +207,7 @@ fn glyph(entry: &AssetEntry) -> &'static str {
         (AssetKind::Prefab, _) => "◆",
         (AssetKind::Texture, _) => "▦",
         (AssetKind::Audio, _) => "♪",
-        (_, Some(k)) if k.is_light() => "✦",
+        (_, Some(k)) if k.is_light() => "◉",
         (_, Some(k)) if k.is_group() => "▤",
         (AssetKind::Builtin, _) => "○",
         _ => "▣",
