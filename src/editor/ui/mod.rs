@@ -29,7 +29,7 @@ use engine_api::{ScriptBindings, ScriptRegistry};
 use super::EditorMode;
 use super::actions::EditorAction;
 use super::camera::{EditorCameraSettings, FlyLock};
-use super::catalog::MeshCatalog;
+use super::catalog::AssetCatalog;
 use super::controls::ActiveControls;
 use super::edits::{LightingState, PlacedEdited, RespawnPlaced, ScriptEdit};
 use super::grab::GrabbedEntity;
@@ -153,7 +153,7 @@ pub struct Panels<'w, 's> {
     pub active: Option<Res<'w, ActiveProject>>,
     pub world_config: Option<Res<'w, WorldConfig>>,
     pub terrain_world: Option<ResMut<'w, TerrainWorld>>,
-    pub catalog: Res<'w, MeshCatalog>,
+    pub catalog: Res<'w, AssetCatalog>,
     pub config: ResMut<'w, PlacementConfig>,
     pub tool: Res<'w, State<EditorTool>>,
     pub settings: ResMut<'w, UserSettings>,

@@ -47,8 +47,8 @@ use camera::{
     release_fly_lock, restore_render_target, sync_look_cursor, sync_render_target,
 };
 use catalog::{
-    MeshCatalog, MeshManifestAsset, MeshManifestLoader, populate_mesh_catalog,
-    request_mesh_manifest,
+    AssetCatalog, AssetManifestAsset, AssetManifestLoader, populate_asset_catalog,
+    request_asset_manifest,
 };
 use edits::{
     LightingState, PlacedEdited, RespawnPlaced, ScriptEdit, apply_script_edits,
@@ -259,11 +259,11 @@ impl Plugin for EditorPlugin {
         );
 
         // ── Catalog ──────────────────────────────────────────────────────────
-        app.init_asset::<MeshManifestAsset>();
-        app.init_asset_loader::<MeshManifestLoader>();
-        app.init_resource::<MeshCatalog>();
-        app.add_systems(Startup, request_mesh_manifest);
-        app.add_systems(Update, populate_mesh_catalog.in_set(EditorSet::InGame));
+        app.init_asset::<AssetManifestAsset>();
+        app.init_asset_loader::<AssetManifestLoader>();
+        app.init_resource::<AssetCatalog>();
+        app.add_systems(Startup, request_asset_manifest);
+        app.add_systems(Update, populate_asset_catalog.in_set(EditorSet::InGame));
 
         // ── Terrain tool ─────────────────────────────────────────────────────
         app.init_resource::<TerrainBrushHit>();

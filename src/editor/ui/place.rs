@@ -36,11 +36,21 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     let selected = panels.catalog.selected_index(&panels.config);
     let mut pick: Option<usize> = None;
     ui.horizontal_wrapped(|ui| {
-        for (i, entry) in panels.catalog.entries.iter().enumerate() {
+        for (i, entry) in panels
+            .catalog
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.is_placeable() && e.prefab.is_none())
+        {
             let caption = if entry.preset_script.is_some() {
                 format!("{}\npreset", entry.name)
-            } else if !entry.kind.is_mesh() {
-                format!("{}\n{}", entry.name, entry.kind.label())
+            } else if entry.kind == crate::editor::catalog::AssetKind::Builtin {
+                format!(
+                    "{}\n{}",
+                    entry.name,
+                    entry.placed.as_ref().map(|k| k.label()).unwrap_or("")
+                )
             } else {
                 entry.name.clone()
             };

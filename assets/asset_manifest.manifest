@@ -1,0 +1,8 @@
+mesh|rock|meshes/rock/bigrock.gltf#Scene0
+mesh|table|meshes/table/result.gltf#Scene0
+mesh|table2|meshes/table2/table.gltf#Scene0
+mesh|tree1|meshes/tree1/nature.gltf#Scene0
+mesh|tree2|meshes/tree2/nature.gltf#Scene0
+mesh|tree3|meshes/tree3/nature.gltf#Scene0
+mesh|tree4|meshes/tree4/nature.gltf#Scene0
+texture|terrain|textures/terrain.png
