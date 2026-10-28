@@ -133,6 +133,22 @@ pub struct BakeConfig {
     pub terrain_albedo: f32,
     /// Number of light bounces to simulate per primary ray (1 = single bounce).
     pub bounce_count: u32,
+    /// How many times coarser than the lightmap the **CPU** terrain bake
+    /// samples ambient occlusion and indirect bounce, bilinearly
+    /// interpolating between samples. 1 disables the optimisation.
+    ///
+    /// Those two terms are ~95% of the CPU bake's ray cost and vary over
+    /// metres (AO integrates a 20 m hemisphere, bounce an 80 m one), while
+    /// `blur_radius` already smears the finished lightmap over ~25 cm at the
+    /// default resolution — so per-texel AO detail is computed and then
+    /// thrown away. 4 cuts their cost 16× for a difference the blur hides.
+    ///
+    /// The sun and local-light shadows are unaffected and stay per-texel:
+    /// they are the sharp terms the toon bands key off.
+    ///
+    /// Only the CPU path honours this, so native GPU bakes and CPU bakes of
+    /// the same world differ very slightly in AO. Set to 1 for parity.
+    pub cpu_lowfreq_downsample: u32,
     /// Box blur radius applied to the finished lightmap (in texels) before saving.
     /// Eliminates per-texel Monte Carlo variance so the toon quantizer sees smooth
     /// gradients rather than noisy values that produce "lines of light" at band edges.
@@ -182,6 +198,7 @@ impl Default for BakeConfig {
             bounce_strength: 1.0,
             terrain_albedo: 0.5,
             bounce_count: 1,
+            cpu_lowfreq_downsample: 4,
             blur_radius: 4,
             dispatch_strip_rows: 64,
             bake_radius: Some(1),

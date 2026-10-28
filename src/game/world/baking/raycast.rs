@@ -28,6 +28,10 @@ pub struct BakeHeightCache {
     tile_min_z: i32,
     stride: usize,
     depth: usize,
+    /// Tallest tile in the cache. A ray sample above this cannot be occluded
+    /// by terrain, which lets every upward march stop early — see
+    /// [`Self::above_terrain`].
+    max_height: f32,
     pub tile_size: (f32, f32),
 }
 
@@ -51,11 +55,14 @@ impl BakeHeightCache {
         let depth = (tile_max_z - tile_min_z + 1) as usize;
 
         let mut data = vec![0.0f32; stride * depth];
+        let mut max_height = f32::NEG_INFINITY;
         for tz in 0..depth {
             for tx in 0..stride {
                 let gx = tile_min_x + tx as i32;
                 let gz = tile_min_z + tz as i32;
-                data[tz * stride + tx] = heightmap.get_tile(gx, gz);
+                let h = heightmap.get_tile(gx, gz);
+                data[tz * stride + tx] = h;
+                max_height = max_height.max(h);
             }
         }
 
@@ -65,8 +72,23 @@ impl BakeHeightCache {
             tile_min_z,
             stride,
             depth,
+            max_height,
             tile_size,
         }
+    }
+
+    /// True if `y` is above every tile in the cache, so no terrain sample at
+    /// this height or higher can occlude anything.
+    ///
+    /// Marches use this to bail out instead of stepping to their full length:
+    /// for a ray with a non-negative Y component each successive sample is
+    /// higher than the last, so once one clears the terrain they all do. This
+    /// is **exact**, not an approximation — it skips only samples that were
+    /// guaranteed to miss. AO benefits most, its hemisphere rays being aimed
+    /// up by construction.
+    #[inline]
+    pub fn above_terrain(&self, y: f32) -> bool {
+        y > self.max_height
     }
 
     // ── Accessors used by the GPU baking path ────────────────────────────────
@@ -174,10 +196,16 @@ pub fn cast_shadow_ray(
     steps: u32,
 ) -> f32 {
     let step_size = max_dist / steps as f32;
+    let climbing = sun_dir.y >= 0.0;
 
     for i in 1..=steps {
         let t = i as f32 * step_size;
         let sample_pos = origin + sun_dir * t;
+        // Exact early-out: once a climbing ray clears the tallest tile, no
+        // later sample can be occluded by terrain either.
+        if climbing && cache.above_terrain(sample_pos.y) {
+            break;
+        }
         let terrain_h = cache.sample_height(sample_pos.x, sample_pos.z);
         if terrain_h > sample_pos.y {
             return 0.0;
@@ -213,8 +241,12 @@ pub fn cast_shadow_ray_segment(
 
     // Skip the final sample: it sits on the light itself, where floating
     // point slop against terrain under the light causes false occlusion.
+    let climbing = dir.y >= 0.0;
     for i in 1..steps {
         let sample_pos = origin + dir * (i as f32 * step_size);
+        if climbing && cache.above_terrain(sample_pos.y) {
+            break;
+        }
         if cache.sample_height(sample_pos.x, sample_pos.z) > sample_pos.y {
             return 0.0;
         }
@@ -266,8 +298,15 @@ pub fn compute_ao(
 
         let mut occluded = bvh.occluded(mesh_origin, world_dir, radius);
         if !occluded {
+            // Hemisphere rays point up by construction, so this early-out
+            // fires often: on gentle terrain most rays clear the tallest
+            // tile within a few steps of their 32.
+            let climbing = world_dir.y >= 0.0;
             for s in 1..=steps {
                 let sample_pos = origin + world_dir * (s as f32 * step_size);
+                if climbing && cache.above_terrain(sample_pos.y) {
+                    break;
+                }
                 let terrain_h = cache.sample_height(sample_pos.x, sample_pos.z);
                 if terrain_h > sample_pos.y {
                     occluded = true;
@@ -330,8 +369,10 @@ pub fn compute_indirect_bounce(
     let step_size = shadow_max_dist / steps as f32;
     let mut accum = 0.0_f32;
 
+    // Loop-invariant: the frame depends only on the surface normal.
+    let (tangent, bitangent) = build_tangent_frame(normal);
+
     for i in 0..n_rays {
-        let (tangent, bitangent) = build_tangent_frame(normal);
         // Bug fix: for cosine-weighted sampling the cos(θ) term cancels with the
         // PDF, so we do not need cos_w in the accumulator. The `_cos_w` variable
         // is retained only to gate the early-exit check.
@@ -349,8 +390,12 @@ pub fn compute_indirect_bounce(
 
         for b in 0..bounce_count {
             let mut hit = false;
+            let climbing = cur_dir.y >= 0.0;
             for s in 1..=steps {
                 let pos = cur_pos + cur_dir * (s as f32 * step_size);
+                if climbing && cache.above_terrain(pos.y) {
+                    break;
+                }
                 let h = cache.sample_height(pos.x, pos.z);
                 // Bug fix: strict > to avoid self-intersection on flat terrain.
                 if h > pos.y {
@@ -479,4 +524,145 @@ fn hemisphere_dir_for_seed(
     let dir = (tangent * local.x + normal * local.y + bitangent * local.z).normalize();
     let cos_w = dir.dot(normal).max(0.0);
     (dir, cos_w)
+}
+
+// ============================================================================
+// Cost measurement
+// ============================================================================
+
+/// Per-texel ray cost of the CPU terrain bake, measured rather than guessed.
+///
+/// Run with:
+/// `cargo test --release terrain_bake_cost_breakdown -- --ignored --nocapture`
+///
+/// This exists because the object-bake optimisation found the bottleneck was
+/// nowhere near where it was assumed to be (see memory.md). Numbers here are
+/// per *texel*; multiply by `terrain_resolution²` (1024² ≈ 1.05M) for one
+/// chunk, and again by the chunk count in the bake region.
+#[cfg(test)]
+mod cost {
+    use super::*;
+    use crate::game::world::baking::bvh::TriangleBvh;
+    use crate::game::world::terrain::HeightmapData;
+    use std::time::Instant;
+
+    /// Rolling-hill terrain over the cache region, plus a few scenery
+    /// triangles so BVH traversal is exercised rather than trivially empty.
+    fn scene() -> (BakeHeightCache, TriangleBvh) {
+        let mut hm = HeightmapData::new((0.25, 0.25));
+        // 63.75 m chunk + 80 m ray reach each side => ~224 m => ~900 tiles.
+        for tx in -400..600 {
+            for tz in -400..600 {
+                let x = tx as f32 * 0.25;
+                let z = tz as f32 * 0.25;
+                hm.set_tile(tx, tz, 3.0 * (x * 0.05).sin() * (z * 0.05).cos());
+            }
+        }
+        let cache = BakeHeightCache::extract(&hm, -80.0, -80.0, 143.75, 143.75);
+
+        // A handful of boxes scattered over the chunk, 12 triangles each.
+        let mut tris = Vec::new();
+        for i in 0..24 {
+            let cx = (i % 6) as f32 * 10.0 + 2.0;
+            let cz = (i / 6) as f32 * 10.0 + 2.0;
+            let base = Vec3::new(cx, 4.0, cz);
+            for k in 0..12 {
+                let o = k as f32 * 0.3;
+                tris.push([
+                    base + Vec3::new(o, 0.0, 0.0),
+                    base + Vec3::new(o + 1.0, 2.0, 0.0),
+                    base + Vec3::new(o, 2.0, 1.0),
+                ]);
+            }
+        }
+        (cache, TriangleBvh::build(tris))
+    }
+
+    fn sample_points(n: usize, cache: &BakeHeightCache) -> Vec<(Vec3, Vec3, Vec3)> {
+        (0..n)
+            .map(|i| {
+                let u = (i % 97) as f32 / 97.0;
+                let v = (i / 97) as f32 / (n as f32 / 97.0).max(1.0);
+                let wx = u * 63.75;
+                let wz = v * 63.75;
+                let surface = Vec3::new(wx, cache.sample_height(wx, wz), wz);
+                let (normal, _) = cache.sample_normal(wx, wz);
+                (surface + Vec3::Y * 0.5, surface + normal * 0.02, normal)
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "timing benchmark, not a correctness check"]
+    fn terrain_bake_cost_breakdown() {
+        const N: usize = 20_000;
+        let (cache, bvh) = scene();
+        let pts = sample_points(N, &cache);
+        let sun_dir = Vec3::new(0.4, 0.8, 0.3).normalize();
+
+        // Defaults from BakeConfig.
+        let (ao_radius, shadow_steps, ao_rays, ao_steps, bounce_rays) =
+            (20.0_f32, 64_u32, 16_u32, 32_u32, 8_u32);
+        let reach = ao_radius * 4.0;
+
+        let t = Instant::now();
+        let mut sink = 0.0_f32;
+        for &(o, mo, _) in &pts {
+            sink += cast_shadow_ray(o, mo, sun_dir, &cache, &bvh, reach, shadow_steps);
+        }
+        let sun = t.elapsed();
+
+        let t = Instant::now();
+        for &(o, mo, n) in &pts {
+            sink += compute_ao(o, mo, n, &cache, &bvh, ao_radius, ao_rays, ao_steps);
+        }
+        let ao = t.elapsed();
+
+        // AO against an empty BVH isolates terrain marching from BVH traversal.
+        let empty = TriangleBvh::build(Vec::new());
+        let t = Instant::now();
+        for &(o, mo, n) in &pts {
+            sink += compute_ao(o, mo, n, &cache, &empty, ao_radius, ao_rays, ao_steps);
+        }
+        let ao_no_bvh = t.elapsed();
+
+        let t = Instant::now();
+        for (i, &(o, mo, n)) in pts.iter().enumerate() {
+            sink += compute_indirect_bounce(
+                o, mo, n, &cache, &bvh, sun_dir, reach, bounce_rays, shadow_steps, 0.5, 1,
+                i as u32,
+            );
+        }
+        let bounce = t.elapsed();
+
+        let per = |d: std::time::Duration| d.as_secs_f64() * 1e9 / N as f64;
+        let total = per(sun) + per(ao) + per(bounce);
+        // 1024² texels per chunk.
+        let chunk_ms = total * 1024.0 * 1024.0 / 1e6;
+        println!("\n--- CPU terrain bake, per texel (sink={sink:.1}) ---");
+        println!("  sun shadow : {:8.0} ns  ({:5.1}%)", per(sun), 100.0 * per(sun) / total);
+        println!("  ao         : {:8.0} ns  ({:5.1}%)", per(ao), 100.0 * per(ao) / total);
+        println!("  bounce     : {:8.0} ns  ({:5.1}%)", per(bounce), 100.0 * per(bounce) / total);
+        println!(
+            "    (ao without any BVH: {:.0} ns => BVH traversal is {:.0} ns of ao)",
+            per(ao_no_bvh),
+            per(ao) - per(ao_no_bvh)
+        );
+        println!("  total      : {total:8.0} ns");
+        println!("  => {chunk_ms:.0} ms per 1024² chunk, single-threaded");
+        println!("  => {:.1} s for a 3x3 bake region, single-threaded", chunk_ms * 9.0 / 1000.0);
+
+        // What the split-pass bake costs: sun every texel, ao+bounce on a
+        // grid `d` times coarser (so 1/d² as many of them).
+        for d in [2.0_f64, 4.0, 8.0] {
+            let projected = per(sun) + (per(ao) + per(bounce)) / (d * d);
+            let ms = projected * 1024.0 * 1024.0 / 1e6;
+            println!(
+                "  downsample {d:.0}: {projected:6.0} ns/texel => {ms:5.0} ms/chunk, \
+                 {:.1} s for 3x3 ({:.1}x faster)",
+                ms * 9.0 / 1000.0,
+                total / projected
+            );
+        }
+    }
 }

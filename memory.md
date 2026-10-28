@@ -458,3 +458,73 @@ stubs for the bevy declarations we import, drifts against bevy and would give
 false confidence. Considered and rejected 2026-10-27 — revisit if bevy ever
 exposes composed WGSL (or capture real composed output via `WGPU_TRACE` from a
 native run and check that in as fixtures).
+
+## Lightmaps on WASM: OPFS storage + CPU bake performance — October 2026
+
+### OPFS
+
+Lightmaps were the last level data still going through `std::fs`, so on the web
+every bake write failed silently and every read was `#[cfg]`'d out to `None`.
+Fixed by splitting the EXR *codec* from the *transport*:
+`LightmapBuffer::{to_exr_bytes, from_exr_bytes}` are shared, `save_exr`/`load_exr`
+are thin native wrappers, and `store_lightmap()` picks the backend (sync write
+natively — still inside the bake task so encoding stays off the main thread — or
+a `spawn_local` OPFS save on wasm).
+
+Addressing needs two namespaces because OPFS has no world *directory*:
+`terrain_lightmap_key` / `object_lightmap_key` mirror the path builders under the
+`worlds/{id}` prefix the chunk save/load already used, and `*_location()` picks
+one so call sites need no `#[cfg]`. `opfs_keys_match_the_native_file_names` pins
+both to the same file name — a world baked on one platform must stay readable on
+the other.
+
+Reads follow the streamer's existing shape: chunk lightmap *bytes* land in a
+third pending slot next to terrain and objects, then decode inside the compute
+task exactly as the native path decodes the file. Object lightmaps needed a
+fetch/apply split (OPFS is async); the material-claiming rules live in one shared
+`apply_lightmap_sources` so the platforms can't drift.
+
+Still native-only: the inspector's "has a baked lightmap" hint — a synchronous
+`.exists()` with no cheap async equivalent.
+
+### Bake performance
+
+**Measured first** (`cargo test --release terrain_bake_cost_breakdown -- --ignored
+--nocapture`, in `raycast.rs`). Per texel, before: sun 329 ns, **AO 3347 ns**,
+**bounce 2829 ns** → 6.5 µs/texel → 6.8 s per 1024² chunk → **61 s for a 3×3
+region single-threaded**. The sharp term everyone assumes is expensive, the sun
+shadow, was 5%.
+
+Two fixes, in order of preference:
+
+1. **Exact** — `BakeHeightCache::max_height` + `above_terrain()`. A ray with
+   `dir.y >= 0` whose sample clears the tallest tile can never be occluded by
+   terrain again, so the march breaks instead of running all 32/64 steps. AO
+   benefits most (hemisphere rays point up). 6505 → 1917 ns, **3.4×, zero
+   quality change**. Applied to sun, AO, bounce and local-light marches.
+2. **Approximate** — `BakeConfig::cpu_lowfreq_downsample` (default 4). AO and
+   bounce are evaluated on a grid 4× coarser and bilinearly interpolated; sun and
+   local-light shadows stay per-texel. Justification: `blur_radius: 4` at 16
+   texels/m already smears the finished lightmap over ~25 cm, so per-texel AO
+   detail was being computed and then destroyed. 12.3× on top → **39× overall**,
+   3×3 region ≈ 1.6 s.
+
+Set `cpu_lowfreq_downsample: 1` for texel-exact parity with the GPU path, which
+does neither (it is already fast; the lighting *model* is unchanged either way —
+only the sampling density of two low-frequency terms differs).
+
+After both, AO is still 80% of what remains, split 1088 ns terrain marching /
+538 ns BVH traversal. A sphere-prune ("is any triangle within `ao_radius`?")
+would cut the BVH half, but post-downsample it is ~34 ns/texel — not worth it.
+
+### The wasm elephant
+
+`rayon` falls back to a **single-threaded** pool on `wasm32-unknown-unknown`
+(rayon-core documents this: `std::thread` returns `Unsupported`, and rather than
+panic it configures a fallback), so every `into_par_iter` in the bakers is serial
+on the web. Worse, bevy's wasm `TaskPool::spawn` is `wasm_bindgen_futures::spawn_local`
+(`single_threaded_task_pool.rs`), so `AsyncComputeTaskPool` does **not** take the
+bake off the main thread — the tab is frozen for its whole duration. The 39×
+makes that ~1.6 s instead of ~61 s, but it is still a freeze. Fixing it properly
+needs `wasm-bindgen-rayon` (cross-origin isolation headers) or a bake that yields
+between chunks. Not attempted.
