@@ -15,10 +15,9 @@
 //! - `terrain.rs`     — terrain chunk lightmap bake logic (CPU path)
 //! - `uv_unwrap.rs`   — non-overlapping per-triangle lightmap UV2 + `LightmapUvCache`
 //! - `objects.rs`     — placed mesh lightmap bake logic (UV rasterization)
-//! - `gpu.rs`         — GPU compute path for terrain baking (non-wasm only)
+//! - `gpu.rs`         — GPU compute path for terrain baking (any adapter with compute)
 
 pub mod bvh;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod gpu;
 pub mod lightmap;
 pub mod object_lightmaps;
@@ -117,8 +116,10 @@ pub struct BakeConfig {
     /// (usually much shorter) distance to the light — see
     /// [`BakeConfig::light_shadow_steps`].
     pub max_light_shadow_steps: u32,
-    /// Use the GPU compute path for terrain baking (non-wasm only).
-    /// When `false` (or on wasm), falls back to the CPU rayon path.
+    /// Prefer the GPU compute path for terrain baking. Honoured on any
+    /// adapter that reports compute support, including WebGPU in the browser;
+    /// falls back to the CPU rayon path when it doesn't (WebGL2) or when this
+    /// is `false`. See `gpu::GpuBakeSupported`.
     pub use_gpu: bool,
     /// How many terrain chunks to bake in parallel on the GPU.
     /// Higher values increase throughput but use more VRAM
@@ -319,7 +320,6 @@ pub struct BakedSun;
 ///
 /// `Some(..)` means a GPU terrain bake should be dispatched this frame.
 /// `None` means no bake was triggered this frame.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource, Default)]
 struct GpuBakeTrigger(Option<(BakeLighting, BakeRegion, Arc<TriangleBvh>)>);
 
@@ -336,11 +336,8 @@ impl Plugin for BakingPlugin {
         app.init_resource::<ObjectBakeTask>();
         app.add_message::<BakeMessage>();
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            app.init_resource::<GpuBakeTrigger>();
-            gpu::add_gpu_baking_to_app(app);
-        }
+        app.init_resource::<GpuBakeTrigger>();
+        gpu::add_gpu_baking_to_app(app);
 
         use crate::game::world::WorldSet;
         app.add_systems(Update, run_bake.in_set(WorldSet::InGame));
@@ -380,7 +377,6 @@ impl Plugin for BakingPlugin {
         }
 
         // GPU dispatch runs after run_bake has written GpuBakeTrigger.
-        #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,
             dispatch_gpu_terrain_bake
@@ -396,9 +392,9 @@ impl Plugin for BakingPlugin {
 
 /// Respond to `BakeMessage` and run CPU bake passes.
 ///
-/// Handles placed-object baking (always CPU) and terrain baking when `use_gpu`
-/// is false or on wasm. On native with `use_gpu` enabled, writes `GpuBakeTrigger`
-/// so `dispatch_gpu_terrain_bake` can do the GPU work in the same frame.
+/// Handles placed-object baking (always CPU) and terrain baking when the GPU
+/// path is unavailable or switched off. Otherwise writes `GpuBakeTrigger` so
+/// `dispatch_gpu_terrain_bake` can do the GPU work in the same frame.
 fn run_bake(
     mut bake_messages: MessageReader<BakeMessage>,
     mut commands: Commands,
@@ -414,7 +410,8 @@ fn run_bake(
     mut object_bake: ResMut<ObjectBakeTask>,
     scene: BakeSceneQueries,
     baked_sun_query: Query<&GlobalTransform, With<BakedSun>>,
-    #[cfg(not(target_arch = "wasm32"))] mut gpu_trigger: ResMut<GpuBakeTrigger>,
+    mut gpu_trigger: ResMut<GpuBakeTrigger>,
+    gpu_supported: Res<gpu::GpuBakeSupported>,
 ) {
     if bake_messages.read().count() == 0 {
         return;
@@ -478,8 +475,10 @@ fn run_bake(
     }
 
     // ── Phase 1: Terrain ────────────────────────────────────────────────────
-    #[cfg(not(target_arch = "wasm32"))]
-    if config.use_gpu {
+    // `use_gpu` is the preference; `GpuBakeSupported` is whether the adapter
+    // can actually honour it. On the web that is the difference between a
+    // WebGPU context and a WebGL2 fallback, and it is only known at runtime.
+    if config.use_gpu && gpu_supported.get() {
         // Signal the GPU dispatch system to handle terrain baking this frame.
         // Cloned: the object bake below shades with the same lighting, and
         // the GPU dispatch runs in a later system.
@@ -588,8 +587,7 @@ fn cancel_object_bake(mut object_bake: ResMut<ObjectBakeTask>) {
 
 /// Dispatches GPU terrain bake jobs when `GpuBakeTrigger` is set.
 ///
-/// Runs immediately after `run_bake` on non-wasm targets.
-#[cfg(not(target_arch = "wasm32"))]
+/// Runs immediately after `run_bake`.
 fn dispatch_gpu_terrain_bake(
     mut gpu_trigger: ResMut<GpuBakeTrigger>,
     config: Res<BakeConfig>,

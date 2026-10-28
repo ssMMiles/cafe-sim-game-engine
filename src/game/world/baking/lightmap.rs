@@ -588,17 +588,7 @@ impl LightmapBuffer {
         Ok(buf)
     }
 
-    /// Write as OpenEXR to a file. Creates parent directories.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn save_exr(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, self.to_exr_bytes()?)?;
-        Ok(())
-    }
-
-    /// Read a square EXR written by [`Self::save_exr`].
+    /// Read a square EXR written by [`store_lightmap`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_exr(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         Self::from_exr_bytes(&std::fs::read(path)?)
@@ -780,7 +770,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("lm.v2.exr");
         let buf = gradient(8);
-        buf.save_exr(&path).unwrap();
+        store_lightmap(&path, &buf).unwrap();
         let back = LightmapBuffer::load_exr(&path).unwrap();
         assert_eq!(back.res, 8);
         for (a, b) in buf.texels.iter().zip(&back.texels) {
@@ -1099,7 +1089,7 @@ mod tests {
 
     /// The wasm path never touches the filesystem: it encodes to bytes, ships
     /// them to OPFS, and decodes whatever comes back. That codec has to be
-    /// the same one `save_exr`/`load_exr` use, so a world stays readable
+    /// the same one `store_lightmap`/`load_exr` use, so a world stays readable
     /// across platforms.
     #[test]
     fn exr_byte_round_trip_matches_the_file_round_trip() {
@@ -1114,7 +1104,7 @@ mod tests {
         // And the bytes are exactly what the file path writes.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lm.exr");
-        buf.save_exr(&path).unwrap();
+        store_lightmap(&path, &buf).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 

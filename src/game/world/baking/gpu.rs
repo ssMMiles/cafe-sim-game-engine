@@ -1,7 +1,15 @@
 //! GPU compute path for terrain lightmap baking.
 //!
 //! Triggered by `run_bake` in `mod.rs` when `BakeConfig::use_gpu` is `true`
-//! (non-wasm only). The CPU path in `terrain.rs` remains available as fallback.
+//! *and* the adapter reports compute support ([`GpuBakeSupported`]). The CPU
+//! path in `terrain.rs` remains the fallback.
+//!
+//! This runs on wasm too: WebGPU has compute shaders, and the bake fits
+//! comfortably inside its limits (5 storage buffers of the 8 guaranteed, a
+//! 16×16 workgroup at the 256-invocation cap, an 8 MB output buffer against a
+//! 128 MiB binding cap). That matters more on the web than anywhere else —
+//! there rayon is a single-threaded stub and bevy's task pool is `spawn_local`
+//! on the main thread, so the CPU bake freezes the tab for its whole duration.
 //!
 //! ## Pipeline
 //!
@@ -32,16 +40,22 @@ use bevy::{
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
             BufferUsages, CachedComputePipelineId, ComputePassDescriptor,
-            ComputePipelineDescriptor, PipelineCache, ShaderStages, binding_types,
+            ComputePipelineDescriptor, DownlevelFlags, PipelineCache, ShaderStages, binding_types,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems},
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
-use std::{path::PathBuf, sync::Arc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use super::bvh::{BvhNode, BvhTriangle, TriangleBvh};
-use super::lightmap::{BakeLighting, BakedLight, LightmapBuffer, terrain_lightmap_path};
+use super::lightmap::{
+    BakeLighting, BakedLight, LightmapBuffer, LightmapLocation, store_lightmap,
+    terrain_lightmap_location,
+};
 use super::{BakeConfig, BakeRegion};
 use crate::game::world::{
     objects::CHUNK_WORLD_SIZE,
@@ -53,6 +67,55 @@ use crate::game::world::{
 };
 
 const SHADER_PATH: &str = "shaders/lightmap_bake.wgsl";
+
+/// Whether the live adapter can actually run the compute bake.
+///
+/// Deliberately a runtime flag rather than a `#[cfg]`: one wasm binary gets
+/// compute when the browser gives it WebGPU and *not* when it falls back to
+/// WebGL2, which is only knowable once the adapter exists. The adapter lives
+/// in the render app, so the bool is shared with the main world — where
+/// `run_bake` reads it — through an `Arc`.
+///
+/// Defaults to `false`, so a bake triggered before `RenderStartup` has run
+/// takes the CPU path rather than dispatching into a pipeline that may not
+/// exist.
+#[derive(Resource, Clone)]
+pub struct GpuBakeSupported(Arc<AtomicBool>);
+
+impl GpuBakeSupported {
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Record whether this adapter can run the compute bake.
+///
+/// Both halves of this are bevy's own test (`batching::gpu_preprocessing`):
+/// the adapter has to advertise compute, *and* the device limits must not be
+/// the WebGL2 downlevel set, which simulates a lack of compute by zeroing
+/// every `max_compute_*` limit while the downlevel flag still reads true.
+fn detect_compute_support(
+    adapter: Res<bevy::render::renderer::RenderAdapter>,
+    device: Res<RenderDevice>,
+    supported: Res<GpuBakeSupported>,
+) {
+    let downlevel = adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(DownlevelFlags::COMPUTE_SHADERS);
+    let limits_ok = device.limits().max_compute_workgroup_storage_size != 0;
+
+    let ok = downlevel && limits_ok;
+    supported.0.store(ok, Ordering::Relaxed);
+    if ok {
+        info!("GPU lightmap bake enabled (adapter supports compute shaders)");
+    } else {
+        warn!(
+            "No compute shader support (downlevel={downlevel}, limits_ok={limits_ok}); \
+             lightmap baking falls back to the CPU path"
+        );
+    }
+}
 
 // ============================================================================
 // CPU-side uniform struct (must match BakeUniforms in the WGSL exactly)
@@ -142,8 +205,9 @@ pub struct GpuBakeChunkJob {
     pub out_handle: Handle<ShaderBuffer>,
     /// Material to swap the lightmap into once the readback completes.
     pub material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
-    /// Absolute path to the world directory, used when saving the PNG.
-    pub world_path: PathBuf,
+    /// Where the finished EXR goes — a file path natively, an OPFS key on
+    /// wasm. Resolved in the main world, where `TerrainWorld` lives.
+    pub dest: LightmapLocation,
 }
 
 /// Metadata stored on the readback entity so the observer knows what to do.
@@ -153,7 +217,7 @@ pub struct BakeReadbackTag {
     pub chunk_y: i32,
     pub resolution: u32,
     pub material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
-    pub world_path: PathBuf,
+    pub dest: LightmapLocation,
 }
 
 /// One terrain chunk waiting to be dispatched (no GPU buffer allocated yet).
@@ -168,7 +232,7 @@ struct GpuBakeQueueEntry {
     /// Placed point/spot lights, uploaded verbatim.
     lights: Vec<BakedLight>,
     material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
-    world_path: PathBuf,
+    dest: LightmapLocation,
 }
 
 /// Serial dispatch queue — holds all remaining chunks that have not yet had a
@@ -281,6 +345,8 @@ fn bake_compute_pass(
 /// Register all render-app resources and systems for the GPU baking path.
 /// Called from `BakingPlugin::build` only on non-wasm targets.
 pub fn add_gpu_baking_to_app(app: &mut App) {
+    let supported = GpuBakeSupported(Arc::new(AtomicBool::new(false)));
+    app.insert_resource(supported.clone());
     app.init_resource::<GpuBakePending>();
     app.init_resource::<GpuBakeProcessed>();
     app.init_resource::<GpuBakeQueue>();
@@ -297,9 +363,10 @@ pub fn add_gpu_baking_to_app(app: &mut App) {
     };
 
     render_app
+        .insert_resource(supported)
         .init_resource::<GpuBakeExtracted>()
         .init_resource::<GpuBakeInFlight>()
-        .add_systems(RenderStartup, init_gpu_bake_pipeline)
+        .add_systems(RenderStartup, (init_gpu_bake_pipeline, detect_compute_support))
         .add_systems(ExtractSchedule, extract_bake_jobs)
         .add_systems(
             RenderGraph,
@@ -416,7 +483,7 @@ pub fn enqueue_terrain_bake_jobs(
             heightmap_bytes: cache.into_data(),
             bvh: bvh.clone(),
             material_handle: material_handle.id(),
-            world_path: terrain_world.world_path.clone(),
+            dest: terrain_lightmap_location(terrain_world, chunk.chunk_x, chunk.chunk_y),
             lights: lighting.lights.clone(),
         });
     }
@@ -474,7 +541,7 @@ fn dispatch_chunk(
         lights: entry.lights,
         out_handle,
         material_handle: entry.material_handle,
-        world_path: entry.world_path,
+        dest: entry.dest,
     });
 }
 
@@ -524,7 +591,7 @@ pub fn top_up_gpu_bake(
                 chunk_y,
                 resolution: chunk_job.resolution,
                 material_handle: chunk_job.material_handle,
-                world_path: chunk_job.world_path.clone(),
+                dest: chunk_job.dest.clone(),
             },
             crate::game::GameEntity,
         ));
@@ -763,13 +830,10 @@ fn handle_bake_complete(
     let lightmap = raw.blur(config.blur_radius);
 
     // A failed write is logged but the live material still gets the result.
-    let path = terrain_lightmap_path(&tag.world_path, tag.chunk_x, tag.chunk_y);
-    if let Err(e) = lightmap.save_exr(&path) {
+    if let Err(e) = store_lightmap(&tag.dest, &lightmap) {
         error!(
-            "GPU bake: failed to save lightmap for chunk ({}, {}) to {}: {e}",
-            tag.chunk_x,
-            tag.chunk_y,
-            path.display()
+            "GPU bake: failed to save lightmap for chunk ({}, {}): {e}",
+            tag.chunk_x, tag.chunk_y,
         );
     }
 
