@@ -367,6 +367,18 @@ impl History {
         self.stacks_ref().map_or(0, |s| s.redo.len())
     }
 
+    /// Undo stack oldest-first, then redo stack nearest-first — the order the
+    /// History panel lists them in.
+    pub fn undo_entries(&self) -> impl Iterator<Item = &Transaction> {
+        self.stacks_ref().into_iter().flat_map(|s| s.undo.iter())
+    }
+
+    pub fn redo_entries(&self) -> impl Iterator<Item = &Transaction> {
+        self.stacks_ref()
+            .into_iter()
+            .flat_map(|s| s.redo.iter().rev())
+    }
+
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|(s, _)| s.as_str())
     }

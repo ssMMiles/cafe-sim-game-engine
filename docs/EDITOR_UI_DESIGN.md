@@ -671,12 +671,17 @@ pass: a proportional-scale lock in the inspector (on by default), and a fix
 for Shift+Scroll scaling — egui reports Shift+wheel as horizontal scroll,
 so the viewport folds it back into the vertical axis.
 
+### Since then
+
+Undo/redo landed 2026-10-28 (`docs/UNDO_REDO_PLAN.md`): record-based,
+hooked at `commit_placed_edits` and the other choke points, per-world
+stacks, a History dock tab.
+
 ### Deferred, by design
 
 Multi-select, transform gizmos (`transform-gizmo-egui` is the obvious
 candidate and would slot in behind `PlacedEdited::Transform`; its egui
-version must be checked against 0.33 when the time comes), undo/redo
-(record-based, hooks at `commit_placed_edits`), whole-world outliner index,
+version must be checked against 0.33 when the time comes), whole-world outliner index,
 "play from here", prefab/duplicate-with-scripts semantics beyond a plain
 record copy, terrain layer/material tools.
 

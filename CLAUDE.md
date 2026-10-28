@@ -81,6 +81,7 @@ src/
 │   │   ├── outliner.rs     #   Loaded placed entities: filter, select, focus, context menu
 │   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment when nothing selected
 │   │   ├── tool_panel.rs   #   "Tool" tab: shows the active tool's settings (Select: none yet)
+│   │   ├── history_panel.rs #  "History" tab: undo/redo stacks, click an entry to jump
 │   │   ├── place.rs        #   Place body: catalog grid, placement scale/yaw, stamp script picker
 │   │   └── terrain.rs      #   Terrain body: brush mode (sculpt/flatten/smooth), radius, strength, falloff
 │   ├── edits.rs            # PlacedEdited → commit_placed_edits (chunk re-derive, dirty, name sync, LightingState);
@@ -96,6 +97,8 @@ src/
 │   ├── gizmo.rs            # Transform gizmo (Select tool): drag XYZ arrows to translate, Ctrl = rotation
 │   │                       #   arcs; hand-rolled ray math vs EditorRay, Esc cancels the drag.
 │   │                       #   EditorGizmoGroup (fat lines, depth_bias -1)
+│   ├── history.rs          # Undo/redo: per-world Transaction stacks of before/after Changes keyed by placed id;
+│   │                       #   LevelOps applies them through the same messages (flagged `replay`); chunk pinning
 │   ├── controls.rs         # ActiveControls: context-filtered key hints for the status bar
 │   ├── grab.rs             # R: lift a placed entity into the preview, drop it with its own id
 │   ├── input.rs            # keyboard_free (egui text focus), scroll modifier + notches
@@ -210,6 +213,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 - **Menu/toolbar commands are `EditorAction` messages** applied in `Update` (`actions.rs`): save, bake, world switch/create (with the editor camera re-seated), plugin add/remove/reload (`ReloadRequested` in script_host), exit to menu, selection ops. Panels never touch those systems directly.
 - **The engine has no pause menu any more.** `pause_menu.rs`, `PauseMenuState`, `UiAnchors` and the bevy_ui slider are gone. In the editor, Escape backs out one level (put a carried entity back → Select tool → deselect). `SimulationState::Paused` still exists for plugins. The engine never pauses on its own.
 - Environment (sun azimuth/elevation, colours, intensities) is edited in the inspector when nothing is selected, by writing `TerrainWorld.metadata.environment`; `apply_environment` reacts to the resource change and Shift+S persists it.
+- **Undo/redo (`history.rs`, `docs/UNDO_REDO_PLAN.md`).** `History` holds per-world stacks of `Transaction`s, each a list of `Change`s: before/after pairs of plain data keyed by **placed id**, never `Entity` (grab, respawn and streaming all mint new entities). Recording happens at the choke points, not in panels: `PlacedEdited` carries the value it replaced (`PlacedEdited::transform(entity, before)` etc.), so `commit_placed_edits` records transform/name/kind edits — drags coalesce into one open transaction per `(kind, id)` that `settle_history` closes when the pointer is up and egui is idle (`ViewportInput.egui_busy`), and a group move folds every member's exact before/after into the group's transaction so undo never re-runs the cascade. `apply_script_edits`, `delete_placed`, place, duplicate, grab drop/destroy, group/parent actions, the terrain stroke end and the environment panel record too. Undo applies in reverse through `LevelOps`, re-using the same messages flagged as replays (`PlacedEdited.replay`, `ScriptEdit::Replace`) so nothing is recorded twice. Each transaction restores the selection it touched. Chunks the stacks reference are pinned against streaming unload (`History::pinned`, checked in `update_streaming_ring`); if a target still isn't loaded the whole transaction is skipped and dropped with a status-bar notice. Caps: 200 transactions and 64 MB of terrain tiles per world. Switching worlds swaps stacks; nothing clears them. A terrain stroke also rebuilds the chunk's heightfield collider (`TerrainChunks::rebuild_collider`), which sculpting used to leave stale until reload.
 - **Groups are organisational, not transform parents.** `PlacedKind::Group` is a placed entity like any other (transform, chunk, id); members carry `PlacedObject.parent = Some(group id)` and keep *world* transforms, no ECS `ChildOf`. The outliner draws the id tree (members whose group isn't loaded show at top level with ⤴), rows drag onto groups, a bottom strip drops to top level. Moving a group in the inspector applies the delta to its loaded members (`commit_placed_edits` keeps a per-group transform snapshot to measure the delta). Deleting a group re-files members under its parent; Shift+Delete / "Delete with members" is recursive. Groups aren't viewport-pickable; Alt+click a member to select its outermost group. `selection::{descendants, ancestors, PlacedTree}` are the tree helpers.
 
 ## Key Systems & Keybinds
@@ -228,6 +232,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | Ctrl (Select tool) | Gizmo shows rotation arcs instead of translation arrows |
 | Ctrl+LMB | Lower terrain (Terrain tool, Sculpt mode) |
 | Esc | Exit fly lock → cancel a gizmo drag (restores the start transform) → put a carried entity back → back to Select tool → deselect |
+| Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y | Undo / redo (Cmd works too; refused mid-drag or mid-stroke, puts a carried entity back first) |
 | F | Focus camera on the selection (also outliner double-click) |
 | Delete | Delete the selection (a group keeps its members); Shift+Delete deletes a group with its members |
 | R | Grab the entity under the cursor (else the selection); again to cancel. Switches to Place while carrying |

@@ -1,8 +1,18 @@
 # Editor Undo/Redo — Feasibility and Plan
 
-Status: **draft 2026-10-28, awaiting decisions in §6.** Scope: one undo stack
-covering every change to *level data* made from the editor. Follow-ons
-(prefabs, asset browser) are surveyed in `§7` and `§8` but not planned here.
+Status: **implemented 2026-10-28** (all three phases; §6 decisions settled:
+selection/camera/tool stay out of the stack, history survives saves and
+mode switches, one entry per terrain stroke, per-world in-memory stacks that
+swap on world switch, collider fix bundled, `Ctrl`/`Cmd` + `Z`/`Shift+Z`/`Y`).
+Scope: one undo stack covering every change to *level data* made from the
+editor. Follow-ons (prefabs, asset browser) are surveyed in `§7` and `§8`
+but not planned here.
+
+Implementation notes that differ from the draft below: the egui "busy"
+predicate is published on `ViewportInput.egui_busy`; group member moves are
+recorded via `Transaction::absorb`, with `PlacedEdited.replay` standing in
+for the draft's `cascade: bool`; `ScriptEdit::Replace` is the exact-list
+replay path; the History tab jumps by emitting N `Undo`/`Redo` actions.
 
 ---
 

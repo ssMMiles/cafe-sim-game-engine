@@ -46,6 +46,7 @@ use crate::projects::ActiveProject;
 use crate::script_host::{LoadedPluginIds, NeedsHydration};
 use crate::settings::UserSettings;
 
+mod history_panel;
 mod inspector;
 mod menu;
 mod outliner;
@@ -91,6 +92,8 @@ pub enum EditorTab {
     Inspector,
     /// Settings for whatever [`EditorTool`] is active.
     Tool,
+    /// Undo/redo stack of the active world.
+    History,
 }
 
 impl EditorTab {
@@ -100,6 +103,7 @@ impl EditorTab {
             EditorTab::Outliner => "Outliner",
             EditorTab::Inspector => "Inspector",
             EditorTab::Tool => "Tool",
+            EditorTab::History => "History",
         }
     }
 }
@@ -112,8 +116,11 @@ impl Default for DockLayout {
         let mut state = DockState::new(vec![EditorTab::Viewport]);
         let surface = state.main_surface_mut();
         // `fraction` is the share the *old* node keeps.
-        let [viewport, _outliner] =
-            surface.split_left(NodeIndex::root(), 0.82, vec![EditorTab::Outliner]);
+        let [viewport, _outliner] = surface.split_left(
+            NodeIndex::root(),
+            0.82,
+            vec![EditorTab::Outliner, EditorTab::History],
+        );
         let [viewport, _inspector] =
             surface.split_right(viewport, 0.75, vec![EditorTab::Inspector]);
         surface.split_below(viewport, 0.75, vec![EditorTab::Tool]);
