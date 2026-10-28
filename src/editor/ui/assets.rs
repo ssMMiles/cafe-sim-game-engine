@@ -6,7 +6,9 @@
 //! stamps keep their semantics) and switches to the Place tool; a texture
 //! cell opens an inspect-only preview below the grid; audio is listed but
 //! not playable yet. Cells show a rendered thumbnail when the thumbnail
-//! cache has one for the entry, else a glyph.
+//! cache has one for the entry — except textures, which *are* images and
+//! draw themselves (the same full-size handle the inspect footer uses) —
+//! else a glyph.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
@@ -90,10 +92,25 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
                         }
                         _ => selected == Some(*i),
                     };
-                    let thumb = panels
-                        .thumbnails
-                        .get(entry.thumbnail_key())
-                        .and_then(|h| panels.previews.egui_id(h));
+                    let thumb = match entry.kind {
+                        // A texture is its own thumbnail. Wait for the asset
+                        // (size known = loaded) so the aspect ratio is right
+                        // and egui never samples a half-uploaded image.
+                        AssetKind::Texture => {
+                            let handle = panels.previews.texture(&entry.path, &panels.asset_server);
+                            panels.images.get(&handle).and_then(|img| {
+                                let size = img.size().as_vec2();
+                                let id = panels.previews.egui_id(&handle)?;
+                                Some((id, size.x / size.y.max(1.0)))
+                            })
+                        }
+                        // Rig-rendered thumbnails are square by construction.
+                        _ => panels
+                            .thumbnails
+                            .get(entry.thumbnail_key())
+                            .and_then(|h| panels.previews.egui_id(h))
+                            .map(|id| (id, 1.0)),
+                    };
                     if cell(ui, entry, is_selected, thumb).clicked() {
                         picked = Some(*i);
                     }
@@ -147,11 +164,13 @@ fn empty_text(kind: AssetKind, needle: &str) -> String {
 }
 
 /// One grid cell: thumbnail (or glyph) above a caption, selectable.
+/// `thumb` carries the image's width/height ratio so non-square textures
+/// are letterboxed instead of stretched.
 fn cell(
     ui: &mut egui::Ui,
     entry: &AssetEntry,
     selected: bool,
-    thumb: Option<egui::TextureId>,
+    thumb: Option<(egui::TextureId, f32)>,
 ) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(CELL, CELL + 22.0), egui::Sense::click());
@@ -169,10 +188,21 @@ fn cell(
         egui::vec2(CELL - 8.0, CELL - 8.0),
     );
     match thumb {
-        Some(id) => {
+        Some((id, aspect)) => {
+            let fitted = if aspect > 1.0 {
+                egui::Rect::from_center_size(
+                    image_rect.center(),
+                    egui::vec2(image_rect.width(), image_rect.height() / aspect),
+                )
+            } else {
+                egui::Rect::from_center_size(
+                    image_rect.center(),
+                    egui::vec2(image_rect.width() * aspect, image_rect.height()),
+                )
+            };
             painter.image(
                 id,
-                image_rect,
+                fitted,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );

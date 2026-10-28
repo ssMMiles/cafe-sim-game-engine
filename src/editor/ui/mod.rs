@@ -224,7 +224,9 @@ fn viewport_title(
     camera: Option<&Transform>,
     style: &egui::Style,
 ) -> egui::WidgetText {
-    let font = egui::TextStyle::Button.resolve(style);
+    // Monospace at the tab bar's text size: proportional digits made the
+    // whole line shimmy every time the fps changed.
+    let font = egui::FontId::monospace(egui::TextStyle::Button.resolve(style).size);
     let dim = style.visuals.weak_text_color();
     let warn = egui::Color32::from_rgb(255, 200, 80);
     let mut job = egui::text::LayoutJob::default();
@@ -238,7 +240,11 @@ fn viewport_title(
     append(format!("{fps:>4.0} fps"), dim);
     if let Some(t) = camera {
         let p = t.translation;
-        append(format!("   cam {:.1} {:.1} {:.1}", p.x, p.y, p.z), dim);
+        // Padded so a sign or an extra digit doesn't shift the sections after.
+        append(
+            format!("   cam {:>7.1} {:>7.1} {:>7.1}", p.x, p.y, p.z),
+            dim,
+        );
     }
     let dirty = panels.registry.dirty_chunks.len();
     if dirty > 0 {
