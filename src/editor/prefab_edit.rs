@@ -37,8 +37,6 @@ pub enum PrefabAction {
 /// UI state for the Place panel's Prefabs tab.
 #[derive(Resource, Default)]
 pub struct PrefabEditState {
-    /// Which sub-tab the Place panel shows.
-    pub show_prefabs: bool,
     /// Draft name for "Save selection as prefab".
     pub new_name: String,
     pub error: Option<String>,

@@ -36,8 +36,10 @@ use super::grab::GrabbedEntity;
 use super::history::History;
 use super::picking::ViewportInput;
 use super::prefab_edit::{PrefabAction, PrefabEditState};
+use super::previews::PreviewImages;
 use super::selection::Selection;
 use super::terrain_edit::BrushSettings;
+use super::thumbnails::ThumbnailCache;
 use super::tool::EditorTool;
 use crate::AppState;
 use crate::game::gfx::camera::{GameRenderTarget, PlayerCamera};
@@ -48,6 +50,7 @@ use crate::projects::ActiveProject;
 use crate::script_host::{LoadedPluginIds, NeedsHydration};
 use crate::settings::UserSettings;
 
+mod assets;
 mod history_panel;
 mod inspector;
 mod menu;
@@ -57,6 +60,7 @@ mod terrain;
 mod tool_panel;
 mod viewport;
 
+pub use assets::AssetsBrowserState;
 pub use inspector::InspectorState;
 pub use menu::MenuState;
 pub use outliner::OutlinerState;
@@ -76,6 +80,7 @@ impl Plugin for EditorUiPlugin {
         });
         app.init_resource::<DockLayout>();
         app.init_resource::<InspectorState>();
+        app.init_resource::<AssetsBrowserState>();
         app.init_resource::<OutlinerState>();
         app.init_resource::<MenuState>();
         app.add_systems(
@@ -96,6 +101,8 @@ pub enum EditorTab {
     Tool,
     /// Undo/redo stack of the active world.
     History,
+    /// Browse and pick meshes, built-ins, prefabs, textures, audio.
+    Assets,
 }
 
 impl EditorTab {
@@ -106,6 +113,7 @@ impl EditorTab {
             EditorTab::Inspector => "Inspector",
             EditorTab::Tool => "Tool",
             EditorTab::History => "History",
+            EditorTab::Assets => "Assets",
         }
     }
 }
@@ -123,9 +131,11 @@ impl Default for DockLayout {
             0.82,
             vec![EditorTab::Outliner, EditorTab::History],
         );
-        let [viewport, _inspector] =
-            surface.split_right(viewport, 0.75, vec![EditorTab::Inspector]);
-        surface.split_below(viewport, 0.75, vec![EditorTab::Tool]);
+        let [viewport, inspector] = surface.split_right(viewport, 0.75, vec![EditorTab::Inspector]);
+        // Tool settings under the inspector; the asset browser gets the wide
+        // strip under the viewport, where a thumbnail grid has room.
+        surface.split_below(inspector, 0.6, vec![EditorTab::Tool]);
+        surface.split_below(viewport, 0.72, vec![EditorTab::Assets]);
         Self(state)
     }
 }
@@ -164,6 +174,11 @@ pub struct Panels<'w, 's> {
     pub prefabs: Res<'w, PrefabLibrary>,
     pub prefab_edit: ResMut<'w, PrefabEditState>,
     pub prefab_actions: MessageWriter<'w, PrefabAction>,
+    pub assets: ResMut<'w, AssetsBrowserState>,
+    pub previews: ResMut<'w, PreviewImages>,
+    pub thumbnails: ResMut<'w, ThumbnailCache>,
+    pub asset_server: Res<'w, AssetServer>,
+    pub images: Res<'w, Assets<Image>>,
     pub grabbed: Res<'w, GrabbedEntity>,
     pub cam_settings: Res<'w, EditorCameraSettings>,
     pub fly_lock: ResMut<'w, FlyLock>,
@@ -200,6 +215,13 @@ pub(super) fn editor_ui(
             .image_id(t.0.id())
             .unwrap_or_else(|| contexts.add_image(EguiTextureHandle::Weak(t.0.id())))
     });
+    // Same for every preview / thumbnail image the panels want to draw.
+    for handle in panels.previews.unbound(panels.thumbnails.images()) {
+        let id = contexts
+            .image_id(handle.id())
+            .unwrap_or_else(|| contexts.add_image(EguiTextureHandle::Weak(handle.id())));
+        panels.previews.bound(&handle, id);
+    }
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -216,6 +238,11 @@ pub(super) fn editor_ui(
 
     if std::mem::take(&mut panels.menu.reset_layout) {
         *dock = DockLayout::default();
+    }
+    if std::mem::take(&mut panels.assets.focus_requested)
+        && let Some(path) = dock.0.find_tab(&EditorTab::Assets)
+    {
+        let _ = dock.0.set_active_tab(path);
     }
 
     // egui 0.34 unified panels onto `Ui`: `Panel` (which replaced

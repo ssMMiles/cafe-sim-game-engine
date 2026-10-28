@@ -34,9 +34,11 @@ mod object_placement;
 mod physics_debug;
 mod picking;
 mod prefab_edit;
+mod previews;
 mod selection;
 mod terrain_edit;
 mod terrain_save;
+mod thumbnails;
 mod tool;
 mod ui;
 
@@ -262,6 +264,8 @@ impl Plugin for EditorPlugin {
         app.init_asset::<AssetManifestAsset>();
         app.init_asset_loader::<AssetManifestLoader>();
         app.init_resource::<AssetCatalog>();
+        app.init_resource::<previews::PreviewImages>();
+        app.init_resource::<thumbnails::ThumbnailCache>();
         app.add_systems(Startup, request_asset_manifest);
         app.add_systems(Update, populate_asset_catalog.in_set(EditorSet::InGame));
 

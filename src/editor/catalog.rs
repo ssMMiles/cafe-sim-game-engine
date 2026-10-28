@@ -110,6 +110,15 @@ impl AssetEntry {
     pub fn is_placeable(&self) -> bool {
         self.placed.is_some()
     }
+
+    /// Key for the rendered thumbnail. Plugin presets share their mesh's
+    /// thumbnail, so meshes key on the asset path rather than the entry path.
+    pub fn thumbnail_key(&self) -> &str {
+        match &self.placed {
+            Some(PlacedKind::Mesh { asset_path, .. }) if self.prefab.is_none() => asset_path,
+            _ => &self.path,
+        }
+    }
 }
 
 #[derive(Resource, Default)]

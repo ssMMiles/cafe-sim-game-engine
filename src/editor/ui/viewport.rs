@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy_egui::egui::{self, PointerButton, Sense, load::SizedTexture};
 use egui_dock::TabViewer;
 
-use super::{EditorTab, Panels, history_panel, inspector, outliner, tool_panel};
+use super::{EditorTab, Panels, assets, history_panel, inspector, outliner, tool_panel};
 use crate::editor::picking::{ViewportInput, cursor_to_texture_px};
 
 pub struct EditorTabs<'a, 'w, 's> {
@@ -170,6 +170,7 @@ impl TabViewer for EditorTabs<'_, '_, '_> {
             EditorTab::Inspector => padded(ui, |ui| inspector::draw(ui, self.panels)),
             EditorTab::Tool => padded(ui, |ui| tool_panel::draw(ui, self.panels)),
             EditorTab::History => padded(ui, |ui| history_panel::draw(ui, self.panels)),
+            EditorTab::Assets => padded(ui, |ui| assets::draw(ui, self.panels)),
         }
     }
 

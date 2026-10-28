@@ -5,142 +5,31 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use super::Panels;
-use crate::editor::prefab_edit::PrefabAction;
 
 pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     ui.weak("LMB places at the cursor · R grabs · Shift+Scroll scale · Alt+Scroll rotate");
     ui.separator();
 
-    // ── Catalog / Prefabs sub-tabs ───────────────────────────────────────────
+    // What the next click places, as chosen in the Assets tab.
     ui.horizontal(|ui| {
-        let show_prefabs = panels.prefab_edit.show_prefabs;
-        if ui.selectable_label(!show_prefabs, "Catalog").clicked() {
-            panels.prefab_edit.show_prefabs = false;
-        }
-        if ui
-            .selectable_label(
-                show_prefabs,
-                format!("Prefabs ({})", panels.prefabs.names().len()),
-            )
-            .clicked()
-        {
-            panels.prefab_edit.show_prefabs = true;
-        }
-    });
-    ui.add_space(4.0);
-    if panels.prefab_edit.show_prefabs {
-        prefab_tab(ui, panels);
-        return;
-    }
-
-    let selected = panels.catalog.selected_index(&panels.config);
-    let mut pick: Option<usize> = None;
-    ui.horizontal_wrapped(|ui| {
-        for (i, entry) in panels
-            .catalog
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is_placeable() && e.prefab.is_none())
-        {
-            let caption = if entry.preset_script.is_some() {
-                format!("{}\npreset", entry.name)
-            } else if entry.kind == crate::editor::catalog::AssetKind::Builtin {
-                format!(
-                    "{}\n{}",
-                    entry.name,
-                    entry.placed.as_ref().map(|k| k.label()).unwrap_or("")
-                )
-            } else {
-                entry.name.clone()
-            };
-            let response = ui.add_sized(
-                [110.0, 44.0],
-                egui::Button::selectable(selected == Some(i), caption),
-            );
-            if response.clicked() {
-                pick = Some(i);
+        ui.label("Placing");
+        let what = match (&panels.config.prefab, &panels.config.stamp_script) {
+            (Some(name), _) => format!("◆ prefab '{name}'"),
+            (None, Some((plugin, script))) => {
+                format!("{} + {plugin}/{script}", panels.config.kind.label())
             }
+            (None, None) => match &panels.config.kind {
+                crate::game::world::objects::PlacedKind::Mesh { asset_path, .. } => {
+                    asset_path.clone()
+                }
+                kind => kind.label().to_owned(),
+            },
+        };
+        ui.strong(what);
+        if ui.small_button("Assets…").clicked() {
+            panels.assets.focus_requested = true;
         }
     });
-    if let Some(i) = pick {
-        panels.catalog.select(i, &mut panels.config);
-    }
-    if panels.catalog.entries.is_empty() {
-        ui.weak("Catalog is empty — the mesh manifest hasn't loaded yet.");
-    }
-
-    ui.separator();
-    placement_settings(ui, panels);
-}
-
-/// The Prefabs tab: every saved prefab as a placement entry, plus "save the
-/// selection as a new prefab".
-fn prefab_tab(ui: &mut egui::Ui, panels: &mut Panels) {
-    let names = panels.prefabs.names();
-    if names.is_empty() {
-        ui.weak("No prefabs yet. Select an entity or group below and save it as one.");
-    }
-    let mut pick: Option<String> = None;
-    ui.horizontal_wrapped(|ui| {
-        for name in &names {
-            let entities = panels
-                .prefabs
-                .get(name)
-                .map(|d| d.entities.len())
-                .unwrap_or(0);
-            let active = panels.config.prefab.as_deref() == Some(name.as_str());
-            let caption = format!(
-                "◆ {name}
-{entities} entities"
-            );
-            if ui
-                .add_sized([110.0, 44.0], egui::Button::selectable(active, caption))
-                .clicked()
-            {
-                pick = Some(name.clone());
-            }
-        }
-    });
-    if let Some(name) = pick
-        && let Some(def) = panels.prefabs.get(&name)
-    {
-        // A real change: the preview rebuilds with the prefab's ghosts.
-        panels.config.kind = def.entities[0].kind.clone();
-        panels.config.prefab = Some(name);
-        panels.config.scale = Vec3::ONE;
-        panels.config.stamp_script = None;
-    }
-
-    ui.separator();
-    ui.label("Save selection as prefab");
-    let has_selection = panels.selection.primary.is_some();
-    ui.horizontal(|ui| {
-        let mut name = panels.prefab_edit.new_name.clone();
-        ui.add(
-            egui::TextEdit::singleline(&mut name)
-                .hint_text("prefab-name")
-                .desired_width(160.0),
-        );
-        panels.prefab_edit.new_name = name;
-        if ui
-            .add_enabled(has_selection, egui::Button::new("Save"))
-            .clicked()
-        {
-            let name = panels.prefab_edit.new_name.trim().to_owned();
-            panels
-                .prefab_actions
-                .write(PrefabAction::SaveSelectionAs(name));
-            panels.prefab_edit.new_name.clear();
-        }
-    });
-    if !has_selection {
-        ui.weak("Select an entity (or a group with members) first.");
-    }
-    if let Some(err) = &panels.prefab_edit.error {
-        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
-    }
-
     ui.separator();
     placement_settings(ui, panels);
 }
