@@ -1,4 +1,4 @@
-use bevy::{log, prelude::*};
+use bevy::{log, prelude::*, ui::Pressed};
 
 use crate::{
     projects::{self, ProjectRegistry},
@@ -117,7 +117,7 @@ pub fn setup(mut commands: Commands, theme: Res<UiTheme>) {
 }
 
 pub fn handle_actions(
-    interactions: Query<(&Interaction, &CreateAction), (Changed<Interaction>, With<Button>)>,
+    pressed: Query<&CreateAction, Added<Pressed>>,
     id_q: Query<&TextInput, With<IdInput>>,
     name_q: Query<&TextInput, With<NameInput>>,
     world_q: Query<&TextInput, With<WorldInput>>,
@@ -127,10 +127,7 @@ pub fn handle_actions(
     mut status_q: Query<(&mut Text, &mut TextColor), With<StatusLine>>,
     theme: Res<UiTheme>,
 ) {
-    for (interaction, action) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for action in &pressed {
         match action {
             CreateAction::Cancel => {
                 next_screen.set(MenuScreen::Main);

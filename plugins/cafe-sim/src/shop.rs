@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 
 use crate::catalog::CATALOG;
 use crate::menus::ActiveMenu;
@@ -164,6 +164,7 @@ pub fn sync_shop_ui(
                         piece: piece_idx,
                     },
                     Button,
+                    Hovered::default(),
                     Node {
                         width: Val::Px(CARD_W),
                         height: Val::Px(CARD_H),
@@ -221,17 +222,15 @@ pub fn sync_shop_ui(
 }
 
 pub fn handle_card_click(
-    interaction_q: Query<(&Interaction, &PieceCard), (Changed<Interaction>, With<Button>)>,
+    pressed: Query<&PieceCard, Added<Pressed>>,
     mut active: ResMut<ActiveMenu>,
     mut selection: ResMut<PlacementSelection>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for (interaction, card) in interaction_q.iter() {
-        if *interaction == Interaction::Pressed {
-            let piece = &CATALOG[card.cat].pieces[card.piece];
-            selection.set(piece, (card.cat as u8, card.piece as u8));
-            active.close();
-            mouse.clear_just_pressed(MouseButton::Left);
-        }
+    for card in &pressed {
+        let piece = &CATALOG[card.cat].pieces[card.piece];
+        selection.set(piece, (card.cat as u8, card.piece as u8));
+        active.close();
+        mouse.clear_just_pressed(MouseButton::Left);
     }
 }

@@ -10,7 +10,7 @@
 //! candidate generation, the marker components, the click handlers, and the
 //! separate full-screen Hire menu (an [`ActiveMenu::HireStaff`] modal).
 
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 use rand::Rng;
 use rand::seq::SliceRandom;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -164,32 +164,27 @@ pub fn generate_candidates() -> Vec<StaffMember> {
 
 /// "Hire Staff" → roll fresh candidates and open the Hire menu.
 pub fn handle_hire_staff_button(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<HireStaffButton>)>,
+    pressed: Query<(), (Added<Pressed>, With<HireStaffButton>)>,
     mut active: ResMut<ActiveMenu>,
     mut candidates: ResMut<HireCandidates>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
-            candidates.0 = generate_candidates();
-            *active = ActiveMenu::HireStaff;
-            mouse.clear_just_pressed(MouseButton::Left);
-        }
+    for _ in &pressed {
+        candidates.0 = generate_candidates();
+        *active = ActiveMenu::HireStaff;
+        mouse.clear_just_pressed(MouseButton::Left);
     }
 }
 
 /// Hire a candidate → add to the roster (job `None`) and return to the overview.
 pub fn handle_hire_candidate_click(
-    interactions: Query<(&Interaction, &HireCandidateButton), Changed<Interaction>>,
+    pressed: Query<&HireCandidateButton, Added<Pressed>>,
     mut staff: ResMut<Staff>,
     mut candidates: ResMut<HireCandidates>,
     mut active: ResMut<ActiveMenu>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for (interaction, btn) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for btn in &pressed {
         if let Some(candidate) = candidates.0.get(btn.index).cloned() {
             staff.members.push(candidate);
         }
@@ -201,28 +196,23 @@ pub fn handle_hire_candidate_click(
 
 /// "Back" in the Hire menu → return to the overview without hiring.
 pub fn handle_hire_back_button(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<HireBackButton>)>,
+    pressed: Query<(), (Added<Pressed>, With<HireBackButton>)>,
     mut active: ResMut<ActiveMenu>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
-            *active = ActiveMenu::ShopOverview;
-            mouse.clear_just_pressed(MouseButton::Left);
-        }
+    for _ in &pressed {
+        *active = ActiveMenu::ShopOverview;
+        mouse.clear_just_pressed(MouseButton::Left);
     }
 }
 
 /// "Assign Job" → toggle the inline job dropdown for that card.
 pub fn handle_assign_job_button(
-    interactions: Query<(&Interaction, &AssignJobButton), Changed<Interaction>>,
+    pressed: Query<&AssignJobButton, Added<Pressed>>,
     mut open_for: ResMut<AssignJobOpenFor>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for (interaction, btn) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for btn in &pressed {
         open_for.0 = if open_for.0 == Some(btn.staff) {
             None
         } else {
@@ -234,15 +224,12 @@ pub fn handle_assign_job_button(
 
 /// Pick a job from the inline dropdown → assign it and collapse the dropdown.
 pub fn handle_job_option_click(
-    interactions: Query<(&Interaction, &JobOptionButton), Changed<Interaction>>,
+    pressed: Query<&JobOptionButton, Added<Pressed>>,
     mut staff: ResMut<Staff>,
     mut open_for: ResMut<AssignJobOpenFor>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for (interaction, btn) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for btn in &pressed {
         if let Some(member) = staff.members.get_mut(btn.staff) {
             member.job = Some(btn.job);
         }
@@ -436,6 +423,7 @@ pub fn spawn_button(
         .spawn_owned((
             marker,
             Button,
+            Hovered::default(),
             Node {
                 padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
                 border: UiRect::all(Val::Px(2.0)),

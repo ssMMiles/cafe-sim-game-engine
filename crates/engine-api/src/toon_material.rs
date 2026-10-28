@@ -57,11 +57,11 @@ impl Default for ToonMaterial {
 
 impl MaterialExtension for ToonMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/toon_lighting.wgsl".into()
+        "shaders/toon_lighting.wesl".into()
     }
 
     fn deferred_fragment_shader() -> ShaderRef {
-        "shaders/toon_lighting.wgsl".into()
+        "shaders/toon_lighting.wesl".into()
     }
 
     fn alpha_mode() -> Option<AlphaMode> {

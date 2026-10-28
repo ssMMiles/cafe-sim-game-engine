@@ -1,8 +1,8 @@
-#import bevy_pbr::{
+import bevy_pbr::render::{
     mesh_functions,
     view_transformations::position_world_to_clip,
     forward_io::VertexOutput,
-}
+};
 
 @vertex
 fn vertex(
@@ -31,9 +31,8 @@ fn vertex(
     out.uv = uv;
     out.uv_b = uv_b;
 
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = instance_index;
-#endif
 
     return out;
 }

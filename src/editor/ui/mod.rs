@@ -83,7 +83,7 @@ impl Plugin for EditorUiPlugin {
 
 /// A dock tab. The layout is rebuilt from [`DockLayout::default`] every run
 /// (no persistence yet — `docs/EDITOR_UI_DESIGN.md` §4.14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EditorTab {
     Viewport,
     Outliner,
@@ -222,16 +222,16 @@ pub(super) fn editor_ui(
         egui::UiBuilder::new(),
     );
 
-    egui::Panel::top("editor_menu").show_inside(&mut root, |ui| {
+    egui::Panel::top("editor_menu").show(&mut root, |ui| {
         menu::menu_bar(ui, &mut panels);
     });
-    egui::Panel::top("editor_toolbar").show_inside(&mut root, |ui| {
+    egui::Panel::top("editor_toolbar").show(&mut root, |ui| {
         menu::toolbar(ui, &mut panels);
     });
     // `Window` is a free-floating area, not a panel — it still takes a `&Context`.
     menu::dialogs(&ctx, &mut panels);
 
-    egui::Panel::bottom("editor_status").show_inside(&mut root, |ui| {
+    egui::Panel::bottom("editor_status").show(&mut root, |ui| {
         ui.horizontal_wrapped(|ui| {
             for (keys, action) in controls.rows(panels.fly_lock.0, panels.brush.mode) {
                 ui.strong(keys);

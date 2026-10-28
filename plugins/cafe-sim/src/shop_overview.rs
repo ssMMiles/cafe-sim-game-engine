@@ -6,7 +6,7 @@
 //! the panel is intentionally empty for now.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
@@ -93,51 +93,41 @@ pub fn cleanup_shop_overview_when_inactive(
 }
 
 pub fn handle_open_cafe_button(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<CafeOpenButton>)>,
+    pressed: Query<(), (Added<Pressed>, With<CafeOpenButton>)>,
     mut cafe_open: ResMut<CafeOpen>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
-            cafe_open.0 = true;
-            mouse.clear_just_pressed(MouseButton::Left);
-        }
+    for _ in &pressed {
+        cafe_open.0 = true;
+        mouse.clear_just_pressed(MouseButton::Left);
     }
 }
 
 pub fn handle_close_cafe_button(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<CafeCloseButton>)>,
+    pressed: Query<(), (Added<Pressed>, With<CafeCloseButton>)>,
     mut cafe_open: ResMut<CafeOpen>,
     mut game_time: ResMut<GameTime>,
     balance: Res<Balance>,
     mut day_start: ResMut<DayStartBalance>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
-            cafe_open.0 = false;
-            game_time.start_next_day();
-            // The day's earnings are now banked — the next day starts from here.
-            day_start.0 = balance.0;
-            mouse.clear_just_pressed(MouseButton::Left);
-        }
+    for _ in &pressed {
+        cafe_open.0 = false;
+        game_time.start_next_day();
+        // The day's earnings are now banked — the next day starts from here.
+        day_start.0 = balance.0;
+        mouse.clear_just_pressed(MouseButton::Left);
     }
 }
 
 pub fn handle_edit_button(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<ShopEditButton>)>,
+    pressed: Query<(), (Added<Pressed>, With<ShopEditButton>)>,
     mut editing: ResMut<ShopNameEditing>,
     mut shop_state: ResMut<ShopState>,
     input_q: Query<&ShopNameInput>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    let mut clicked = false;
-    for interaction in &interactions {
-        if *interaction == Interaction::Pressed {
-            clicked = true;
-        }
-    }
-    if !clicked {
+    if pressed.is_empty() {
         return;
     }
     if editing.0 {
@@ -153,13 +143,10 @@ pub fn handle_edit_button(
 
 pub fn focus_shop_name_input(
     mut commands: Commands,
-    interactions: Query<(Entity, &Interaction), (Changed<Interaction>, With<ShopNameInput>)>,
+    pressed: Query<Entity, (Added<Pressed>, With<ShopNameInput>)>,
     focused: Query<Entity, With<ShopNameInputFocus>>,
 ) {
-    for (entity, interaction) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for entity in &pressed {
         for old in &focused {
             commands.entity(old).remove::<ShopNameInputFocus>();
         }
@@ -290,6 +277,7 @@ pub fn build_shop_overview(
         let input = commands
             .spawn_owned((
                 Button,
+                Hovered::default(),
                 Node {
                     width: Val::Px(320.0),
                     height: Val::Px(48.0),
@@ -542,6 +530,7 @@ fn spawn_action_button(
         .spawn_owned((
             marker,
             Button,
+            Hovered::default(),
             Node {
                 padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
                 border: UiRect::all(Val::Px(2.0)),

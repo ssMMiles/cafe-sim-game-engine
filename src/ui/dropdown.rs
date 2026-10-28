@@ -4,7 +4,10 @@
 //! contents are hidden via `Display::None` when the dropdown is collapsed so
 //! surrounding layout reflows.
 
-use bevy::{ecs::relationship::RelatedSpawnerCommands, prelude::*};
+use bevy::{
+    ecs::relationship::RelatedSpawnerCommands, picking::hover::Hovered, prelude::*, ui::Pressed,
+    ui_widgets::Button,
+};
 
 use super::theme::UiTheme;
 use super::widgets::InteractiveStyle;
@@ -61,6 +64,7 @@ pub fn spawn_dropdown<M: Component>(
         .with_children(|root| {
             root.spawn((
                 Button,
+                Hovered::default(),
                 Node {
                     width: Val::Percent(100.0),
                     height: Val::Px(30.0),
@@ -139,13 +143,10 @@ impl Plugin for DropdownPlugin {
 }
 
 fn handle_dropdown_clicks(
-    headers: Query<(&Interaction, &ChildOf), (Changed<Interaction>, With<DropdownHeader>)>,
+    headers: Query<&ChildOf, (Added<Pressed>, With<DropdownHeader>)>,
     mut dropdowns: Query<&mut Dropdown>,
 ) {
-    for (interaction, parent) in &headers {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for parent in &headers {
         if let Ok(mut dropdown) = dropdowns.get_mut(parent.parent()) {
             dropdown.open = !dropdown.open;
         }

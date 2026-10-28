@@ -45,7 +45,7 @@ use bevy::{
     },
 };
 
-const SHADER_ASSET_PATH: &str = "shaders/edge_detection_post.wgsl";
+const SHADER_ASSET_PATH: &str = "shaders/edge_detection_post.wesl";
 
 pub struct EdgeDetectionPlugin;
 
@@ -224,7 +224,7 @@ fn edge_detection_pass(
     let Some(settings_binding) = settings_uniforms.uniforms().binding() else {
         return;
     };
-    let Some(depth_view) = prepass_textures.depth_view() else {
+    let Some(depth_view) = prepass_textures.depth_only_view() else {
         return; // Skip if no depth prepass
     };
     let Some(normal_view) = prepass_textures.normal_view() else {
@@ -269,6 +269,7 @@ fn edge_detection_pass(
 // ---------------------------------------------------------------------------
 
 #[derive(Component, Default, Clone, Copy, ExtractComponent, ShaderType)]
+#[extract_app(RenderApp)]
 pub struct EdgeDetectionSettings {
     pub edge_thickness: f32,
     pub depth_sensitivity: f32,

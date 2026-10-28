@@ -2,7 +2,7 @@
 //! Load Game) and from there back to [`CafePhase::MainMenu`] or forward
 //! into [`CafePhase::Playing`].
 
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
@@ -109,6 +109,7 @@ fn spawn_slot_card(
     let mut row = parent.spawn_owned((
         SlotButton(slot),
         Button,
+        Hovered::default(),
         Node {
             width: Val::Px(420.0),
             height: Val::Px(74.0),
@@ -177,8 +178,8 @@ fn spawn_slot_card(
 }
 
 pub fn handle_slot_picker_buttons(
-    slot_interactions: Query<(&Interaction, &SlotButton), Changed<Interaction>>,
-    back_interactions: Query<&Interaction, (Changed<Interaction>, With<SlotBackButton>)>,
+    slots_pressed: Query<&SlotButton, Added<Pressed>>,
+    back_pressed: Query<(), (Added<Pressed>, With<SlotBackButton>)>,
     cache: Res<SlotMetadataCache>,
     mut phase: ResMut<CafePhase>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
@@ -193,12 +194,10 @@ pub fn handle_slot_picker_buttons(
     mut staff: ResMut<Staff>,
     anchor: Res<CafeAnchor>,
 ) {
-    for interaction in &back_interactions {
-        if *interaction == Interaction::Pressed {
-            *phase = CafePhase::MainMenu;
-            mouse.clear_just_pressed(MouseButton::Left);
-            return;
-        }
+    if !back_pressed.is_empty() {
+        *phase = CafePhase::MainMenu;
+        mouse.clear_just_pressed(MouseButton::Left);
+        return;
     }
 
     let mode = match *phase {
@@ -206,10 +205,7 @@ pub fn handle_slot_picker_buttons(
         _ => return,
     };
 
-    for (interaction, slot) in &slot_interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for slot in &slots_pressed {
         let slot = slot.0;
         let status = cache.0.get(&slot).cloned().unwrap_or(SlotStatus::Empty);
         match (mode, status) {

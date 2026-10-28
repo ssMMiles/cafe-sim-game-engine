@@ -1,4 +1,4 @@
-use bevy::{log, prelude::*};
+use bevy::{log, prelude::*, ui::Pressed};
 
 use crate::{
     AppState,
@@ -77,18 +77,12 @@ pub fn setup_main_menu(
 
 pub fn handle_main_menu_button_press(
     mut commands: Commands,
-    mut interaction_query: Query<
-        (&Interaction, &MainMenuButton),
-        (Changed<Interaction>, With<Button>),
-    >,
+    pressed: Query<&MainMenuButton, Added<Pressed>>,
     registry: Res<ProjectRegistry>,
     mut next_app_state: ResMut<NextState<AppState>>,
     mut next_menu_screen: ResMut<NextState<MenuScreen>>,
 ) {
-    for (interaction, action) in interaction_query.iter_mut() {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for action in &pressed {
         match action {
             MainMenuButton::SelectProject(id) => {
                 let Some(manifest) = registry.find(id) else {

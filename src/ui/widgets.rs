@@ -1,4 +1,7 @@
-use bevy::{ecs::relationship::RelatedSpawnerCommands, prelude::*};
+use bevy::{
+    ecs::relationship::RelatedSpawnerCommands, picking::hover::Hovered, prelude::*, ui::Pressed,
+    ui_widgets::Button,
+};
 
 use super::theme::UiTheme;
 
@@ -18,8 +21,8 @@ impl ButtonVariant {
 }
 
 /// Per-state visuals for any interactive widget. Attach alongside `Button`
-/// (and optionally `BorderColor`) and the `update_interactive_visuals` system
-/// will swap colors as `Interaction` changes.
+/// and `Hovered` (and optionally `BorderColor`); [`update_interactive_visuals`]
+/// swaps colors as the `Pressed` / `Hovered` state changes.
 #[derive(Component, Clone, Copy)]
 pub struct InteractiveStyle {
     pub idle_bg: Color,
@@ -56,22 +59,42 @@ impl InteractiveStyle {
     }
 }
 
+/// Widgets whose interaction state changed this frame. Releases arrive
+/// separately, through `RemovedComponents<Pressed>`.
+type InteractionChanged = Or<(Changed<Hovered>, Added<Pressed>)>;
+
+/// Everything [`update_interactive_visuals`] reads and writes on a widget.
+type InteractiveWidget = (
+    Has<Pressed>,
+    &'static Hovered,
+    &'static InteractiveStyle,
+    &'static mut BackgroundColor,
+    Option<&'static mut BorderColor>,
+);
+
+/// Re-colour interactive widgets whose state changed this frame.
+///
+/// Bevy 0.20 replaced the polled `Interaction` enum with two components:
+/// `Pressed`, which `ui_widgets::Button` inserts on pointer-down and removes
+/// on release, and picking's `Hovered(bool)`, which is re-inserted whenever
+/// hover changes (it is immutable, so `Changed<Hovered>` catches it). Only
+/// entities that actually changed are written to, because UI rendering is
+/// retained now and every write re-extracts the node.
 pub fn update_interactive_visuals(
-    mut q: Query<
-        (
-            &Interaction,
-            &InteractiveStyle,
-            &mut BackgroundColor,
-            Option<&mut BorderColor>,
-        ),
-        Changed<Interaction>,
-    >,
+    changed: Query<Entity, InteractionChanged>,
+    mut released: RemovedComponents<Pressed>,
+    mut widgets: Query<InteractiveWidget>,
 ) {
-    for (interaction, style, mut bg, border) in &mut q {
-        let (target_bg, target_border) = match *interaction {
-            Interaction::None => (style.idle_bg, style.idle_border),
-            Interaction::Hovered => (style.hover_bg, style.hover_border),
-            Interaction::Pressed => (style.pressed_bg, style.pressed_border),
+    for entity in changed.iter().chain(released.read()) {
+        let Ok((pressed, hovered, style, mut bg, border)) = widgets.get_mut(entity) else {
+            continue;
+        };
+        let (target_bg, target_border) = if pressed {
+            (style.pressed_bg, style.pressed_border)
+        } else if hovered.0 {
+            (style.hover_bg, style.hover_border)
+        } else {
+            (style.idle_bg, style.idle_border)
         };
         bg.0 = target_bg;
         if let Some(mut border) = border {
@@ -118,6 +141,7 @@ impl UiExt for RelatedSpawnerCommands<'_, ChildOf> {
         let style = InteractiveStyle::button(theme, variant);
         self.spawn((
             Button,
+            Hovered::default(),
             Node {
                 width: Val::Px(theme.btn_width),
                 height: Val::Px(theme.btn_height),

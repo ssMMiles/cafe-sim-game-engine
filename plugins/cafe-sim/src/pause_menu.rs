@@ -8,7 +8,7 @@
 //! Independent of the engine's own pause UX (`SimulationState` /
 //! `PauseMenuState`), which is editor-only.
 
-use bevy::prelude::*;
+use bevy::{prelude::*, ui::Pressed};
 use engine_api::AppState;
 
 use crate::balance::DayStartBalance;
@@ -114,7 +114,7 @@ pub fn sync_pause_menu_ui(
 }
 
 pub fn handle_pause_buttons(
-    interactions: Query<(&Interaction, &PauseMenuButton), Changed<Interaction>>,
+    pressed: Query<&PauseMenuButton, Added<Pressed>>,
     mut paused: ResMut<GamePaused>,
     mut app_state: ResMut<NextState<AppState>>,
     phase: Res<CafePhase>,
@@ -124,10 +124,7 @@ pub fn handle_pause_buttons(
     staff: Res<Staff>,
     pieces_q: Query<(&PlacedCell, &CafePiece)>,
 ) {
-    for (interaction, action) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for action in &pressed {
         match action {
             PauseMenuButton::Resume => {
                 paused.0 = false;

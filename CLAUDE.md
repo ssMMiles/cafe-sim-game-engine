@@ -25,13 +25,13 @@ NEVER guess or make assumptions about the codebase or external dependencies. Alw
 
 # Architecture Overview
 
-**engine** is a 3D terrain editor and exploration game built with Bevy 0.19 and Rust. It supports both native (Windows/Linux/Mac) and WASM (WebGPU) platforms.
+**engine** is a 3D terrain editor and exploration game built with Bevy 0.20 and Rust. It supports both native (Windows/Linux/Mac) and WASM (WebGPU) platforms.
 
 ## Tech Stack
 
-- **Bevy 0.19** - Game engine (ECS)
-- **bevy_egui 0.40 + egui_dock 0.19** - Editor chrome only (docked viewport, panels). The invariant: **bevy_egui and egui_dock must agree on the `egui` minor** (0.34 on this line). Never add `egui` directly; use `bevy_egui::egui`. Mid-upgrade to Bevy 0.20 — see `docs/BEVY_0_20_UPGRADE_PLAN.md`
-- **avian3d 0.7** - Physics (kinematic character controller, colliders)
+- **Bevy 0.20** - Game engine (ECS)
+- **bevy_egui 0.43 + egui_dock 0.21** - Editor chrome only (docked viewport, panels). The invariant: **bevy_egui and egui_dock must agree on the `egui` minor** (0.36 on this line). Never add `egui` directly; use `bevy_egui::egui`. Panels and `DockArea` take a `&mut Ui` (the editor builds one root `Ui` per pass); `Window` still takes `&Context`. Upgrade history: `docs/BEVY_0_20_UPGRADE_PLAN.md`
+- **avian3d 0.8** - Physics (kinematic character controller, colliders)
 - **rkyv 0.8** - Zero-copy serialization for terrain/object persistence
 - **wasm-bindgen / web-sys** - WASM platform support (OPFS storage)
 
@@ -65,7 +65,9 @@ src/
 ├── storage/            # Platform-agnostic async file I/O (native + WASM)
 ├── ui/                 # bevy_ui for *player-facing* UI (main menu, plugins). Nothing editor-side uses it
 │   ├── theme.rs        # Colors, typography, spacing constants
-│   └── widgets.rs      # ui_title, ui_button (+ checkbox, dropdown, text_input modules)
+│   └── widgets.rs      # ui_title, ui_button (+ checkbox, dropdown, text_input modules). Buttons are
+│                       #   `ui_widgets::Button` + picking `Hovered`; handlers poll `Added<Pressed>` (the
+│                       #   old `Interaction` enum is gone), `update_interactive_visuals` recolours on change
 ├── menu/               # Main menu screen + navigation
 │   ├── mod.rs          # MenuPlugin, Camera2d setup
 │   └── main.rs         # Start Game / Settings buttons
@@ -161,7 +163,7 @@ src/
 - Plugins register named *scripts* (factories) and optional `LevelDataHooks` in `ScriptRegistry`. The host hydrates `ScriptBindings` on placed entities by calling the factory and recording inserted `ComponentId`s via archetype diff; dehydration removes exactly those on unload/reload.
 - **Loaded ≠ active.** `DynamicPlugin` has three hooks: `register` (scripts + level hooks; runs on every load/reload in *both* modes), `setup` (gameplay bootstrap + schedule), `teardown`. A plugin is loaded whenever the project declares it, but only *active* in `EditorMode::Gameplay` — only active plugins' schedules tick, so plugin keybinds and HUD panels can't fight the editor. Entering the editor runs every plugin's teardown, so **switching modes resets the gameplay session**. Script bindings stay hydrated in both modes (only hot-reload dehydrates), so placed plugin objects still look right while authoring.
 - A plugin can claim a *level* entity instead of spawning its own: register a script with `with_default_mesh(...)` and it appears in the editor's placement catalog as a one-click "mesh + binding" preset; the factory inserts a marker the plugin's systems look for. `cafe-sim`'s `cafe-shell` works this way, so the cafe shell is level geometry (collider + baked lightmaps + BVH occlusion in the editor) and the plugin only *reads* it, for the furniture-grid anchor. Materials ship inside `Cafe.gltf` — see `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md` for why a plugin must not dress level geometry at runtime (nothing unwinds it on unload).
-- `ENGINE_SCRIPTS_ABI_VERSION` (currently 6) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
+- `ENGINE_SCRIPTS_ABI_VERSION` (currently 7) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
 
 ## Level Persistence (see docs/LEVEL_SAVE_DESIGN.md)
 
@@ -183,13 +185,16 @@ All rkyv; v2 and v4 `world.meta` (and v2/v3/v4 `.objects` files) are read via `l
 
 ## Shaders (`assets/shaders/`)
 
+Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutput;` (module paths mirror the crate's file layout — `bevy_pbr::render::*`, `bevy_pbr::prepass::io`, `bevy_pbr::deferred::functions`), `@if(DEF)` / `@else` attach to one declaration, import or statement, and bind-group indices are `@group(constants::MATERIAL_BIND_GROUP)`. naga_oil (`#import`, `#ifdef`, `#{…}`) is gone since Bevy 0.20. A plain WGSL file with no directives still loads as `.wgsl` — `lightmap_bake.wgsl` is one, and `cargo test` validates it with the same `naga` wgpu links (keep the `naga` dev-dependency on wgpu's major).
+
 | Shader | Purpose |
 |--------|---------|
-| `sky_dome.wgsl` | 4-band toon sky gradient |
-| `toon_lighting.wgsl` | Object fragment: samples baked HDR lightmap, hue-preserving toon bands (no runtime lights) |
-| `terrain_toon.wgsl` | Terrain fragment: stochastic stone texture × the same baked toon shading |
+| `sky_dome.wesl` | 4-band toon sky gradient |
+| `terrain.wesl` | Terrain vertex: passes UV1 lightmap coords, flips skirt normals |
+| `toon_lighting.wesl` | Object fragment: samples baked HDR lightmap, hue-preserving toon bands (no runtime lights) |
+| `terrain_toon.wesl` | Terrain fragment: stochastic stone texture × the same baked toon shading |
 | `lightmap_bake.wgsl` | GPU compute terrain bake (sun + lights + AO + bounce; stack BVH traversal → packed f16 RGB) |
-| `edge_detection_post.wgsl` | Post-process edge detection |
+| `edge_detection_post.wesl` | Post-process edge detection (a `Core3d` system after `tonemapping`, pipeline specialized on `ExtractedView::target_format`) |
 
 ## Editor Model (docs/EDITOR_UI_DESIGN.md, all five phases)
 
@@ -242,10 +247,11 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 
 ## Rendering Pipeline
 
+- The camera uses `Tonemapping::Linear` (no tone curve, keeps the clamp). Bevy 0.20 made `None` a full passthrough that drops the negative-channel clamp — never put that in front of the 5-band quantiser
 - Camera renders to a float16 HDR image (`GameRenderTarget`): 1920x1080 displayed via sprite on layer 1 in gameplay; in the editor the image is resized to the egui viewport tab and drawn as an egui texture (bevy_egui binds any filterable float texture and does its own linear→sRGB, so colours match the sprite path)
 - Materials: `ExtendedMaterial<StandardMaterial, ToonMaterial>` for objects, `ExtendedMaterial<StandardMaterial, TerrainMaterial>` for terrain
-- Material bind group 3; use `@group(#{MATERIAL_BIND_GROUP})` in WGSL (naga_oil substitution)
-- **All lighting is baked** — sun, ambient, and every placed point/spot light. A lightmap texel is outgoing radiance in *lightmap units* (1.0 = full base colour); the toon shaders only sample, band (hue-preserving, 5 bands, bottom band cross-faded to a neutral `TOON_FLOOR` of 0.18 so nothing is pure black), and multiply by base colour. **Band boundaries are antialiased with `fwidth`** — a hard `floor()` threshold on a filtered texture aliases at texel granularity no matter how many texels you spend, which is what made shadow edges a staircase; the ramp makes each boundary ~1 screen pixel wide at any resolution or distance. `toon_band`/`toon_shade`/`luminance` are duplicated verbatim in `toon_lighting.wgsl` and `terrain_toon.wgsl` (no shared WGSL import module exists) — keep them in step — no runtime light loops, shadow maps, or clustering. Model, identical in the CPU terrain, CPU object, and GPU terrain bakers: `sun_rgb * (ndotl * shadow + bounce) + ambient_rgb * ao + Σ local lights`. Local lights use a smooth bounded range falloff (not inverse-square) and a segment shadow ray that stops at the light. See `baking/lightmap.rs`.
+- Material bind group 3; use `@group(constants::MATERIAL_BIND_GROUP)` in WESL
+- **All lighting is baked** — sun, ambient, and every placed point/spot light. A lightmap texel is outgoing radiance in *lightmap units* (1.0 = full base colour); the toon shaders only sample, band (hue-preserving, 5 bands, bottom band cross-faded to a neutral `TOON_FLOOR` of 0.18 so nothing is pure black), and multiply by base colour. **Band boundaries are antialiased with `fwidth`** — a hard `floor()` threshold on a filtered texture aliases at texel granularity no matter how many texels you spend, which is what made shadow edges a staircase; the ramp makes each boundary ~1 screen pixel wide at any resolution or distance. `toon_band`/`toon_shade`/`luminance` are duplicated verbatim in `toon_lighting.wesl` and `terrain_toon.wesl` (no shared import module exists) — keep them in step — no runtime light loops, shadow maps, or clustering. Model, identical in the CPU terrain, CPU object, and GPU terrain bakers: `sun_rgb * (ndotl * shadow + bounce) + ambient_rgb * ao + Σ local lights`. Local lights use a smooth bounded range falloff (not inverse-square) and a segment shadow ray that stops at the light. See `baking/lightmap.rs`.
 - **`LightmapBuffer::into_image()` sets `ImageSampler::linear()` explicitly, and must keep doing so.** `lib.rs` sets `ImagePlugin::default_nearest()` for the game's pixel-art look, so an image left on `ImageSampler::Default` inherits *nearest* — which point-samples the lightmap into piecewise-constant texel blocks and makes every toon band edge pixelated. Nothing downstream can compensate (the shader's `fwidth` AA measures a rate of change that is zero inside each texel; the bake-side blur just yields a staircase of flat blocks; more resolution only shrinks them), and `uv_unwrap`'s gutter/dilation exists specifically to feed bilinear taps. Covered by `baked_lightmaps_carry_an_explicit_linear_sampler`.
 - Lightmaps baked via GPU compute (native) or CPU raycast (WASM) into `Rgba16Float` textures, stored as OpenEXR. Terrain: one per chunk, decoded in the chunk's async compute task. Objects: one per toon-shaded sub-mesh entity (shared mesh assets share UVs, so a per-object atlas would collide), applied by `apply_object_lightmaps` once the scene has toon materials
 - Object lightmap UVs are generated by `uv_unwrap`: **every triangle gets its own cell** in a grid atlas, with a gutter, and the mesh is de-indexed so corners are unshared. Cell size is budgeted by **world-space** triangle size (`BakeConfig::mesh_texels_per_metre`, floored by `mesh_texels_per_triangle`, capped by `mesh_resolution_max`) and computed per *placed instance*, not per mesh asset — triangle count alone gave the cafe's 20×12 m two-triangle floor a 32 px atlas (~0.5 texels/m vs the terrain's 16), which the 5-band toon quantiser turned into staircased shadow edges. Dilation passes are derived from the cell size (`dilate_passes_for_atlas`), since the gutter is a fraction of the cell and grows with resolution. Objects are blurred with `LightmapBuffer::blur_cells` (confined to each triangle's cell, masked to covered texels) rather than the plain `blur` terrain uses — atlas neighbours are not surface neighbours. Overlapping UVs are the one thing a lightmap cannot tolerate — the previous triplanar projection bucketed by *unsigned* dominant axis, so a cube's top and bottom shared texels and faces wore each other's lighting.
@@ -255,7 +261,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 - **Shadow casting uses real triangles**, not convex hulls: `baking/bvh.rs` builds one flat BVH per bake over every toon-shaded mesh whose ancestry includes a `PlacedObject` or a `RigidBody::Static` (so editor props and plugin scenery like the cafe shell occlude, but a plugin's moving toon mesh does not). The CPU bakers traverse it and the GPU bake traverses the same uploaded nodes. Objects shadow themselves; acne is avoided by offsetting ray origins along the *face* normal, and terrain rays use two origins (0.5 up for the coarse DDA, at the surface for the exact triangle test). AO rays also test the BVH, which yields contact shadows under furniture. Bounce rays are absorbed by scenery but only terrain re-emits.
 - Volumetric fog + distance fog for atmosphere; sky dome follows camera
 
-## Physics (avian3d 0.7)
+## Physics (avian3d 0.8)
 
 - Player: `RigidBody::Kinematic` + capsule collider (radius=0.3, cylinder_height from CHAR_HEIGHT=1.5)
 - Ground detection: heightmap sampling + shape cast downward

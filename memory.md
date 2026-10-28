@@ -334,42 +334,56 @@ Both remaining phases landed together (terrain brush expansion + transform gizmo
 
 ## Bevy 0.18 → 0.20 upgrade — October 2026
 
-Plan: `docs/BEVY_0_20_UPGRADE_PLAN.md` (§8 records what Phase 1 actually hit).
-**Phase 1 (Bevy 0.19) landed 2026-10-27. Phase 2 (Bevy 0.20) not started.**
-The engine is now on bevy 0.19.1 / avian3d 0.7.0 / bevy_egui 0.40.1 /
-egui_dock 0.19.1 / egui 0.34.3 / wgpu+naga 29. 76 tests pass, same as the
-pre-upgrade baseline; nothing visual has been verified yet.
+Plan + outcome record: `docs/BEVY_0_20_UPGRADE_PLAN.md` (§8 = Phase 1 / 0.19,
+§9 = Phase 2+3 / 0.20). **All phases landed 2026-10-27** and were visually
+verified by the user. The engine is on bevy 0.20.0 / avian3d 0.8.0 /
+bevy_egui 0.43.1 / egui_dock 0.21.1 / egui 0.36.2 / wgpu+naga 30 / wesl 0.6.
 
-- **The `CLAUDE.md` egui pin note is stale.** It still says bevy_egui 0.39 /
-  egui_dock 0.18 are "the last lines for Bevy 0.18". They were, but the
-  ecosystem realigned: the 0.19 line is bevy_egui 0.40 + egui_dock 0.19 (egui
-  0.34), and the 0.20 line is bevy_egui 0.43 + egui_dock 0.21 (egui 0.36).
-  The invariant that still holds is that **bevy_egui and egui_dock must agree
-  on the egui minor** — that's the thing to check when bumping, not the
-  specific versions.
-- **The editor chrome is now driven from a root `egui::Ui`**, not the
-  `Context`. egui deleted the `Context`-based panel API: `Panel` (which
-  replaced `SidePanel`/`TopBottomPanel`) and `egui_dock::DockArea` take
-  `&mut Ui`. bevy_egui owns `begin_pass`/`end_pass`, so `Context::run_ui` is
-  unavailable; `editor_ui` builds `egui::Ui::new(ctx, id, UiBuilder::new())`
-  (which defaults to the background layer and `content_rect`) and threads it
-  through the panels and the dock. `Window` is unaffected — still `&Context`.
-- **Render passes are systems now, not graph nodes.** `post_process.rs` is a
-  system in `Core3dSystems::PostProcess` `.after(tonemapping)`;
-  `baking/gpu.rs`'s compute dispatch is a system in the surviving `RenderGraph`
-  *schedule* at `RenderGraphSystems::Render`. The model to copy when touching
-  either is `bevy_core_pipeline::fullscreen_material` — it is Bevy's own
-  reference implementation of a fullscreen post-process effect, and it already
-  shows the per-view pipeline specialization pattern.
-- **The edge-detection pipeline is specialized on `ExtractedView::target_format`**
-  via `Variants`/`Specializer`/`SpecializerKey`, replacing a hard-coded
-  `Rgba16Float` that silently assumed the camera keeps its `Hdr` component.
-  Don't reintroduce the constant.
-- **`#![recursion_limit = "256"]` on `game_engine_lib` and `engine_api` is
-  load-bearing**, not cosmetic: Bevy 0.19's `SystemParam`/auto-trait chains
-  overflow the default 128-deep trait solver, and that overflow is scheduled to
-  become a hard error.
-- Biggest remaining risk is Phase 2's naga_oil → **WESL** shader conversion (5
-  of 6 shaders), plus `Tonemapping::None` → `Tonemapping::Linear` (0.20 made
-  `None` a full passthrough that drops the negative-channel clamp — bad news
-  just upstream of a 5-band quantiser).
+- **The invariant for the editor chrome deps is "bevy_egui and egui_dock agree
+  on the egui minor"**, not any specific version — that is what to check when
+  bumping. The editor builds one root `egui::Ui` per pass
+  (`Ui::new(ctx, id, UiBuilder::new())`, defaults to background layer +
+  `content_rect`) and threads it through `Panel::top/bottom(..).show(&mut root)`
+  and `DockArea::show_inside(&mut root)`. There is no `Context`-based panel API
+  any more; `Window` still takes `&Context`.
+- **Shaders are WESL.** `import bevy_pbr::render::forward_io::VertexOutput;`,
+  module paths mirror crate file layout (`bevy_pbr::render::*`,
+  `bevy_pbr::prepass::io`, `bevy_pbr::deferred::functions::deferred_output`),
+  `@if(DEF)`/`@else` attach to exactly one declaration/import/statement (so a
+  multi-statement conditional branch is written as repeated `@if` lines, the
+  way `bevy_pbr/render/pbr.wesl` does), bind group index is
+  `@group(constants::MATERIAL_BIND_GROUP)`. Plain WGSL with no directives still
+  loads — `lightmap_bake.wgsl` stays `.wgsl` and the `naga` dev-dep must track
+  wgpu's major (30 now) for its validation test. The authoritative reference
+  for any shader question is the `.wesl` sources in the `bevy_pbr` crate under
+  `~/.cargo/registry`, not memory.
+- **Render passes are systems.** `post_process.rs`: `Core3d` schedule,
+  `Core3dSystems::PostProcess`, `.after(tonemapping)`, pipeline specialized per
+  view on `ExtractedView::target_format` via `Variants`/`Specializer` (model:
+  `bevy_core_pipeline::fullscreen_material`). `baking/gpu.rs`: compute dispatch
+  is a system in the surviving `RenderGraph` *schedule*,
+  `RenderGraphSystems::Render`. `ExtractComponentPlugin::<T>` is a
+  `bevy_render` alias that already names `RenderApp`; only the derive needs
+  `#[extract_app(RenderApp)]`.
+- **bevy_ui buttons (0.20 model):** `ui_widgets::Button` + picking
+  `Hovered::default()` on the entity (Hovered is only maintained where it is
+  present; nodes are pickable by default, no `Pickable` needed). Handlers poll
+  `Query<&Marker, Added<Pressed>>` — fires on pointer-down, the same timing the
+  old `Changed<Interaction>`/`Pressed` pattern had. `update_interactive_visuals`
+  (engine `src/ui/widgets.rs`, duplicated in cafe-sim `ui.rs`) recolours only
+  changed entities (`Changed<Hovered>` ∪ `Added<Pressed>` ∪
+  `RemovedComponents<Pressed>`) because UI rendering is retained. The old
+  `Interaction` enum and `ui::widget::Button` are deprecated aliases being
+  removed after 0.20 — never reintroduce them.
+- `Tonemapping::Linear` on the game camera, not `None` (0.20 made `None` a
+  full passthrough that drops the negative-channel clamp ahead of the 5-band
+  quantiser). `#![recursion_limit = "256"]` on `game_engine_lib` and
+  `engine_api` is load-bearing (trait-solver overflow, scheduled to become a
+  hard error). `ENGINE_SCRIPTS_ABI_VERSION` is 7.
+- Behaviour deliberately *not* changed in the migration: button activation
+  stays press-down (bevy's own `ui_widgets::Button` convention is release via
+  `Activate`); `clear_just_pressed(MouseButton::Left)` calls in cafe-sim
+  handlers were left in place.
+- **Process:** this worktree gets reset between sessions. Uncommitted work is
+  destroyed — Phase 2 had to be redone once for exactly this reason. Commit
+  each chunk as soon as it is green.

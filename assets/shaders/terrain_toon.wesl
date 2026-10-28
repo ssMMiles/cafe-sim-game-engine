@@ -1,42 +1,78 @@
-// Toon fragment shader for placed meshes.
+// Toon fragment shader for terrain chunks.
 //
-// All lighting is baked: the lightmap holds outgoing radiance in "lightmap
-// units" (1.0 = full base colour) with the sun, ambient×AO, and — soon —
-// point/spot lights already folded in. The runtime does no light evaluation
-// at all: sample, band, multiply. That keeps the WASM/WebGPU path free of
-// shadow maps and clustered lighting entirely.
+// All lighting is baked (see toon_lighting.wesl for the model); this shader
+// only adds the stochastic stone texture blend on top of the base colour.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_vertex_output,
     pbr_bindings,
-    pbr_types,
-    mesh_view_bindings as view_bindings,
-}
+};
 
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::forward_io::{VertexOutput, FragmentOutput}
-#endif
+@if(PREPASS_PIPELINE)
+import bevy_pbr::{
+    prepass::io::{VertexOutput, FragmentOutput},
+    deferred::functions::deferred_output,
+};
+@else
+import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100)
+@group(constants::MATERIAL_BIND_GROUP) @binding(100)
+var stone_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101)
+var stone_sampler: sampler;
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(102)
 var lightmap_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+@group(constants::MATERIAL_BIND_GROUP) @binding(103)
 var lightmap_sampler: sampler;
 
-struct ToonFlags {
+struct TerrainFlags {
     use_lightmap: u32,
 };
-@group(#{MATERIAL_BIND_GROUP}) @binding(102)
-var<uniform> toon_flags: ToonFlags;
+@group(constants::MATERIAL_BIND_GROUP) @binding(104)
+var<uniform> terrain_flags: TerrainFlags;
 
 const TOON_BANDS: f32 = 5.0;
 // Darkest a surface can get, as a fraction of its base colour. Fully
 // shadowed geometry reads as a dark tint rather than dropping to pure black.
 const TOON_FLOOR: f32 = 0.18;
+
+// Scale controlling how many world units span one texture repeat.
+// Larger = stones appear larger / more spread out.
+const STONE_UV_SCALE: f32 = 3.0;
+
+// How much to shift the terrain base color toward stone gray at outlines.
+const STONE_BLEND_STRENGTH: f32 = 0.85;
+
+// Stone color (dark gray)
+const STONE_COLOR: vec3<f32> = vec3<f32>(0.02, 0.02, 0.02);
+
+// Cheap 2D hash — maps an integer-lattice vec2 to a random [0,1]^2 offset
+fn hash2(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(
+        dot(p, vec2<f32>(127.1, 311.7)),
+        dot(p, vec2<f32>(269.5, 183.3))
+    );
+    return fract(sin(q) * 43758.5453);
+}
+
+// Stochastic (no-tile) texture sample.
+// Blends four neighboring lattice cells, each with a unique random UV offset,
+// so the repeating grid of the texture becomes invisible.
+// Uses a fixed mip level to avoid automatic mip selection blurring sparse textures to white.
+fn sample_no_tile(uv: vec2<f32>) -> vec4<f32> {
+    let p = floor(uv);
+    let f = fract(uv);
+    // Smoothstep blend weights
+    let w = f * f * (3.0 - 2.0 * f);
+
+    let va = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p),                        1.0);
+    let vb = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p + vec2<f32>(1.0, 0.0)), 1.0);
+    let vc = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p + vec2<f32>(0.0, 1.0)), 1.0);
+    let vd = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p + vec2<f32>(1.0, 1.0)), 1.0);
+
+    return mix(mix(va, vb, w.x), mix(vc, vd, w.x), w.y);
+}
 
 // Perceptual luminance from a linear RGB color
 fn luminance(color: vec3<f32>) -> f32 {
@@ -66,7 +102,7 @@ fn luminance(color: vec3<f32>) -> f32 {
 // value has already reached `(f + 1) / bands`, which is where band `f + 1`
 // starts.
 //
-// NOTE: duplicated verbatim in `terrain_toon.wgsl` — the two shaders must
+// NOTE: duplicated verbatim in `toon_lighting.wesl` — the two shaders must
 // band identically or terrain and objects disagree where they meet. These
 // are asset-path shaders with no shared import module; keep them in step by
 // hand.
@@ -102,47 +138,40 @@ fn fragment(
 ) -> FragmentOutput {
     let double_sided = false;
     var pbr_input = pbr_input_from_vertex_output(in, is_front, double_sided);
-    // Read base color from the material uniform directly to avoid
-    // pbr_input_from_standard_material's dependency on uv (VERTEX_UVS_A) when
-    // only VERTEX_UVS_B is defined on the mesh.
+    // Read base color directly from the material uniform — we skip
+    // pbr_input_from_standard_material because terrain has no UV0 and that
+    // function assumes uv is defined whenever any UV set is present.
     pbr_input.material.base_color = pbr_bindings::material.base_color;
     pbr_input.material.flags = pbr_bindings::material.flags;
 
-    // Mix in base_color_texture when one is bound and the mesh ships a
-    // primary UV channel. Mirrors the StandardMaterial path in
-    // pbr_fragment::pbr_input_from_standard_material; guarded on
-    // VERTEX_UVS_A so lightmap-only meshes still compile.
-#ifdef VERTEX_UVS_A
-    if ((pbr_input.material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u) {
-        let uv = (pbr_bindings::material.uv_transform * vec3<f32>(in.uv, 1.0)).xy;
-        pbr_input.material.base_color = pbr_input.material.base_color * textureSampleBias(
-            pbr_bindings::base_color_texture,
-            pbr_bindings::base_color_sampler,
-            uv,
-            view_bindings::view.mip_bias,
-        );
-    }
-#endif
+    // Sample with stochastic UV offset to break up visible tiling.
+    // Fixed mip level avoids automatic selection blurring sparse textures to white at distance.
+    let stone_uv = in.world_position.xz / STONE_UV_SCALE;
+    let stone_sample = sample_no_tile(stone_uv);
+    let stone_factor = smoothstep(0.05, 0.45, 1.0 - stone_sample.r) * STONE_BLEND_STRENGTH;
 
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
-    var out: FragmentOutput;
+    pbr_input.material.base_color = vec4<f32>(
+        mix(pbr_input.material.base_color.rgb, STONE_COLOR, stone_factor),
+        pbr_input.material.base_color.a,
+    );
 
-    // White = fully lit. Used for the unlit debug view and for meshes that
-    // have no lightmap UVs at all.
+    // White = fully lit (unlit debug view / unbaked chunk). Computed
+    // unconditionally; unused in the deferred prepass — see toon_lighting.wesl.
     var radiance = vec3<f32>(1.0);
-    if (toon_flags.use_lightmap == 1u) {
-#ifdef VERTEX_UVS_B
+    if (terrain_flags.use_lightmap == 1u) {
+@if(VERTEX_UVS_B)
         radiance = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).rgb;
-#endif
     }
 
+@if(PREPASS_PIPELINE)
+    let out = deferred_output(in, pbr_input);
+@if(!PREPASS_PIPELINE)
+    var out: FragmentOutput;
+@if(!PREPASS_PIPELINE)
     out.color = vec4<f32>(
         pbr_input.material.base_color.rgb * toon_shade(radiance),
         pbr_input.material.base_color.a,
     );
-#endif
 
     return out;
 }

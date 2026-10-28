@@ -7,7 +7,7 @@
 //! marker component you attached when spawning.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 
 use super::theme::UiTheme;
 
@@ -71,6 +71,7 @@ pub fn spawn_text_input<M: Component>(
             ));
             col.spawn((
                 Button,
+                Hovered::default(),
                 Node {
                     width: Val::Percent(100.0),
                     height: Val::Px(36.0),
@@ -141,13 +142,10 @@ impl Plugin for TextInputPlugin {
 /// cleanup if you want focus released on screen exit.
 fn update_focus_on_click(
     mut commands: Commands,
-    interactions: Query<(Entity, &Interaction), (Changed<Interaction>, With<TextInput>)>,
+    pressed: Query<Entity, (Added<Pressed>, With<TextInput>)>,
     focused: Query<Entity, With<TextInputFocus>>,
 ) {
-    for (entity, interaction) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for entity in &pressed {
         for old in &focused {
             commands.entity(old).remove::<TextInputFocus>();
         }

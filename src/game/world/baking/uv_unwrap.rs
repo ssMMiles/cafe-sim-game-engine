@@ -301,7 +301,7 @@ mod tests {
     /// used to collide, so test a real closed box.
     #[test]
     fn no_two_triangles_overlap_in_uv_space() {
-        let mut mesh = Mesh::from(bevy::math::primitives::Cuboid::new(2.0, 2.0, 2.0));
+        let mut mesh = Mesh::from(bevy::shape::Cuboid::new(2.0, 2.0, 2.0));
         let tri_count = generate_lightmap_uvs(&mut mesh).unwrap() as usize;
         assert_eq!(tri_count, 12, "a cuboid is 12 triangles");
         let uvs = uv1_of(&mesh).unwrap();
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn triangles_are_separated_by_a_gutter() {
-        let mut mesh = Mesh::from(bevy::math::primitives::Cuboid::default());
+        let mut mesh = Mesh::from(bevy::shape::Cuboid::default());
         let tri_count = generate_lightmap_uvs(&mut mesh).unwrap();
         let uvs = uv1_of(&mesh).unwrap();
         let cell = 1.0 / grid_side(tri_count) as f32;

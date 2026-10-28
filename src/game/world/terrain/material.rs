@@ -22,15 +22,15 @@ pub struct TerrainMaterial {
 
 impl MaterialExtension for TerrainMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/terrain.wgsl".into()
+        "shaders/terrain.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/terrain_toon.wgsl".into()
+        "shaders/terrain_toon.wesl".into()
     }
 
     fn deferred_fragment_shader() -> ShaderRef {
-        "shaders/terrain_toon.wgsl".into()
+        "shaders/terrain_toon.wesl".into()
     }
 
     fn alpha_mode() -> Option<AlphaMode> {

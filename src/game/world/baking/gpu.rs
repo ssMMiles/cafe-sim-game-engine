@@ -450,9 +450,8 @@ fn dispatch_chunk(
     let byte_count = texel_count * 2 * std::mem::size_of::<u32>();
 
     // COPY_SRC is required by GpuReadbackPlugin so it can copy results to CPU.
-    let mut out_buf = ShaderBuffer::with_size(byte_count, RenderAssetUsages::RENDER_WORLD);
-    out_buf.buffer_description.usage =
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+    let mut out_buf = ShaderBuffer::with_size(byte_count as u64, RenderAssetUsages::RENDER_WORLD);
+    out_buf.buffer_usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
     let out_handle = buffers.add(out_buf);
 
     let total_strips = entry.resolution.div_ceil(strip_rows);

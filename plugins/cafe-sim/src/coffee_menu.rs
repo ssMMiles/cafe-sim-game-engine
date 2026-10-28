@@ -10,8 +10,8 @@
 //! + progress bar, then "Ready!" when done), the same pattern customer popups
 //! use. While a machine is brewing, clicking it does not re-open the menu.
 
-use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 use engine_api::PlayerCamera;
 use std::collections::HashSet;
 
@@ -224,6 +224,7 @@ pub fn sync_coffee_menu_ui(
             .spawn_owned((
                 DrinkCard { index: idx },
                 Button,
+                Hovered::default(),
                 Node {
                     width: Val::Px(CARD_W),
                     height: Val::Px(CARD_H),
@@ -260,16 +261,13 @@ pub fn sync_coffee_menu_ui(
 
 pub fn handle_drink_click(
     mut commands: Commands,
-    interaction_q: Query<(&Interaction, &DrinkCard), (Changed<Interaction>, With<Button>)>,
+    pressed: Query<&DrinkCard, Added<Pressed>>,
     mut active: ResMut<ActiveMenu>,
     mut active_machine: ResMut<ActiveCoffeeMachine>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     machine_q: Query<(), (With<CoffeeMachine>, Without<Brewing>)>,
 ) {
-    for (interaction, card) in interaction_q.iter() {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for card in &pressed {
         let Some(drink) = DRINKS.get(card.index) else {
             continue;
         };

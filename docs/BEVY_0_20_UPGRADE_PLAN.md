@@ -1,7 +1,7 @@
 # Bevy 0.18 → 0.20 Upgrade Plan
 
-Status: **Phase 1 (Bevy 0.19) complete 2026-10-27.** Phase 2 (Bevy 0.20) not
-started. See §8 for what Phase 1 actually hit versus what was predicted.
+Status: **Phases 1–3 complete 2026-10-27** — the engine is on Bevy 0.20.
+§8 and §9 record what each phase actually hit versus what was predicted.
 
 Facts in this document were verified on 2026-10-27 against the published
 migration guides (`bevyengine/bevy-website`, `content/learn/migration-guides/`),
@@ -512,3 +512,61 @@ Everything in §6. Phase 1 compiles and its tests pass, but **nothing visual has
 been confirmed** — the toon banding, edge detection and a fresh bake all need
 eyes on them. The render-graph rewrite and the editor `Ui` restructure are both
 the kind of change that compiles perfectly and renders wrong.
+
+---
+
+## 9. Phase 2 + 3 outcome (Bevy 0.20) — 2026-10-27
+
+Landed. Resolved stack: `bevy 0.20.0`, `avian3d 0.8.0`, `bevy_egui 0.43.1`,
+`egui_dock 0.21.1`, `egui 0.36.2`, `wgpu`/`naga 30.0.1`, `wesl 0.6.0`,
+`winit 0.30.12` (unchanged). `ENGINE_SCRIPTS_ABI_VERSION` bumped 6 → 7 (Phase
+3): the shared bevy types behind every FFI entry point changed, so a dylib
+built against the old engine-api must be refused rather than loaded.
+
+**Verification:** `cargo check --workspace --all-targets` 0 errors; `cargo test
+--workspace` 76 passed / 0 failed, identical to the 0.18 and 0.19 baselines
+(this includes the `lightmap_bake.wgsl` validation, now against naga 30);
+`cargo fmt --all --check` clean; `cargo build --workspace` succeeds with the
+plugin dylibs. Phase 1 was confirmed visually by the user ("all the lighting
+and edge detection effect works just the same"); Phase 2 likewise.
+
+### What the plan predicted correctly
+
+§2.2 (WESL — all five shaders converted, `lightmap_bake.wgsl` untouched and
+still validated by `cargo test`), §2.3 (`Tonemapping::Linear`), M6
+(`ShaderBuffer::with_size(u64)` + `buffer_usage`), the `extract_app` half of
+M7, the `Panel::show_inside → show` rename carried over from §8, and the egui
+bump being otherwise a no-op thanks to §2.4 having landed in Phase 1.
+Avian 0.8 compiled with **no source changes**.
+
+### What the plan missed
+
+| Found | Fix | Sites |
+|---|---|---|
+| **`ui::widget::Button` is a deprecated *type alias* in 0.20**, so using it as a *value* (`Button,` in a bundle) is a hard error, not a warning. `Interaction` is likewise an alias slated for removal after 0.20. The guide lists both as merely "deprecated" | Migrated the whole bevy_ui button model: `ui_widgets::Button` + picking `Hovered` on every button; handlers poll `Added<Pressed>` instead of `Changed<Interaction>` + `== Pressed` (same press-down timing); `update_interactive_visuals` recolours from `Has<Pressed>` / `Hovered.0`, driven by `Changed<Hovered>`, `Added<Pressed>` and `RemovedComponents<Pressed>` so retained UI isn't re-extracted every frame | 11 spawns, 20 handlers, 2 visuals systems across 14 files |
+| `Hovered(bool)` is only maintained on entities that already carry it | insert `Hovered::default()` at spawn | 11 |
+| `egui_dock 0.21` `TabViewer` requires `fn id(&mut self, tab) -> Id` | `Id::new(*tab)`; `EditorTab` now derives `Hash` | 1 |
+| `ViewPrepassTextures::depth_view` removed (depth is `Option<DepthStencilAttachment>` for stencil support) | `depth_only_view()` — the single-aspect view a shader binding wants | 1 |
+| `bevy_render::extract_component::ExtractComponentPlugin<C, F>` is a type alias that already bakes in `RenderApp`; only the *derive* needs `#[extract_app(RenderApp)]` | keep `ExtractComponentPlugin::<T>::default()` | 1 |
+| `bevy::math::primitives::Cuboid` moved to the new `bevy_shape` crate | `bevy::shape::Cuboid` (tests) | 2 |
+
+### Behaviour notes
+
+- Button activation timing is preserved: `Added<Pressed>` fires on pointer-down
+  exactly like `Changed<Interaction>` reaching `Pressed` did. bevy's own
+  convention for `ui_widgets::Button` is activate-on-release (`Activate`, or
+  `ActivateOnPress` to opt back in); switching to that would be a one-line
+  change per handler but was deliberately *not* made in a migration commit.
+- **Correction to §8:** `proc-macro-error2` is *still* pulled in by
+  `avian_derive 0.2.2` under `avian3d 0.8.0`, so the avian bump did not clear
+  the future-incompat warning as predicted. It is transitive and not fixable
+  from here; it becomes a hard error only in a future Rust release.
+
+### Process note
+
+Phase 2/3 was implemented once, left uncommitted at the user's instruction
+(only the 0.19 commit had been requested), and then **lost** when the worktree
+was reset between sessions — `git reflog` showed `reset: moving to <phase 1
+commit>`. It was reconstructed from this document plus the saved edit scripts.
+Lesson: commit each phase as it goes green rather than batching, even when the
+next phase is expected to follow immediately.

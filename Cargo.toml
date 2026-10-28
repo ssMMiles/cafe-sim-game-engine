@@ -5,7 +5,7 @@ members = [".", "crates/engine-api", "plugins/*"]
 resolver = "3"
 
 [workspace.dependencies]
-bevy = { version = "0.19", default-features = true, features = [
+bevy = { version = "0.20", default-features = true, features = [
     "web", "webgpu",
     "jpeg",
     "debug",
@@ -67,13 +67,13 @@ env_logger = "0.11.9"
 log = "0.4.29"
 wasm-bindgen = "0.2.111"
 
-avian3d = { version = "0.7" }
-# Editor chrome (docked viewport, outliner, inspector). 0.40 is the Bevy 0.19
-# line; egui_dock 0.19 is on the same egui (0.34). Both must always agree on
+avian3d = { version = "0.8" }
+# Editor chrome (docked viewport, outliner, inspector). 0.43 is the Bevy 0.20
+# line; egui_dock 0.21 is on the same egui (0.36). Both must always agree on
 # the egui minor — see docs/EDITOR_UI_DESIGN.md §1.1 and
 # docs/BEVY_0_20_UPGRADE_PLAN.md §1.
-bevy_egui = "0.40"
-egui_dock = "0.19"
+bevy_egui = "0.43"
+egui_dock = "0.21"
 rayon = "1"
 bytemuck = { version = "1", features = ["derive"] }
 # HDR lightmaps: OpenEXR (f16 RGB, ZIP) on disk, Rgba16Float on the GPU.
@@ -99,8 +99,8 @@ js-sys = "0.3"
 tempfile = "3"
 # Validates the hand-written compute shader in a unit test (same naga Bevy
 # links) so capability errors surface at `cargo test`, not at runtime.
-# Keep in step with bevy_render's wgpu/naga: Bevy 0.19 -> 29.
-naga = { version = "29", features = ["wgsl-in"] }
+# Keep in step with bevy_render's wgpu/naga: Bevy 0.20 -> 30.
+naga = { version = "30", features = ["wgsl-in"] }
 
 [dependencies.bevy]
 workspace = true

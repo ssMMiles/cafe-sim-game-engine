@@ -29,7 +29,12 @@ pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_l
 /// - 4: split registration out of setup ([`DynamicPlugin::register`]) so a
 ///   plugin's scripts stay visible to the editor while its gameplay systems
 ///   are stopped. Added `plugin_register` to the generated FFI surface.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 6;
+/// - 7: Bevy 0.18 → 0.20 upgrade. The shared bevy types behind every FFI
+///   entry point changed (resources are components, `SceneRoot` is
+///   `WorldAssetRoot`, extraction is generic over worlds) and the `add!`
+///   macro now registers `Time` via `register_component`. A dylib built
+///   against the 0.18/0.19 engine-api must be refused, not loaded.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 7;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///

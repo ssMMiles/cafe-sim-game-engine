@@ -22,7 +22,7 @@ pub struct SkyDomeMaterial {}
 
 impl Material for SkyDomeMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/sky_dome.wgsl".into()
+        "shaders/sky_dome.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {

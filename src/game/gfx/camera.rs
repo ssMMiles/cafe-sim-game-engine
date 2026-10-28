@@ -105,7 +105,10 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
             // HDR intermediate render target — required by VolumetricFog
             Hdr,
             // Toon shaders already map HDR→display; skip the filmic LUT to avoid double-compression
-            Tonemapping::None,
+            // 0.20 made `None` a full passthrough (no `DebandDither`, no clamp of negative
+            // channels). `Linear` is the new name for "no tone curve, keep the clamp" — the
+            // behaviour this camera had before, and the safe input to the 5-band quantiser.
+            Tonemapping::Linear,
             // Distance fog fading distant terrain into the warm horizon haze
             DistanceFog {
                 color: Color::srgba(0.85, 0.80, 0.72, 1.0),

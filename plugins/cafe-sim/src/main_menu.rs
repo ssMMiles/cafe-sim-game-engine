@@ -12,7 +12,7 @@
 //! All UI here is `ScriptOwned`, so the existing plugin teardown handles
 //! cleanup when the player drops back to the engine main menu.
 
-use bevy::prelude::*;
+use bevy::{prelude::*, ui::Pressed};
 use engine_api::AppState;
 
 use crate::spawn::SpawnOwnedCommands;
@@ -110,15 +110,12 @@ pub fn build_main_menu(commands: &mut Commands, theme: &UiTheme) {
 }
 
 pub fn handle_main_menu_buttons(
-    interactions: Query<(&Interaction, &MainMenuButton), Changed<Interaction>>,
+    pressed: Query<&MainMenuButton, Added<Pressed>>,
     mut phase: ResMut<CafePhase>,
     mut app_state: ResMut<NextState<AppState>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
 ) {
-    for (interaction, action) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    for action in &pressed {
         match action {
             MainMenuButton::NewGame => {
                 *phase = CafePhase::SlotPicker(SlotPickerMode::NewGame);

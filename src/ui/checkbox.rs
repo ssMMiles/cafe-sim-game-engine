@@ -3,7 +3,7 @@
 //! Spawn one with [`spawn_checkbox`] and read its state by querying for the
 //! `Checkbox` component together with whatever marker you attached.
 
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
 
 use super::theme::UiTheme;
 use super::widgets::InteractiveStyle;
@@ -30,6 +30,7 @@ pub fn spawn_checkbox<M: Component>(
     parent
         .spawn((
             Button,
+            Hovered::default(),
             Node {
                 width: Val::Px(theme.btn_width * 1.5),
                 height: Val::Px(32.0),
@@ -81,13 +82,9 @@ impl Plugin for CheckboxPlugin {
     }
 }
 
-fn handle_checkbox_clicks(
-    mut interactions: Query<(&Interaction, &mut Checkbox), (Changed<Interaction>, With<Button>)>,
-) {
-    for (interaction, mut checkbox) in &mut interactions {
-        if *interaction == Interaction::Pressed {
-            checkbox.checked = !checkbox.checked;
-        }
+fn handle_checkbox_clicks(mut pressed: Query<&mut Checkbox, Added<Pressed>>) {
+    for mut checkbox in &mut pressed {
+        checkbox.checked = !checkbox.checked;
     }
 }
 
