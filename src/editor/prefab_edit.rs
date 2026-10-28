@@ -54,6 +54,7 @@ pub struct PrefabOps<'w, 's> {
     history: ResMut<'w, History>,
     lighting: ResMut<'w, LightingState>,
     state: ResMut<'w, PrefabEditState>,
+    thumbnails: ResMut<'w, super::thumbnails::ThumbnailCache>,
 }
 
 impl PrefabOps<'_, '_> {
@@ -182,6 +183,8 @@ impl PrefabOps<'_, '_> {
         if let Err(e) = store_prefab(&mut self.library, new_def.clone()) {
             return self.fail(format!("Failed to save prefab: {e}"));
         }
+        self.thumbnails
+            .invalidate(&format!("prefab://{}", inst.name));
         // The applying instance *is* the new definition: fresh pairs (extras
         // folded in), no overrides. Its entities stay in place.
         if let Ok((_, mut obj, _)) = self.placed.get_mut(root) {

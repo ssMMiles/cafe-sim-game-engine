@@ -266,6 +266,11 @@ impl Plugin for EditorPlugin {
         app.init_resource::<AssetCatalog>();
         app.init_resource::<previews::PreviewImages>();
         app.init_resource::<thumbnails::ThumbnailCache>();
+        app.add_systems(
+            Update,
+            thumbnails::drive_thumbnails.in_set(EditorSet::InGame),
+        );
+        app.add_systems(OnExit(AppState::InGame), thumbnails::reset_thumbnail_rig);
         app.add_systems(Startup, request_asset_manifest);
         app.add_systems(Update, populate_asset_catalog.in_set(EditorSet::InGame));
 
@@ -366,6 +371,7 @@ mod tests {
         initializes("prepare_history", prepare_history);
         initializes("apply_level_actions", apply_level_actions);
         initializes("apply_prefab_actions", apply_prefab_actions);
+        initializes("drive_thumbnails", thumbnails::drive_thumbnails);
         initializes("apply_selection_actions", apply_selection_actions);
         initializes("commit_placed_edits", commit_placed_edits);
         initializes("apply_script_edits", apply_script_edits);

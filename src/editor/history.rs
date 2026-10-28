@@ -1132,6 +1132,7 @@ mod tests {
         app.init_resource::<History>()
             .init_resource::<crate::game::world::prefabs::PrefabLibrary>()
             .init_resource::<super::super::prefab_edit::PrefabEditState>()
+            .init_resource::<super::super::thumbnails::ThumbnailCache>()
             .init_resource::<Selection>()
             .init_resource::<LightingState>()
             .init_resource::<PlacedObjectRegistry>()
