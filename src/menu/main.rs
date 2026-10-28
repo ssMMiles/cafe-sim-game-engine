@@ -23,7 +23,37 @@ pub fn setup_main_menu(
     registry: Res<ProjectRegistry>,
 ) {
     log::info!("Setting up the main menu screen");
+    build_main_menu(&mut commands, &theme, &registry);
+}
 
+/// Rebuild the screen when the project list changes underneath it.
+///
+/// Project discovery is asynchronous on wasm (an OPFS scan), so the registry
+/// routinely gains its real contents several frames *after* the menu was
+/// built from the seeded fallback. Without this the browser would show a
+/// stale list until you navigated away and back.
+///
+/// Skipped when nothing has been spawned yet: on the frame `setup_main_menu`
+/// runs its spawn is still a queued command, so the query is empty and a
+/// rebuild here would duplicate the whole screen. The menu is built from the
+/// same registry value in that case anyway.
+pub fn rebuild_main_menu_on_registry_change(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    registry: Res<ProjectRegistry>,
+    existing: Query<Entity, With<MainMenuScreen>>,
+) {
+    if !registry.is_changed() || existing.is_empty() {
+        return;
+    }
+    log::info!("Project list changed; rebuilding the main menu");
+    for entity in &existing {
+        commands.entity(entity).despawn();
+    }
+    build_main_menu(&mut commands, &theme, &registry);
+}
+
+fn build_main_menu(commands: &mut Commands, theme: &UiTheme, registry: &ProjectRegistry) {
     commands
         .spawn((
             MainMenuScreen,
@@ -38,7 +68,7 @@ pub fn setup_main_menu(
             BackgroundColor(theme.bg_dark),
         ))
         .with_children(|parent| {
-            parent.ui_title("Projects", &theme);
+            parent.ui_title("Projects", theme);
 
             if registry.projects.is_empty() {
                 parent.spawn((
@@ -61,7 +91,7 @@ pub fn setup_main_menu(
                         &project.name,
                         MainMenuButton::SelectProject(project.id.clone()),
                         ButtonVariant::Primary,
-                        &theme,
+                        theme,
                     );
                 }
             }
@@ -70,7 +100,7 @@ pub fn setup_main_menu(
                 "New Project",
                 MainMenuButton::NewProject,
                 ButtonVariant::Primary,
-                &theme,
+                theme,
             );
         });
 }

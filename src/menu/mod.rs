@@ -26,7 +26,11 @@ impl Plugin for MenuPlugin {
         );
         app.add_systems(
             Update,
-            main::handle_main_menu_button_press.run_if(in_state(MenuScreen::Main)),
+            (
+                main::handle_main_menu_button_press,
+                main::rebuild_main_menu_on_registry_change,
+            )
+                .run_if(in_state(MenuScreen::Main)),
         );
 
         app.add_systems(OnEnter(MenuScreen::CreateProject), create_project::setup);

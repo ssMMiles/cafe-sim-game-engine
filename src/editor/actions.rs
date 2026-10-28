@@ -139,7 +139,8 @@ pub fn apply_level_actions(
                     continue;
                 }
                 active.0.worlds.push(world_id.clone());
-                #[cfg(not(target_arch = "wasm32"))]
+                // On wasm this is fire-and-forget (OPFS is async), so the
+                // rollback below only ever fires natively.
                 if let Err(e) = projects::write_manifest(&active.0) {
                     active.0.worlds.retain(|w| w != world_id);
                     menu.new_world_error = Some(format!("Failed to update manifest: {e}"));

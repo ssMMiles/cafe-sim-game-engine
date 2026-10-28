@@ -160,7 +160,6 @@ pub fn handle_actions(
                 let display_name = if name.is_empty() { id.clone() } else { name };
                 let start_world = if world.is_empty() { id.clone() } else { world };
 
-                #[cfg(not(target_arch = "wasm32"))]
                 {
                     let manifest = projects::ProjectManifest {
                         id: id.clone(),
@@ -187,16 +186,6 @@ pub fn handle_actions(
                             set_status(&mut status_q, &msg, theme.danger);
                         }
                     }
-                }
-
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (selected_plugins, display_name, start_world);
-                    set_status(
-                        &mut status_q,
-                        "Creating projects from the browser is not supported.",
-                        theme.danger,
-                    );
                 }
             }
         }

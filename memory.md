@@ -528,3 +528,60 @@ bake off the main thread — the tab is frozen for its whole duration. The 39×
 makes that ~1.6 s instead of ~61 s, but it is still a freeze. Fixing it properly
 needs `wasm-bindgen-rayon` (cross-origin isolation headers) or a bake that yields
 between chunks. Not attempted.
+
+## WASM: GPU bake on WebGPU, and projects in OPFS — October 2026
+
+### The GPU bake was gated on `cfg(not(wasm32))` for no real reason
+
+WebGPU has compute shaders, and the terrain bake fits well inside its
+guaranteed limits: 5 storage buffers of the 8 guaranteed, a 16×16 workgroup at
+the 256-invocation cap, an 8 MB output buffer against a 128 MiB binding cap.
+Bevy's `GpuReadbackPlugin` is registered unconditionally and maps with an async
+callback (`map_async`), never a blocking poll, so readback works there as-is.
+Removing the gate is most of the fix for the web bake freezing the tab.
+
+**Gate on capability, not target.** One wasm binary gets compute on WebGPU and
+not on a WebGL2 fallback, knowable only once the adapter exists.
+`gpu::GpuBakeSupported` is an `Arc<AtomicBool>` inserted into both the main app
+and the render app (the adapter lives only in the latter), set at
+`RenderStartup`. The check copies **both halves** of bevy's own
+(`batching::gpu_preprocessing`): the `DownlevelFlags::COMPUTE_SHADERS` flag
+*and* `device.limits().max_compute_workgroup_storage_size != 0`, because the
+WebGL2 downlevel limit set simulates missing compute by zeroing every
+`max_compute_*` while still reporting the flag. Defaults to `false` so a bake
+fired before `RenderStartup` falls back rather than dispatching into a pipeline
+that may not exist.
+
+`save_exr` is gone — `store_lightmap` duplicated it exactly once the GPU path
+switched over.
+
+Still CPU on every platform: the **object** bake. On wasm that means it is
+still serial and still on the main thread.
+
+### Projects and worlds now persist in OPFS
+
+Two symptoms, one cause: `write_manifest` and project discovery were
+native-only, so the browser refused to create projects outright, and a world
+created in the editor was appended to `ActiveProject.worlds` in memory and
+never written — it vanished on refresh. World *content* was never the problem;
+`bootstrap.rs` and `terrain/save.rs` already had OPFS paths for `world.meta`.
+
+- `write_manifest` is now one function for both platforms returning
+  `Result<(), String>`: a real synchronous write natively, a `spawn_local` OPFS
+  save on wasm. **On wasm `Ok` does not mean durably stored** — it is
+  fire-and-forget, so the rollback-on-failure in `EditorAction::CreateWorld`
+  only ever fires natively.
+- Discovery on wasm is an async scan of `projects/*/project.toml` in OPFS.
+  `populate_registry` seeds a fallback project synchronously so the menu is
+  never empty, then `poll_project_discovery` swaps in the real list if the scan
+  finds anything. The fallback is deliberately *not* written to storage; the
+  first edit persists it.
+- The main menu is built once on `OnEnter(MenuScreen::Main)`, so it needed
+  `rebuild_main_menu_on_registry_change` — the async list routinely lands after
+  the menu already exists. It skips when the screen query is empty, because on
+  the frame `setup_main_menu` runs its spawn is still a queued command and a
+  rebuild would duplicate the whole screen.
+
+Manifest round-trip is covered by tests (including quote/backslash escaping in
+user-entered names) — on wasm that serialize/parse pair is the only thing
+between "created a project" and "still there after a refresh".
