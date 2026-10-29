@@ -69,6 +69,7 @@ pub fn exit(
     mut cursor_options: Single<&mut CursorOptions>,
     mut registry: ResMut<PlacedObjectRegistry>,
     mut streaming_state: ResMut<StreamingState>,
+    mut probe_store: ResMut<crate::game::world::probe_volume::ProbeStore>,
 ) {
     // Despawn all game entities (includes terrain chunks, placed objects, etc.)
     for entity in game_entities.iter() {
@@ -84,5 +85,10 @@ pub fn exit(
 
     // Hand the world's own state off to the world module — keeps resource
     // lifecycle owned by the systems that created it.
-    crate::game::world::destroy(&mut commands, &mut registry, &mut streaming_state);
+    crate::game::world::destroy(
+        &mut commands,
+        &mut registry,
+        &mut streaming_state,
+        &mut probe_store,
+    );
 }

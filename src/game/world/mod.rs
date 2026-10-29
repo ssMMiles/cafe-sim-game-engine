@@ -4,6 +4,7 @@ pub mod baking;
 pub mod chunk_assets;
 pub mod objects;
 pub mod prefabs;
+pub mod probe_volume;
 mod sky;
 pub mod streaming;
 pub mod terrain;
@@ -90,6 +91,7 @@ impl Plugin for WorldPlugin {
 
         app.init_resource::<PlacedObjectRegistry>();
         app.init_resource::<PlacementConfig>();
+        app.init_resource::<probe_volume::ProbeStore>();
     }
 }
 
@@ -247,11 +249,13 @@ pub fn destroy(
     commands: &mut Commands,
     registry: &mut PlacedObjectRegistry,
     streaming_state: &mut StreamingState,
+    probe_store: &mut probe_volume::ProbeStore,
 ) {
     log::info!("Tearing down the game world");
     terrain::destroy(commands);
     *registry = PlacedObjectRegistry::default();
     *streaming_state = StreamingState::default();
+    probe_store.clear();
 }
 
 /// Swap to `new_world_id` without leaving `AppState::InGame`. Despawns
@@ -268,6 +272,7 @@ pub fn switch_world(
     object_query: &Query<Entity, With<objects::PlacedObject>>,
     placed_registry: &mut PlacedObjectRegistry,
     streaming_state: &mut StreamingState,
+    probe_store: &mut probe_volume::ProbeStore,
     player_transform: &mut Transform,
 ) {
     log::info!("Switching world to '{new_world_id}'");
@@ -283,6 +288,7 @@ pub fn switch_world(
 
     *placed_registry = PlacedObjectRegistry::default();
     *streaming_state = StreamingState::default();
+    probe_store.clear();
     terrain::destroy(commands);
 
     world_config.world_id = new_world_id.to_owned();

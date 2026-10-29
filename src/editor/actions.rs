@@ -71,6 +71,7 @@ pub struct WorldSwitch<'w, 's> {
     object_query: Query<'w, 's, Entity, With<PlacedObject>>,
     placed_registry: ResMut<'w, PlacedObjectRegistry>,
     streaming_state: ResMut<'w, StreamingState>,
+    probe_store: ResMut<'w, crate::game::world::probe_volume::ProbeStore>,
     player: Query<'w, 's, &'static mut Transform, (With<Player>, Without<PlayerCamera>)>,
     camera: Query<'w, 's, (&'static mut Transform, &'static mut PlayerCamera), Without<Player>>,
 }
@@ -96,6 +97,7 @@ impl WorldSwitch<'_, '_> {
             &self.object_query,
             &mut self.placed_registry,
             &mut self.streaming_state,
+            &mut self.probe_store,
             &mut player_transform,
         );
         if let Ok((mut t, mut cam)) = self.camera.single_mut() {

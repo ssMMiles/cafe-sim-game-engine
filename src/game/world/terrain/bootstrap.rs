@@ -58,6 +58,8 @@ pub struct ChunkComputeResult {
     /// The chunk's saved lightmap, decoded off the main thread. `None` when
     /// the chunk has never been baked (or on wasm, which has no file access).
     pub lightmap: Option<Image>,
+    /// The chunk's saved irradiance probes, likewise decoded in the task.
+    pub probes: Option<crate::game::world::baking::probes::ChunkProbes>,
 }
 
 /// Reconstruct a flat height array for a chunk directly from its saved `ChunkData`,
@@ -121,14 +123,18 @@ pub fn compute_chunk_meshes(
     chunk_y: i32,
     tile_size: (f32, f32),
     lightmap: Option<crate::game::world::baking::lightmap::LightmapSource>,
+    probes: Option<crate::game::world::baking::probes::ProbeSource>,
 ) -> ChunkComputeResult {
     // Natively this reads the EXR off disk; on wasm the bytes were already
     // fetched from OPFS by the streamer, and this only decodes them. Either
     // way it happens here, inside the compute task, rather than on the main
-    // thread.
+    // thread. The probe grid takes the same route.
     let lightmap = lightmap
         .as_ref()
         .and_then(crate::game::world::baking::lightmap::try_load_lightmap);
+    let probes = probes
+        .as_ref()
+        .and_then(crate::game::world::baking::probes::try_load_probes);
 
     let heights = heights_from_chunk_data(chunk_data.as_ref());
     let cs = (CHUNK_SIZE - 1) as i32;
@@ -167,6 +173,7 @@ pub fn compute_chunk_meshes(
         collider,
         collider_offset,
         lightmap,
+        probes,
     }
 }
 

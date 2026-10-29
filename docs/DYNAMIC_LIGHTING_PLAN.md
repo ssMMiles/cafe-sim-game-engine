@@ -264,32 +264,43 @@ from `probe_depth_below` under its lowest terrain to `probe_height_above` over
 its highest.
 
 ### Per-probe data
-L1 in the *linear* basis, pre-convolved to irradiance in lightmap units:
-`E(n) = c0 + c1·n.x + c2·n.y + c3·n.z`, clamped at 0. Twelve `f16`s. Fitted by
-projecting the per-normal radiance `f(n)` evaluated at 32 Fibonacci normals.
-`f(n)` is the same model as the lightmap, evaluated at the probe position:
+Thirteen `f16`s: L1 in the *linear* basis, pre-convolved to irradiance in
+lightmap units, plus the sun's visibility at the probe:
 
 ```
-f(n) = sun_rgb · vis_sun · max(n·s, 0)                      direct sun
-     + Σ_lights  color·atten·spot·vis · max(n·d, 0)          placed lights
-     + (4/M) Σ_j max(n·d_j, 0) · L_j                         environment, M sphere rays
+E(n) = max(0, c0 + c1·n.x + c2·n.y + c3·n.z)      smooth terms (L1)
+     + sun_rgb · sun_vis · max(n·sun_dir, 0)       direct sun, evaluated exactly
+```
+
+The L1 part is a least-squares fit of the per-normal radiance at 32 Fibonacci
+normals, from the same model as the lightmap evaluated at the probe:
+
+```
+f(n) = Σ_lights  color·atten·spot·vis · max(n·d, 0)   placed lights (as peak-preserving lobes)
+     + (4/M) Σ_j max(n·d_j, 0) · L_j                  environment, M sphere rays
 ```
 
 where an environment ray escaping to sky returns `ambient_rgb`, hitting terrain
 returns `albedo·(sun_rgb·ndotl·vis + ambient_rgb)` (the lightmap's bounce
 model), and hitting scenery returns `0.5·ambient_rgb` (no hit normal from the
-BVH; treated as shaded). A probe below the terrain surface is invalid and takes
-the value of the first valid probe above it in its column.
+BVH; treated as shaded). A probe below the terrain surface is not baked and
+takes the value of the first open-air probe above it in its column.
 
-**Known approximation:** L1 cannot represent the clamped sun lobe, so the side
-of a character facing away from the sun reads ~¼ of the sun's intensity rather
-than 0. The toon quantiser usually hides this; if it doesn't, the fix is
-storing the sun's direction + visibility separately and evaluating the clamp in
-the shader.
+**Why the sun is not in the L1 part** (found by the tests, not predicted): four
+coefficients cannot hold a bright directional lobe and a dim opposite term. A
+lobe peaking at `L` in front is `−L/2` behind, and that negative cancelled the
+ground bounce under a probe over sunlit ground — the downward-facing result
+lost ~90% of its light. Storing visibility and evaluating the clamped cosine
+in the shader gives a hard terminator, the exact peak, and no bleed. The
+shader therefore needs the live `sun_dir`/`sun_rgb` as uniforms, updated with
+the environment. Placed lights stay as lobes; their price is that the side of
+a character facing *away* from a bright lamp loses some ambient to the lobe's
+negative tail.
 
 ### Runtime volume
-Three `Rgba16Float` 3D textures of fixed size `PROBE_VOLUME_DIMS`
-(128×24×128 cells = 256 m × 48 m × 256 m, ~9 MB total), addressed
+Four `Rgba16Float` 3D textures of fixed size `PROBE_VOLUME_DIMS`
+(128×24×128 cells = 256 m × 48 m × 256 m, ~12.6 MB total; `c0`+`sun_vis`,
+`c1`, `c2`, `c3`), addressed
 **toroidally**: cell `i` lives in texel `i mod dims`, the sampler repeats, and
 the shader computes `uvw = world_pos / (cell · dims)` with no origin uniform.
 The window re-centres on `WorldFocus` when the focus leaves its middle third,
@@ -297,7 +308,7 @@ rebuilding the CPU buffer from `ProbeStore` (per-chunk probe grids from
 streaming and from bakes) and rewriting the `Image` data. Bevy's `GpuImage`
 prepare writes a same-shaped image **in place** (`write_texture` on the existing
 texture), so no material bind group is touched and every toon material shares
-the three handles for the life of the app. Cells no loaded chunk covers get a
+the four handles for the life of the app. Cells no loaded chunk covers get a
 default open-sky probe derived from `EnvironmentData`, so an unbaked world shows
 a sunlit character rather than a black one.
 

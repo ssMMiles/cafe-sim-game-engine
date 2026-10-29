@@ -16,6 +16,7 @@
 //! - `terrain.rs`     — terrain chunk lightmap bake logic (CPU path)
 //! - `uv_unwrap.rs`   — non-overlapping per-triangle lightmap UV2 + `LightmapUvCache`
 //! - `objects.rs`     — placed mesh lightmap bake logic (UV rasterization)
+//! - `probes.rs`      — irradiance probes on a world lattice, for dynamic objects
 //! - `gpu.rs`         — GPU compute path for terrain baking (any adapter with compute)
 
 pub mod bvh;
@@ -23,6 +24,7 @@ pub mod gpu;
 pub mod lightmap;
 pub mod object_lightmaps;
 pub mod objects;
+pub mod probes;
 pub mod raycast;
 pub mod terrain;
 pub mod uv_unwrap;
@@ -51,6 +53,7 @@ use crate::game::{
 use bvh::{TriangleBvh, collect_occluder_triangles};
 use lightmap::{BakeLighting, BakedLight};
 use objects::ObjectBakeResult;
+use probes::ChunkProbes;
 use uv_unwrap::LightmapUvCache;
 
 /// The object bake currently running on `AsyncComputeTaskPool`, if any.
@@ -65,6 +68,20 @@ use uv_unwrap::LightmapUvCache;
 /// makes "a bake is already running" trivial to detect.
 #[derive(Resource, Default)]
 pub struct ObjectBakeTask(Option<Task<Vec<ObjectBakeResult>>>);
+
+/// The probe bake running on `AsyncComputeTaskPool`, if any. One task for
+/// every chunk in the region; `apply_probe_bake` stores the grids and feeds
+/// them to the live `ProbeStore`.
+#[derive(Resource, Default)]
+pub struct ProbeBakeTask(Option<Task<Vec<ChunkProbes>>>);
+
+/// The in-flight CPU bakes, grouped so `run_bake` stays under bevy's
+/// system-parameter limit.
+#[derive(SystemParam)]
+pub struct BakeTasks<'w> {
+    objects: ResMut<'w, ObjectBakeTask>,
+    probes: ResMut<'w, ProbeBakeTask>,
+}
 
 // ============================================================================
 // Configuration
@@ -170,6 +187,16 @@ pub struct BakeConfig {
     /// loaded chunk — 81 at the default streaming radius, which takes
     /// minutes. `Some(1)` (a 3×3 block) is the development default.
     pub bake_radius: Option<u32>,
+    /// Sphere rays per irradiance probe for the environment term (sky,
+    /// terrain, scenery). The sun and each placed light add one shadow ray
+    /// on top. Probes are ~1–2% of a bake, so this is not where time goes.
+    pub probe_rays: u32,
+    /// How far above a chunk's highest terrain its probe grid reaches —
+    /// the tallest thing a dynamic object is expected to stand on.
+    pub probe_height_above: f32,
+    /// How far below a chunk's lowest terrain the grid starts, so a probe
+    /// row always exists under a hollow or a sunken floor.
+    pub probe_depth_below: f32,
 }
 
 impl Default for BakeConfig {
@@ -207,6 +234,9 @@ impl Default for BakeConfig {
             blur_radius: 4,
             dispatch_strip_rows: 64,
             bake_radius: Some(1),
+            probe_rays: 48,
+            probe_height_above: 16.0,
+            probe_depth_below: 2.0,
         }
     }
 }
@@ -338,6 +368,7 @@ impl Plugin for BakingPlugin {
         app.init_resource::<BakeConfig>();
         app.init_resource::<LightmapUvCache>();
         app.init_resource::<ObjectBakeTask>();
+        app.init_resource::<ProbeBakeTask>();
         app.add_message::<BakeMessage>();
 
         app.init_resource::<GpuBakeTrigger>();
@@ -350,7 +381,9 @@ impl Plugin for BakingPlugin {
         // — the object bake is the CPU path on every platform.
         app.add_systems(
             Update,
-            apply_object_bake.after(run_bake).in_set(WorldSet::InGame),
+            (apply_object_bake, apply_probe_bake)
+                .after(run_bake)
+                .in_set(WorldSet::InGame),
         );
         // Leaving the world abandons any bake still running: dropping the
         // `Task` cancels it, rather than burning cores on lightmaps for a
@@ -411,7 +444,7 @@ fn run_bake(
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
     mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
     mut uv_cache: ResMut<LightmapUvCache>,
-    mut object_bake: ResMut<ObjectBakeTask>,
+    mut tasks: BakeTasks,
     scene: BakeSceneQueries,
     baked_sun_query: Query<&GlobalTransform, With<BakedSun>>,
     mut gpu_trigger: ResMut<GpuBakeTrigger>,
@@ -501,13 +534,68 @@ fn run_bake(
         );
     }
 
-    // ── Phase 2: Placed objects (CPU, on the task pool) ─────────────────────
+    // ── Phase 2: Irradiance probes (CPU, on the task pool) ──────────────────
+    //
+    // One grid per chunk in the region, for the dynamic objects that will
+    // move through it. Cheap next to the lightmaps (a few thousand probes
+    // against a million texels per chunk), so it runs for every bake.
+    if tasks.probes.0.is_some() {
+        warn!("Probe bake already running — this bake's probes are skipped");
+    } else {
+        let probe_jobs: Vec<(i32, i32, raycast::BakeHeightCache)> = scene
+            .terrain_chunks
+            .iter()
+            .filter(|(chunk, _)| region.contains_chunk(chunk.chunk_x, chunk.chunk_y))
+            .map(|(chunk, _)| {
+                let grid = lightmap::ChunkBakeGrid { res: 1, margin: 0 };
+                let cache = terrain::extract_bake_cache(
+                    &heightmap,
+                    grid,
+                    chunk.chunk_x,
+                    chunk.chunk_y,
+                    config.ao_radius * 4.0,
+                );
+                (chunk.chunk_x, chunk.chunk_y, cache)
+            })
+            .collect();
+        if !probe_jobs.is_empty() {
+            let task_config = config.clone();
+            let task_lighting = lighting.clone();
+            let task_bvh = bvh.clone();
+            let dests: Vec<_> = probe_jobs
+                .iter()
+                .map(|(cx, cy, _)| probes::chunk_probes_location(&terrain_world, *cx, *cy))
+                .collect();
+            tasks.probes.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+                probe_jobs
+                    .into_iter()
+                    .zip(dests)
+                    .map(|((cx, cy, cache), dest)| {
+                        let grid = probes::bake_chunk_probes(
+                            &cache,
+                            cx,
+                            cy,
+                            &task_config,
+                            &task_lighting,
+                            &task_bvh,
+                        );
+                        if let Err(e) = probes::store_probes(&dest, &grid) {
+                            error!("Failed to save probes for chunk ({cx}, {cy}): {e}");
+                        }
+                        grid
+                    })
+                    .collect()
+            }));
+        }
+    }
+
+    // ── Phase 3: Placed objects (CPU, on the task pool) ─────────────────────
     //
     // Gathering has to happen here — it unwraps meshes, adds material assets
     // and reads the heightmap resource — but it is cheap. Everything
     // expensive goes to `AsyncComputeTaskPool` so Shift+B doesn't freeze the
     // frame; `apply_object_bake` picks the results up when they land.
-    if object_bake.0.is_some() {
+    if tasks.objects.0.is_some() {
         warn!("Object bake already running — terrain re-baked, objects skipped");
         return;
     }
@@ -534,7 +622,7 @@ fn run_bake(
     let task_config = config.clone();
     let task_lighting = lighting.clone();
     let task_bvh = bvh.clone();
-    object_bake.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
+    tasks.objects.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
         objects::run_object_bake_jobs(jobs, &task_config, &task_lighting, &task_bvh)
     }));
     info!("Object bake dispatched: {job_count} sub-mesh(es) on the task pool");
@@ -569,11 +657,36 @@ fn apply_object_bake(
     info!("Object bake complete: {count} sub-mesh lightmap(s) applied");
 }
 
+/// Hand finished probe grids to the live store (which rebuilds the volume
+/// texture). The files were written inside the task.
+fn apply_probe_bake(
+    mut probe_bake: ResMut<ProbeBakeTask>,
+    mut store: ResMut<crate::game::world::probe_volume::ProbeStore>,
+) {
+    let Some(task) = probe_bake.0.as_mut() else {
+        return;
+    };
+    let Some(grids) = check_ready(task) else {
+        return;
+    };
+    probe_bake.0 = None;
+    let count = grids.len();
+    let probes: usize = grids.iter().map(|g| (g.nx * g.ny * g.nz) as usize).sum();
+    for grid in grids {
+        store.insert(grid);
+    }
+    info!("Probe bake complete: {count} chunk grid(s), {probes} probes");
+}
+
 /// Drop any in-flight bake when the world unloads, cancelling it.
-fn cancel_object_bake(mut object_bake: ResMut<ObjectBakeTask>) {
+fn cancel_object_bake(
+    mut object_bake: ResMut<ObjectBakeTask>,
+    mut probe_bake: ResMut<ProbeBakeTask>,
+) {
     if object_bake.0.take().is_some() {
         info!("World unloaded — cancelling the in-flight object bake");
     }
+    probe_bake.0 = None;
 }
 
 /// Dispatches GPU terrain bake jobs when `GpuBakeTrigger` is set.

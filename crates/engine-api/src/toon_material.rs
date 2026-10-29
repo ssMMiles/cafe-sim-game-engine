@@ -68,3 +68,32 @@ impl MaterialExtension for ToonMaterial {
         Some(AlphaMode::Opaque)
     }
 }
+
+// ============================================================================
+// Probe volume geometry
+// ============================================================================
+
+/// Side of one irradiance-probe lattice cell, in metres, on every axis. The
+/// lattice is world-aligned: cell `i` spans `[i·c, (i+1)·c)` and its probe
+/// sits at the centre. Bakes place probes on it and the runtime volume
+/// texture is indexed by it, so this is the one number both must agree on.
+pub const PROBE_CELL_SIZE: f32 = 2.0;
+
+/// Cells per axis `[x, y, z]` of the runtime probe volume textures. Addressed
+/// toroidally — cell `i` lives in texel `i mod dims` — so the window follows
+/// the player without any origin uniform or material rebind. At
+/// [`PROBE_CELL_SIZE`] 2 this is 256 m × 48 m × 256 m; four `Rgba16Float`
+/// textures of this size are ~12.6 MB.
+pub const PROBE_VOLUME_DIMS: [u32; 3] = [128, 24, 128];
+
+/// Lattice index of the cell containing world coordinate `w` on one axis.
+#[inline]
+pub fn probe_cell_index(w: f32) -> i32 {
+    (w / PROBE_CELL_SIZE).floor() as i32
+}
+
+/// World coordinate of the centre of lattice cell `i` on one axis.
+#[inline]
+pub fn probe_cell_centre(i: i32) -> f32 {
+    (i as f32 + 0.5) * PROBE_CELL_SIZE
+}

@@ -35,13 +35,14 @@ use std::collections::{HashMap, HashSet};
 use crate::game::WorldFocus;
 
 use super::{
-    baking::lightmap::LightmapSource,
+    baking::{lightmap::LightmapSource, probes::ProbeSource},
     chunk_assets::{ChunkDataAsset, ChunkObjectsAsset},
     objects::{
         PlacedObject, PlacedObjectRegistry, despawn_chunk_objects, spawn_chunk_objects,
         world_pos_to_chunk,
     },
     prefabs::PrefabLibrary,
+    probe_volume::ProbeStore,
     terrain::{
         HeightmapData, TILE_SIZE,
         bootstrap::{
@@ -103,6 +104,9 @@ type ObjectsSlot = std::sync::Arc<std::sync::Mutex<Option<Option<ChunkObjectsFil
 /// Raw EXR bytes; decoding happens in the compute task, as it does natively.
 #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
 type LightmapSlot = std::sync::Arc<std::sync::Mutex<Option<Option<Vec<u8>>>>>;
+/// Raw probe-file bytes, same arrangement.
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+type ProbesSlot = std::sync::Arc<std::sync::Mutex<Option<Option<Vec<u8>>>>>;
 
 /// A chunk that has been requested but is still loading its data.
 pub struct PendingChunk {
@@ -119,6 +123,8 @@ pub struct PendingChunk {
     pub opfs_objects: ObjectsSlot,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     pub opfs_lightmap: LightmapSlot,
+    #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+    pub opfs_probes: ProbesSlot,
 }
 
 /// A chunk whose mesh-generation task is running in the background.
@@ -164,6 +170,7 @@ pub fn update_streaming_ring(
     placed_query: Query<(Entity, &PlacedObject)>,
     mut heightmap: Option<ResMut<HeightmapData>>,
     history: Option<Res<crate::editor::history::History>>,
+    mut probe_store: ResMut<ProbeStore>,
 ) {
     // All three are inserted together by create_terrain; wait until they're available.
     let Some(terrain_world) = terrain_world else {
@@ -208,6 +215,7 @@ pub fn update_streaming_ring(
         if let Some(ref mut hm) = heightmap {
             hm.remove_chunk_tiles(chunk.0, chunk.1);
         }
+        probe_store.remove(chunk);
         state.loaded.remove(&chunk);
     }
 
@@ -292,6 +300,7 @@ pub fn update_streaming_ring(
             let terrain_slot: TerrainSlot = Arc::new(Mutex::new(None));
             let objects_slot: ObjectsSlot = Arc::new(Mutex::new(None));
             let lightmap_slot: LightmapSlot = Arc::new(Mutex::new(None));
+            let probes_slot: ProbesSlot = Arc::new(Mutex::new(None));
 
             // Terrain: only load if there is saved data; otherwise immediately mark flat.
             if has_terrain_file {
@@ -368,12 +377,30 @@ pub fn update_streaming_ring(
                 });
             }
 
+            // Probes: same shape as the lightmap — bytes or nothing.
+            {
+                let s = crate::storage::wasm::WasmStorage;
+                let key = super::baking::probes::chunk_probes_key(&metadata.world_id, cx, cy);
+                let slot = probes_slot.clone();
+                spawn_local(async move {
+                    let result = match s.load(&key).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            log::warn!("OPFS probe load error for ({cx},{cy}): {e}");
+                            None
+                        }
+                    };
+                    *slot.lock().unwrap() = Some(result);
+                });
+            }
+
             state.pending.insert(
                 (cx, cy),
                 PendingChunk {
                     opfs_terrain: terrain_slot,
                     opfs_objects: objects_slot,
                     opfs_lightmap: lightmap_slot,
+                    opfs_probes: probes_slot,
                 },
             );
         }
@@ -406,6 +433,12 @@ pub fn launch_chunk_tasks(
         terrain_world
             .as_ref()
             .map(|w| super::baking::lightmap::terrain_lightmap_path(&w.world_path, cx, cy))
+    };
+    #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))]
+    let probes_src = |cx: i32, cy: i32| -> Option<ProbeSource> {
+        terrain_world
+            .as_ref()
+            .map(|w| super::baking::probes::chunk_probes_path(&w.world_path, cx, cy))
     };
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))]
     let _ = &terrain_world;
@@ -474,8 +507,9 @@ pub fn launch_chunk_tasks(
                 });
 
             let lm = lightmap_src(cx, cy);
+            let pr = probes_src(cx, cy);
             let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE, lm) });
+                .spawn(async move { compute_chunk_meshes(chunk_data, cx, cy, TILE_SIZE, lm, pr) });
 
             state.computing.insert(
                 chunk_coord,
@@ -494,8 +528,9 @@ pub fn launch_chunk_tasks(
             let (cx, cy) = chunk_coord;
 
             let lm = lightmap_src(cx, cy);
-            let task =
-                thread_pool.spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm) });
+            let pr = probes_src(cx, cy);
+            let task = thread_pool
+                .spawn(async move { compute_chunk_meshes(None, cx, cy, TILE_SIZE, lm, pr) });
 
             state.computing.insert(
                 chunk_coord,
@@ -517,6 +552,7 @@ pub fn launch_chunk_tasks(
                 p.opfs_terrain.lock().unwrap().is_some()
                     && p.opfs_objects.lock().unwrap().is_some()
                     && p.opfs_lightmap.lock().unwrap().is_some()
+                    && p.opfs_probes.lock().unwrap().is_some()
             })
             .map(|(&coord, _)| coord)
             .collect();
@@ -541,8 +577,10 @@ pub fn launch_chunk_tasks(
             }
 
             let lm: Option<LightmapSource> = pending.opfs_lightmap.lock().unwrap().take().flatten();
-            let task = thread_pool
-                .spawn(async move { compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm) });
+            let pr: Option<ProbeSource> = pending.opfs_probes.lock().unwrap().take().flatten();
+            let task = thread_pool.spawn(async move {
+                compute_chunk_meshes(terrain_data, cx, cy, TILE_SIZE, lm, pr)
+            });
 
             state
                 .computing
@@ -571,6 +609,7 @@ pub fn finalize_computed_chunks(
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     prefabs: Res<PrefabLibrary>,
     asset_server: Res<AssetServer>,
+    mut probe_store: ResMut<ProbeStore>,
 ) {
     let (Some(mut chunk_registry), Some(render_assets)) = (chunk_registry, render_assets) else {
         return;
@@ -601,6 +640,10 @@ pub fn finalize_computed_chunks(
             continue;
         };
 
+        let mut result = result;
+        if let Some(probes) = result.probes.take() {
+            probe_store.insert(probes);
+        }
         spawn_chunk_from_result(
             &mut commands,
             &mut meshes,

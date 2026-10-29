@@ -771,8 +771,8 @@ pub fn try_load_lightmap_image(
 
 /// True for a file name that is a lightmap from some *older* bake format.
 fn is_stale_lightmap_name(name: &str) -> bool {
-    name.contains("_lightmap")
-        && !name.ends_with(&format!("_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr"))
+    let current = format!(".v{LIGHTMAP_FORMAT_VERSION}.");
+    (name.contains("_lightmap") || name.contains("_probes")) && !name.contains(&current)
 }
 
 fn warn_stale_count(stale: usize, world: &str) {
