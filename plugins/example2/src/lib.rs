@@ -1,5 +1,8 @@
 use bevy::{pbr::ExtendedMaterial, prelude::*};
-use engine_api::{DefaultToonLightmap, DynamicPlugin, ScriptOwned, ToonMaterial, add};
+use engine_api::{
+    DefaultToonLightmap, DynamicPlugin, ProbeVolumeImages, ScriptOwned, ToonMaterial, ToonSource,
+    add,
+};
 use std::f32::consts::TAU;
 
 #[derive(Default)]
@@ -27,6 +30,7 @@ impl DynamicPlugin for CirclingCubePlugin {
             .resource_mut::<Assets<Mesh>>()
             .add(Cuboid::from_length(10.0));
         let lightmap = world.resource::<DefaultToonLightmap>().0.clone();
+        let probes = world.resource::<ProbeVolumeImages>().clone();
         let material = world
             .resource_mut::<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>()
             .add(ExtendedMaterial {
@@ -34,10 +38,8 @@ impl DynamicPlugin for CirclingCubePlugin {
                     base_color: Color::srgb(0.00, 1.0, 0.00),
                     ..default()
                 },
-                extension: ToonMaterial {
-                    lightmap,
-                    use_lightmap: 1,
-                },
+                // A moving cube: lit from the probe volume where it is.
+                extension: ToonMaterial::new(ToonSource::ProbeVolume, lightmap, &probes),
             });
 
         let entity = world

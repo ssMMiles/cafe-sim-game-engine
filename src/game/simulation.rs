@@ -5,6 +5,7 @@ use bevy::{log, prelude::*};
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS};
 use crate::editor::EditorMode;
 use crate::game::gfx::camera::setup_camera;
+use crate::game::gltf_loading::{ConvertToToon, DynamicLit, on_scene_ready};
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
 use engine_api::{BlobShadow, CharacterState, GameEntity, SimulationConfig};
@@ -42,10 +43,14 @@ pub fn setup(
             Visibility::Inherited,
             WorldAssetRoot(mr_windmill),
             RigidBody::Kinematic,
-            // Static shadows are baked; this is the only shadow a moving
+            // Shaded like the world around it — from the probe volume, since
+            // it moves — with a blob for contact, the only shadow a moving
             // character casts.
+            ConvertToToon,
+            DynamicLit,
             BlobShadow::with_radius(CHAR_RADIUS * 1.8),
         ))
+        .observe(on_scene_ready)
         .id();
 
     // Offset the collider upward so its bottom aligns with the player's feet (entity origin).

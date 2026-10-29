@@ -16,7 +16,8 @@ use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings};
 
 use crate::editor::EditorMode;
 use crate::game::gfx::toon_material::{
-    DefaultToonLightmap, ToonMaterial, create_default_toon_lightmap,
+    DefaultToonLightmap, ToonMaterial, ToonSun, create_default_toon_lightmap,
+    create_probe_volume_images, sync_toon_sun, update_toon_sun,
 };
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -34,11 +35,22 @@ impl Plugin for GfxPlugin {
         // Insert at build time so the resource is available before any Startup
         // system runs — including the script host's plugin loader, which lets
         // dynamic plugins build toon materials in their own setup().
-        let handle = {
+        let (handle, probes) = {
             let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-            create_default_toon_lightmap(&mut images)
+            (
+                create_default_toon_lightmap(&mut images),
+                create_probe_volume_images(&mut images),
+            )
         };
         app.insert_resource(DefaultToonLightmap(handle));
+        app.insert_resource(probes);
+        app.init_resource::<ToonSun>();
+        app.add_systems(
+            Update,
+            (update_toon_sun, sync_toon_sun)
+                .chain()
+                .in_set(GfxSet::InGame),
+        );
 
         app.add_systems(Update, update_crosshair_display.in_set(GfxSet::InGame));
 

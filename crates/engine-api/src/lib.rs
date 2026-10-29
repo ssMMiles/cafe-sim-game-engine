@@ -15,7 +15,10 @@ pub use script::{
     LevelDataHooks, PropDef, PropDefault, PropValue, RegisteredScript, ScriptBinding,
     ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
 };
-pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_lightmap};
+pub use toon_material::{
+    DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonShading, ToonSource,
+    create_default_toon_lightmap, create_probe_volume_images,
+};
 
 // ---------------------------------------------------------------------------
 // Dynamic plugin interface
@@ -331,6 +334,15 @@ impl BlobShadow {
         }
     }
 }
+
+/// A scene root whose meshes move through the world and should be lit from
+/// the irradiance probe volume rather than a baked lightmap. Put it beside
+/// the host's `ConvertToToon` marker; the conversion then builds every
+/// sub-mesh's toon material with [`ToonSource::ProbeVolume`]. Plugins that
+/// build toon materials by hand pick the source directly in
+/// [`ToonMaterial::new`].
+#[derive(Component, Debug, Default, Clone, Copy)]
+pub struct DynamicLit;
 
 /// Player physics state.
 #[derive(Component, Debug)]

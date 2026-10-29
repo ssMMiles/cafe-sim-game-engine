@@ -51,7 +51,7 @@ System sets enforce execution order: `SimSet::InGame` > `SimSet::Running` / `Sim
 crates/engine-api/      # Shared crate linked by host AND plugin dylibs (stable TypeIds)
 │   ├── lib.rs          # DynamicPlugin trait, add! macro, ScriptOwned, ABI version
 │   ├── script.rs       # ScriptBinding(s), PropValue, ScriptSchema, ScriptRegistry, LevelDataHooks
-│   └── toon_material.rs
+│   └── toon_material.rs # ToonMaterial/ToonShading/ToonSource, ProbeVolumeImages, probe lattice consts
 plugins/                # Dynamic plugin crates (dylibs): cafe-sim, example, example2
 projects/               # Project manifests: projects/{id}/project.toml (plugins, worlds, start_world)
 docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save system; EDITOR_UI_DESIGN.md — docked editor, phased)
@@ -120,11 +120,12 @@ src/
     ├── simulation.rs    # Player spawn, world setup, cleanup
     ├── physics.rs       # CharacterState, kinematic controller (avian3d)
     ├── animation.rs     # AnimationGraph, state machine (Idle/Run/Jump)
-    ├── gltf_loading.rs  # Scene loading, toon material conversion, interactions
+    ├── blob_shadow.rs   # BlobShadow discs under dynamic objects (avian ray down, unlit alpha-blend)
+    ├── gltf_loading.rs  # Scene loading, toon material conversion (DynamicLit → probe source), interactions
     ├── gfx/             # Rendering pipeline
     │   ├── camera.rs    # PlayerCamera, render-to-texture (GameRenderTarget: 1920x1080 HDR in gameplay,
     │   │                #   resized to the viewport tab in the editor); Camera2d hosts PrimaryEguiContext
-    │   ├── toon_material.rs  # ToonMaterial (StandardMaterial extension + lightmap)
+    │   ├── toon_material.rs  # Host side of ToonMaterial: shared resources, ToonSun + sync systems
     │   ├── post_process.rs   # Edge detection post-processing
     │   ├── outline.rs
     │   └── crosshair.rs
@@ -137,6 +138,8 @@ src/
         │                #   (prefab roots expand there), persistence, light gizmos, legacy readers
         ├── prefabs.rs   # PrefabFile/PrefabInstanceData/PrefabOverride, PrefabLibrary (assets/prefabs,
         │                #   OPFS on web), define/expand/diff helpers — see docs/PREFABS_PLAN.md
+        ├── probe_volume.rs  # ProbeStore (per-chunk probe grids, follows streaming) + ProbeVolume
+        │                #   (toroidal 3D textures every toon material samples for dynamic objects)
         ├── terrain/
         │   ├── types.rs      # TerrainChunk, HeightmapData (sparse HashMap)
         │   ├── constants.rs  # CHUNK_SIZE=256 vertices, TILE_SIZE=0.25 → 63.75 m chunks (CHUNK_WORLD_SIZE in objects.rs)
@@ -163,6 +166,7 @@ src/
             │                 #   needs Assets) → run_object_bake_jobs (AsyncComputeTaskPool, no ECS:
             │                 #   rasterize → shade via rayon → blur/dilate → EXR) → apply_object_bake.
             │                 #   BakeStats reports per-pass timings
+            ├── probes.rs     # Irradiance probes on the world lattice: ChunkProbes, bake, rkyv frame I/O
             ├── gpu.rs        # GPU compute pipeline (native only)
             └── uv_unwrap.rs  # Non-overlapping per-triangle lightmap UV2 + LightmapUvCache
 ```
@@ -174,7 +178,7 @@ src/
 - Plugins register named *scripts* (factories) and optional `LevelDataHooks` in `ScriptRegistry`. The host hydrates `ScriptBindings` on placed entities by calling the factory and recording inserted `ComponentId`s via archetype diff; dehydration removes exactly those on unload/reload.
 - **Loaded ≠ active.** `DynamicPlugin` has three hooks: `register` (scripts + level hooks; runs on every load/reload in *both* modes), `setup` (gameplay bootstrap + schedule), `teardown`. A plugin is loaded whenever the project declares it, but only *active* in `EditorMode::Gameplay` — only active plugins' schedules tick, so plugin keybinds and HUD panels can't fight the editor. Entering the editor runs every plugin's teardown, so **switching modes resets the gameplay session**. Script bindings stay hydrated in both modes (only hot-reload dehydrates), so placed plugin objects still look right while authoring.
 - A plugin can claim a *level* entity instead of spawning its own: register a script with `with_default_mesh(...)` and it appears in the editor's placement catalog as a one-click "mesh + binding" preset; the factory inserts a marker the plugin's systems look for. `cafe-sim`'s `cafe-shell` works this way, so the cafe shell is level geometry (collider + baked lightmaps + BVH occlusion in the editor) and the plugin only *reads* it, for the furniture-grid anchor. Materials ship inside `Cafe.gltf` — see `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md` for why a plugin must not dress level geometry at runtime (nothing unwinds it on unload).
-- `ENGINE_SCRIPTS_ABI_VERSION` (currently 7) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
+- `ENGINE_SCRIPTS_ABI_VERSION` (currently 8) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
 
 ## Level Persistence (see docs/LEVEL_SAVE_DESIGN.md)
 
@@ -191,6 +195,8 @@ worlds/{id}/
   chunks/chunk_X_Y_lightmap.v8.exr, objects/obj_{id}_{k}_lightmap.v8.exr  (k = sub-mesh index)
                                # HDR OpenEXR (f16 RGB, ZIP) radiance; LIGHTMAP_FORMAT_VERSION is in the
                                #   file name, so older bakes are skipped (with a warning), never misread
+  chunks/chunk_X_Y_probes.v8.bin  # irradiance probe grid (rkyv frame TPRB + version + crc), same version
+                               #   as the lightmaps since it is the same lighting model
 assets/prefabs/{name}.prefab   # prefab definitions (v1, global): records with local ids,
                                #   root-relative transforms; OPFS `prefabs/` on web
 ```
@@ -266,7 +272,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 
 ## Rendering Pipeline
 
-- **`docs/DYNAMIC_LIGHTING_PLAN.md`** investigates illuminance volumes + dynamic shadows (not implemented). Key verified constraints: bevy's `IrradianceVolume` is `cfg!(not(target_arch = "wasm32"))` so it is unusable on *any* wasm target; `WEBGL2` is a compile-time cfg and `webgpu` wins when both features are set, so one wasm binary cannot serve both backends (we currently build `webgpu` only, and `VolumetricFog` already requires it); the lightmap's alpha channel is free and is what would let a runtime shadow subtract only the sun term.
+- **Dynamic objects are lit from an irradiance probe volume and cast blob shadows** (`docs/DYNAMIC_LIGHTING_PLAN.md`, §8 is the as-built design). Bevy's own `IrradianceVolume` is `cfg!(not(target_arch = "wasm32"))` — unusable on *any* wasm target — so this is hand-rolled: Shift+B also bakes `baking/probes.rs` grids per chunk (13 `f16`s per 2 m lattice cell: L1 in the linear basis for sky/bounce/placed-light lobes, plus the sun's *visibility* — the sun is kept out of the L1 part because a lobe's negative back cancelled the ground bounce), stored as `chunk_X_Y_probes.v8.bin` and streamed like lightmaps into `world/probe_volume.rs`'s `ProbeStore`. `ProbeVolume` fills four fixed-size `Rgba16Float` 3D textures (`PROBE_VOLUME_DIMS`, toroidal: cell `i` at texel `i mod dims`, repeat sampler, so the shader needs no origin) that **every** toon material binds; bevy rewrites a same-shaped `Image` in place, so re-centring never touches a bind group. `ToonMaterial` has `shading: ToonShading { source: 1 lightmap | 2 probes, unlit, …, sun_dir, sun_rgb }` — `unlit` is Shift+L and is orthogonal to the source; `sync_toon_sun` keeps the sun fields in step with the environment. `DynamicLit` + `ConvertToToon` on a scene root picks the probe source (the player); `BlobShadow` on a root gets a ground-conformed disc (`game/blob_shadow.rs`, avian ray down, unlit alpha-blend so the edge detector ignores it). Dynamic objects don't shadow each other and there is no shadow pass on `BakedSun`. WebGL2 is **not** a target: `WEBGL2` is a compile-time cfg and `webgpu` wins when both features are set, so one wasm binary can't serve both, and we build `webgpu` only.
 - **`docs/LIGHTING.md` is the reference for the whole baked lighting system** — units, the one shading equation, the three baker implementations, the runtime transfer function, the invariants, and a reviewed list of its current defects. Read it before changing anything below the "All lighting is baked" bullet.
 - The camera uses `Tonemapping::Linear` (no tone curve, keeps the clamp). Bevy 0.20 made `None` a full passthrough that drops the negative-channel clamp — never put that in front of the 5-band quantiser
 - Camera renders to a float16 HDR image (`GameRenderTarget`): 1920x1080 displayed via sprite on layer 1 in gameplay; in the editor the image is resized to the egui viewport tab and drawn as an egui texture (bevy_egui binds any filterable float texture and does its own linear→sRGB, so colours match the sprite path)
@@ -281,8 +287,8 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 - Lightmaps baked via GPU compute (native) or CPU raycast (WASM) into `Rgba16Float` textures, stored as OpenEXR. Terrain: one per chunk, decoded in the chunk's async compute task. Objects: one per toon-shaded sub-mesh entity (shared mesh assets share UVs, so a per-object atlas would collide), applied by `apply_object_lightmaps` once the scene has toon materials
 - Object lightmap UVs are generated by `uv_unwrap`: **every triangle gets its own cell** in a grid atlas, with a gutter, and the mesh is de-indexed so corners are unshared. Cell size is budgeted by **world-space** triangle size (`BakeConfig::mesh_texels_per_metre`, floored by `mesh_texels_per_triangle`, capped by `mesh_resolution_max`) and computed per *placed instance*, not per mesh asset — triangle count alone gave the cafe's 20×12 m two-triangle floor a 32 px atlas (~0.5 texels/m vs the terrain's 16), which the 5-band toon quantiser turned into staircased shadow edges. Dilation passes are derived from the cell size (`dilate_passes_for_atlas`), since the gutter is a fraction of the cell and grows with resolution. Objects are blurred with `LightmapBuffer::blur_cells` (confined to each triangle's cell, masked to covered texels) rather than the plain `blur` terrain uses — atlas neighbours are not surface neighbours. Overlapping UVs are the one thing a lightmap cannot tolerate — the previous triplanar projection bucketed by *unsigned* dominant axis, so a cube's top and bottom shared texels and faces wore each other's lighting.
 - Object texels are positioned with **each sub-mesh entity's own `GlobalTransform`** (`ToonMeshEntry::transform`), never the placed root's: glTF nodes carry their own scale/offset (the rock is scaled 2.5× inside its file), and a texel placed by the root transform alone sits inside the real mesh, where self-shadowing bakes it black.
-- The one `DirectionalLight` (`BakedSun`, shadows off) and `GlobalAmbientLight` exist only for meshes still on `StandardMaterial` (player character, editor previews); `world/mod.rs` derives their PBR values from the lightmap-unit intensities
-- Placed `PointLight`/`SpotLight` entities are **bake inputs only** — `spawn_placed_entity` never attaches a bevy light component, so they cost nothing at runtime and are visualised by `draw_light_gizmos` in the editor. Consequence: baked light does not fall on dynamic objects (the player), which stay lit by the sun + ambient.
+- The one `DirectionalLight` (`BakedSun`, shadows off) and `GlobalAmbientLight` exist only for meshes still on `StandardMaterial` (editor previews and thumbnails; the player is toon + probe-lit now); `world/mod.rs` derives their PBR values from the lightmap-unit intensities
+- Placed `PointLight`/`SpotLight` entities are **bake inputs only** — `spawn_placed_entity` never attaches a bevy light component, so they cost nothing at runtime and are visualised by `draw_light_gizmos` in the editor. They reach dynamic objects through the probe bake (as peak-preserving L1 lobes, so the side of a character facing *away* from a bright lamp loses some ambient to the lobe's negative tail), at lattice resolution.
 - **Shadow casting uses real triangles**, not convex hulls: `baking/bvh.rs` builds one flat BVH per bake over every toon-shaded mesh whose ancestry includes a `PlacedObject` or a `RigidBody::Static` (so editor props and plugin scenery like the cafe shell occlude, but a plugin's moving toon mesh does not). The CPU bakers traverse it and the GPU bake traverses the same uploaded nodes. Objects shadow themselves; acne is avoided by offsetting ray origins along the *face* normal, and terrain rays use two origins (0.5 up for the coarse DDA, at the surface for the exact triangle test). AO rays also test the BVH, which yields contact shadows under furniture; **AO is distance-weighted** (a hit at `t` counts `1 − t/ao_radius`, via the BVH's closest-hit query `nearest_hit`/`bvh_nearest`), so a 20 m radius can do sky-visibility duty without a canopy overhead reading as contact-dark. Bounce rays are absorbed by scenery but only terrain re-emits; terrain and object texels both receive it (objects per texel, no coarse grid — atlas cells aren't spatially coherent).
 - Volumetric fog + distance fog for atmosphere; sky dome follows camera
 

@@ -258,10 +258,12 @@ For the illuminance-volume / dynamic-object work, the contact surface is small:
   instead of darkening the whole summed radiance.
 - §7.1's banding fix was a prerequisite, and is done.
 
-**`docs/DYNAMIC_LIGHTING_PLAN.md` is the investigation of how to do this** —
-verified platform constraints (bevy's own `IrradianceVolume` is compiled out
-on *all* wasm, so it is not an option), the options for both halves, and a
-recommendation. Read it before designing anything here.
+**`docs/DYNAMIC_LIGHTING_PLAN.md` covers this and is implemented** (probe
+volume for receiving, blob shadows for casting): verified platform constraints
+(bevy's own `IrradianceVolume` is compiled out on *all* wasm, so it was not an
+option), the options for both halves, and the as-built design in its §8.
+`baking/probes.rs` reuses `BakeLighting`, the BVH and the height cache
+unchanged.
 
 ---
 

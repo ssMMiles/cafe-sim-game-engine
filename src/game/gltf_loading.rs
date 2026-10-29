@@ -1,7 +1,10 @@
 use crate::game::{
     GameEntity,
-    gfx::toon_material::{DefaultToonLightmap, ToonMaterial},
+    gfx::toon_material::{
+        DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource, ToonSun,
+    },
 };
+pub use engine_api::DynamicLit;
 
 use super::gfx::camera::PlayerCamera;
 use bevy::{
@@ -65,13 +68,14 @@ pub struct InteractableParent(pub Entity);
 #[derive(Component)]
 pub struct HoveredOver;
 
-fn on_scene_ready(
+pub fn on_scene_ready(
     trigger: On<WorldInstanceReady>,
     mut commands: Commands,
     entity_query: Query<(
         Option<&Interactable>,
         Option<&PendingMaterial>,
         Option<&ConvertToToon>,
+        Option<&DynamicLit>,
         Option<&Children>,
     )>,
     mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
@@ -79,11 +83,18 @@ fn on_scene_ready(
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
+    probes: Res<ProbeVolumeImages>,
+    sun: Res<ToonSun>,
 ) {
     let entity = trigger.entity;
 
-    let Ok((maybe_interactable, maybe_pending_material, maybe_convert_toon, maybe_children)) =
-        entity_query.get(entity)
+    let Ok((
+        maybe_interactable,
+        maybe_pending_material,
+        maybe_convert_toon,
+        maybe_dynamic,
+        maybe_children,
+    )) = entity_query.get(entity)
     else {
         return;
     };
@@ -139,6 +150,18 @@ fn on_scene_ready(
             .as_ref()
             .map(|r| r.0.clone())
             .unwrap_or_default();
+        // A scene that moves is lit from the probe volume at its own world
+        // position; everything else from its baked lightmap.
+        let source = if maybe_dynamic.is_some() {
+            ToonSource::ProbeVolume
+        } else {
+            ToonSource::Lightmap
+        };
+        let template = {
+            let mut m = ToonMaterial::new(source, lightmap_handle, &probes);
+            sun.apply(&mut m.shading);
+            m
+        };
 
         convert_to_toon_recursive(
             &mut commands,
@@ -147,7 +170,7 @@ fn on_scene_ready(
             &children_query,
             &std_materials,
             &mut toon_materials,
-            lightmap_handle,
+            &template,
         );
         commands.entity(entity).remove::<ConvertToToon>();
     }
@@ -160,7 +183,7 @@ fn convert_to_toon_recursive(
     children_query: &Query<&Children>,
     std_materials: &Assets<StandardMaterial>,
     toon_materials: &mut Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
-    lightmap: Handle<Image>,
+    template: &ToonMaterial,
 ) {
     for child in children.iter() {
         if let Ok((entity, maybe_mat)) = mesh_query.get(child) {
@@ -172,10 +195,7 @@ fn convert_to_toon_recursive(
 
             let handle = toon_materials.add(ExtendedMaterial {
                 base,
-                extension: ToonMaterial {
-                    lightmap: lightmap.clone(),
-                    use_lightmap: 1,
-                },
+                extension: template.clone(),
             });
 
             commands
@@ -192,7 +212,7 @@ fn convert_to_toon_recursive(
                 children_query,
                 std_materials,
                 toon_materials,
-                lightmap.clone(),
+                template,
             );
         }
     }

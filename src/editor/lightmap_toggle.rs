@@ -2,8 +2,9 @@
 //! a flat, unlit debug view.
 //!
 //! This is purely an authoring aid for inspecting base colours and UV seams.
-//! There is no second lighting path: all light (sun, ambient, and soon
-//! point/spot) lives in the baked lightmaps, so "off" simply means unlit.
+//! There is no second lighting path: all light lives in the baked lightmaps
+//! and probes, so "off" simply means unlit. Toon materials keep their
+//! *source* (lightmap or probe volume) and only flip the `unlit` flag.
 
 use bevy::{pbr::ExtendedMaterial, prelude::*};
 
@@ -30,7 +31,7 @@ pub fn sync_lightmap_mode(
     let use_lm = if settings.use_lightmap { 1u32 } else { 0u32 };
 
     for (_id, mat) in toon_materials.iter_mut() {
-        mat.extension.use_lightmap = use_lm;
+        mat.extension.shading.unlit = 1 - use_lm;
     }
 
     for (_id, mat) in terrain_materials.iter_mut() {

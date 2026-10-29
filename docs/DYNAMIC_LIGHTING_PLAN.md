@@ -1,9 +1,10 @@
 # Illuminance volumes + dynamic shadows — investigation
 
-Status: **investigation, 2026-10-28.** No code written. Everything in §2 was
-checked against the actual sources (bevy 0.20.0 / wgpu 30.0.1 in the cargo
-registry, and this repo) rather than recalled; §4–§5 are options with a
-recommendation, not decisions.
+Status: **implemented 2026-10-28** per the decisions in §7; §8 is the design
+as built, §9 what is still open. §2–§6 are the investigation that led there:
+everything in §2 was checked against the actual sources (bevy 0.20.0 /
+wgpu 30.0.1 in the cargo registry, and this repo) rather than recalled.
+Not yet checked visually — see §10.
 
 Background: `docs/LIGHTING.md` describes the baked system this extends.
 
@@ -328,8 +329,40 @@ normal, scaled by radius and faded with height above the surface. Unlit,
 alpha-blended, so it is absent from the depth prepass and the edge detector
 never outlines it.
 
+### Sun uniform
+Probe-lit materials need the live sun. `ToonSun` (host, `gfx/toon_material.rs`)
+is derived from `EnvironmentData` whenever `TerrainWorld` changes;
+`sync_toon_sun` writes it into every toon material then, and into any material
+`Added` since (so a plugin's own material gets it a frame late — only `Added`
+is watched, never `Modified`, which our own writes would raise). The host's
+glTF conversion applies it at creation so the player never shows a sunless
+frame.
+
+### Rebuild cadence
+A re-centre (focus leaves the window's middle third) rebuilds at once — the
+player is about to walk out of the data. Store churn (chunks streaming in,
+a bake landing) is coalesced to one rebuild per half second, since each is a
+full ~12 MB upload.
+
 ## 9. Still open
 
 - BVH-interior probes (a probe landing inside a wall) are not detected; only
   below-terrain ones are. Needs an all-hits parity query if it shows up.
 - Light "pop" as a character passes a lamp is at lattice resolution (2 m).
+- Dynamic objects more than ~128 m from the focus sample wrapped texels from
+  the far side of the window. Harmless at that distance in practice; a 1×1
+  "window origin" texture would let the shader detect it if it ever matters.
+- The side of a character facing away from a bright placed light loses
+  ambient to the L1 lobe's negative tail (see §8, per-probe data).
+
+## 10. To check in the viewport
+
+1. Shift+B, then walk the player from sun into a tree's shade: the whole
+   character should drop to the shade's band, not just its underside.
+2. Stand next to a placed point light in a dark interior: the facing side
+   takes the light's colour and band; the far side goes dark.
+3. The blob should sit on the floor inside the cafe, not on the terrain
+   under it, and shrink as the player jumps.
+4. Shift+L: the character goes flat like everything else, and comes back to
+   probe shading, not lightmap shading, when toggled again.
+5. Walk ~100 m in one direction: no visible pop as the window re-centres.

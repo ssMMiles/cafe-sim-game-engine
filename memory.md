@@ -637,3 +637,38 @@ Hack is in the chain (it compares against the face that owns `◻`, now Hack) �
 `Font::characters()` (the test does). Scratch tool: `/tmp/exrseam/src/bin/glyphs.rs`
 (ttf-parser) prints per-font coverage of a glyph list; fonts live in
 `~/.cargo/registry/src/*/epaint_default_fonts-0.36.2/fonts`.
+
+## Baked lighting review + dynamic lighting (probes, blob shadows) — October 2026
+
+Full write-ups: `docs/LIGHTING.md` (reference + review) and
+`docs/DYNAMIC_LIGHTING_PLAN.md` (investigation + as-built design). Things
+worth remembering that aren't obvious from the code:
+
+- **The toon band bug was a transfer-function problem, not a bake problem.**
+  Bands over `[0, 1]` with a 0.18 floor glued underneath made the two darkest
+  outputs 0.18 and 0.20, and the hue-preserving rescale tracked colour
+  continuously — so a point light in shade *tinted* the shadow without
+  brightening it. The floor cross-fade was also non-monotonic (a 26% dark
+  dip, one pixel wide, along every shadow edge). Bands now span
+  `[TOON_FLOOR, 1]` and the hue mix is between equal-luminance values.
+  Diagnose this class of thing by tabulating the shader's transfer function
+  before touching the baker.
+- **Bevy's `IrradianceVolume` is `cfg!(not(target_arch = "wasm32"))`** —
+  off on WebGPU too, and `pub(crate)`. Don't re-investigate it.
+- **`WEBGL2` is a compile-time cfg; `webgpu` wins if both features are on.**
+  One wasm binary cannot serve both. We build `webgpu` only and WebGL2 is
+  not a target (decided 2026-10-28).
+- **An L1 probe cannot hold a bright lobe plus a dim opposite term.** A sun
+  lobe peaking at L in front is −L/2 behind and cancelled ~90% of the ground
+  bounce under the probe (a test caught it). The sun is stored as a
+  visibility scalar and evaluated exactly in the shader instead.
+- **Bevy rewrites a same-shaped `Image` in place** (`GpuImage::prepare_asset`
+  → `write_texture` when descriptor matches and usage has `COPY_DST`), so a
+  fixed-size texture shared by every material can be refilled without any
+  bind-group churn. The probe volume relies on this; the textures must be
+  `MAIN_WORLD | RENDER_WORLD` or `images.get_mut` finds nothing to rewrite.
+- **Bevy systems take at most 16 parameters.** `run_bake` hit it; the fix was
+  a `SystemParam` bundle (`BakeTasks`), not fewer resources.
+- The lightmap's alpha channel is still unused (written as constant 1.0).
+  Storing the baked `ndotl * shadow` there is the enabler for any future
+  runtime shadow that should subtract only the sun term (plan §5).

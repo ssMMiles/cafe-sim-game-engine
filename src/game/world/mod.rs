@@ -92,6 +92,13 @@ impl Plugin for WorldPlugin {
         app.init_resource::<PlacedObjectRegistry>();
         app.init_resource::<PlacementConfig>();
         app.init_resource::<probe_volume::ProbeStore>();
+        app.init_resource::<probe_volume::ProbeVolume>();
+        app.add_systems(
+            Update,
+            probe_volume::update_probe_volume
+                .after(finalize_computed_chunks)
+                .in_set(WorldSet::InGame),
+        );
     }
 }
 
