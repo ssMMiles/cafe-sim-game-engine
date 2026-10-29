@@ -33,7 +33,7 @@ radiance = sun_rgb * (ndotl * shadow + bounce_strength * bounce)   // direct sun
 | Term | Range | Who computes it | Notes |
 |---|---|---|---|
 | `shadow` | 0 or 1 | `raycast::cast_shadow_ray` | Heightmap DDA out to `ao_radius × 4` (80 m), then an exact BVH test. Binary per texel; the blur is what makes a penumbra |
-| `ao` | [0, 1] | `raycast::compute_ao` | Fraction of `ao_rays` cosine-weighted hemisphere rays that escape within `ao_radius` (20 m), against terrain **and** the BVH |
+| `ao` | [0, 1] | `raycast::compute_ao` | Mean over `ao_rays` cosine-weighted hemisphere rays of `hit_t / ao_radius` (1 if nothing is hit within `ao_radius`, 20 m), against terrain **and** the BVH — an occluder's weight falls off linearly with distance |
 | `bounce` | [0, ∞) | `raycast::compute_indirect_bounce` | Terrain-only multi-bounce. Scenery absorbs bounce rays but never re-emits. **Terrain bake only — objects pass `0.0`** |
 | `atten` | [0, 1] | `BakedLight::sample` | `(1 − d²/r²)²`. Smooth and bounded, deliberately *not* inverse-square |
 | `spot` | [0, 1] | `BakedLight::sample` | `clamp(cosθ·scale + offset, 0, 1)`; a point light stores `scale = 0, offset = 1` so the same branchless maths yields exactly 1 |
@@ -123,8 +123,8 @@ mesh asset — shared mesh assets share UVs, so a per-asset atlas would collide.
 ### Storage
 
 ```
-worlds/{id}/chunks/chunk_X_Y_lightmap.v6.exr
-worlds/{id}/objects/obj_{id}_{k}_lightmap.v6.exr     # k = sub-mesh index
+worlds/{id}/chunks/chunk_X_Y_lightmap.v7.exr
+worlds/{id}/objects/obj_{id}_{k}_lightmap.v7.exr     # k = sub-mesh index
 ```
 
 OpenEXR, f16 RGB, ZIP16. The format version is in the **file name**, so an
@@ -360,6 +360,13 @@ monotone by construction.
 
 ### 7.3 `ao_radius` is 20 m, so "ambient occlusion" is not contact-scale
 
+**Fixed 2026-10-28** (lightmap format v7): each ray now contributes
+`hit_t / ao_radius`, so an occluder's weight falls off linearly with distance.
+A ceiling 0.5 m up still reads as near-total occlusion; one 10 m up on the
+20 m radius reads as about half instead of zero. Both CPU and WGSL; the BVH
+gained a closest-hit query (`nearest_hit` / `bvh_nearest`) for it. The
+analysis below is of the binary count it replaced.
+
 `BakeConfig::ao_radius = 20.0`, used unchanged for the hemisphere march and
 the BVH test, with **no distance weighting**: a ray that hits a wall 19 m away
 counts exactly as much as one hitting a chair leg 2 cm away.
@@ -371,9 +378,9 @@ really doing sky-visibility duty, which 20 m is right for, while being asked
 to also read as contact shadow, which it is not.
 
 Options, cheapest first: weight each occluded ray by `1 − (t/radius)` so near
-hits dominate; or split into a short contact radius (~1 m) and keep the long
-one for sky visibility. Either is a `compute_ao` change that has to land in
-both `raycast.rs` and `lightmap_bake.wgsl` together.
+hits dominate (**taken**); or split into a short contact radius (~1 m) and
+keep the long one for sky visibility — still available if the linear weight
+turns out to leave large canopies too dark, since it only halves them.
 
 ### 7.4 Objects get no indirect bounce; terrain does
 
@@ -465,9 +472,7 @@ light count.
    it.
 2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
 3. §7.5 object ray origin — needs a repro case first.
-4. §7.3 AO weighting and §7.4 object bounce — both are bake-model changes that
-   require a `LIGHTMAP_FORMAT_VERSION` bump and a re-bake, and both should be
-   judged *after* 1, since the old transfer function was hiding what they
-   actually do.
+4. ~~§7.3 AO weighting~~ — **done** (v7). §7.4 object bounce — a bake-model
+   change that needs another `LIGHTMAP_FORMAT_VERSION` bump and a re-bake.
 5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`
    so a stock scene actually occupies the middle bands.

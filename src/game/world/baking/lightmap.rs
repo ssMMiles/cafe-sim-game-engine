@@ -40,7 +40,10 @@ use crate::game::world::terrain::storage::EnvironmentData;
 /// - v5: placed point and spot lights are baked in too.
 /// - v6: object texels are positioned with each sub-mesh's own transform
 ///   (v5 used the placed root's, so scaled/offset glTF nodes baked wrong).
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 6;
+/// - v7: ambient occlusion is distance-weighted (an occluder at distance `t`
+///   counts `1 - t / ao_radius`, not 1), so the ambient term means
+///   something different under anything large.
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 7;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -1200,7 +1203,7 @@ mod tests {
 
         let key = terrain_lightmap_key("my-world", -1, 2);
         let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
-        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v6.exr");
+        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v7.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1208,7 +1211,7 @@ mod tests {
 
         let key = object_lightmap_key("my-world", 7, 3);
         let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
-        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v6.exr");
+        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v7.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())

@@ -105,7 +105,10 @@ pub struct BakeConfig {
     pub dilate_passes: u32,
     /// Number of AO hemisphere rays per texel.
     pub ao_rays: u32,
-    /// AO hemisphere radius in world units.
+    /// AO hemisphere radius in world units. Also the scale of the distance
+    /// weighting: an occluder at distance `t` along a ray counts
+    /// `1 - t / ao_radius`, so this is both "how far AO looks" and "how far
+    /// away something has to be before it stops darkening the surface".
     pub ao_radius: f32,
     /// Number of DDA steps for shadow and bounce rays (marches `ao_radius × 4`).
     pub shadow_steps: u32,

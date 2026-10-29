@@ -154,6 +154,57 @@ impl TriangleBvh {
         }
         false
     }
+
+    /// Distance to the *closest* triangle the ray hits between `RAY_EPSILON`
+    /// and `max_t`, or `None`.
+    ///
+    /// Same traversal as [`Self::occluded`], but it cannot stop at the first
+    /// hit: a leaf visited earlier may hold a farther triangle than one
+    /// visited later. Each hit shrinks the bound instead, so subtrees and
+    /// triangles beyond the best so far are still culled. Used by the AO
+    /// estimate, which weights an occluder by how close it is. Mirrors
+    /// `bvh_nearest` in the WGSL.
+    pub fn nearest_hit(&self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let inv_dir = Vec3::new(safe_inv(dir.x), safe_inv(dir.y), safe_inv(dir.z));
+        let mut best = max_t;
+        let mut found = false;
+
+        let mut stack = [0u32; 64];
+        let mut sp = 1usize;
+        while sp > 0 {
+            sp -= 1;
+            let node = &self.nodes[stack[sp] as usize];
+            if !slab_hit(
+                node.aabb_min.into(),
+                node.aabb_max.into(),
+                origin,
+                inv_dir,
+                best,
+            ) {
+                continue;
+            }
+            if node.count > 0 {
+                let first = node.left_or_first as usize;
+                for tri in &self.tris[first..first + node.count as usize] {
+                    if let Some(t) =
+                        ray_triangle(origin, dir, tri.v0.into(), tri.v1.into(), tri.v2.into())
+                        && t < best
+                    {
+                        best = t;
+                        found = true;
+                    }
+                }
+            } else {
+                stack[sp] = node.left_or_first;
+                stack[sp + 1] = node.left_or_first + 1;
+                sp += 2;
+            }
+        }
+        found.then_some(best)
+    }
 }
 
 struct Builder<'a> {
@@ -427,6 +478,54 @@ mod tests {
         let bvh = TriangleBvh::build(Vec::new());
         assert!(bvh.nodes.is_empty() && bvh.tris.is_empty());
         assert!(!bvh.occluded(Vec3::ZERO, Vec3::Y, 100.0));
+        assert_eq!(bvh.nearest_hit(Vec3::ZERO, Vec3::Y, 100.0), None);
+    }
+
+    /// `nearest_hit` has to return the *closest* triangle, whatever order the
+    /// builder laid the leaves out in, and honour `max_t` like `occluded`.
+    #[test]
+    fn nearest_hit_finds_the_closest_triangle_regardless_of_leaf_order() {
+        let slab = |y: f32| {
+            [
+                Vec3::new(-1.0, y, -1.0),
+                Vec3::new(1.0, y, -1.0),
+                Vec3::new(0.0, y, 1.0),
+            ]
+        };
+        // Far triangle first in the input, near one last; plus clutter so
+        // the tree has more than one leaf.
+        let mut tris = vec![slab(8.0), slab(5.0)];
+        for i in 0..20 {
+            tris.push(slab(20.0 + i as f32));
+        }
+        tris.push(slab(2.0));
+        let bvh = TriangleBvh::build(tris);
+        assert!(bvh.nodes.len() > 1);
+
+        let t = bvh.nearest_hit(Vec3::ZERO, Vec3::Y, 100.0).unwrap();
+        assert!((t - 2.0).abs() < 1e-4, "nearest is at 2, got {t}");
+        assert_eq!(bvh.nearest_hit(Vec3::ZERO, Vec3::Y, 1.5), None);
+        assert_eq!(bvh.nearest_hit(Vec3::ZERO, Vec3::NEG_Y, 100.0), None);
+
+        // Agrees with brute force from random origins and directions.
+        let mut rng = XorShift(0x1234_5678);
+        let scene = random_scene(&mut rng, 300);
+        let bvh = TriangleBvh::build(scene.clone());
+        for _ in 0..500 {
+            let o = rng.vec3(-12.0, 12.0);
+            let d = rng.vec3(-1.0, 1.0).normalize_or(Vec3::Y);
+            let expect = scene
+                .iter()
+                .filter_map(|t| ray_triangle(o, d, t[0], t[1], t[2]))
+                .filter(|t| *t < 30.0)
+                .fold(None, |m: Option<f32>, t| Some(m.map_or(t, |m| m.min(t))));
+            let got = bvh.nearest_hit(o, d, 30.0);
+            match (expect, got) {
+                (None, None) => {}
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-4, "{a} vs {b}"),
+                other => panic!("brute force vs bvh disagree: {other:?}"),
+            }
+        }
     }
 
     #[test]

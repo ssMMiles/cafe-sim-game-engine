@@ -456,6 +456,47 @@ fn local_lights(origin: vec3<f32>, world_pos: vec3<f32>, normal: vec3<f32>) -> v
     return total;
 }
 
+/// Distance to the closest scenery triangle between RAY_EPSILON and max_t,
+/// or max_t if there is none. Same traversal as bvh_occluded but it cannot
+/// stop at the first hit; each hit shrinks the bound instead. Mirrors
+/// TriangleBvh::nearest_hit.
+fn bvh_nearest(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> f32 {
+    if u.num_bvh_nodes == 0u {
+        return max_t;
+    }
+    let inv_d = vec3<f32>(safe_inv(rd.x), safe_inv(rd.y), safe_inv(rd.z));
+    var best = max_t;
+
+    var stack: array<u32, 64>;
+    var sp: u32 = 1u;
+    stack[0] = 0u;
+
+    loop {
+        if sp == 0u {
+            break;
+        }
+        sp = sp - 1u;
+        let node = bvh_nodes[stack[sp]];
+        if !slab_hit(node.aabb_min, node.aabb_max, ro, inv_d, best) {
+            continue;
+        }
+        if node.count > 0u {
+            let end = node.left_or_first + node.count;
+            for (var i = node.left_or_first; i < end; i = i + 1u) {
+                let t = ray_tri_hit(ro, rd, bvh_tris[i]);
+                if t > 0.0 && t < best {
+                    best = t;
+                }
+            }
+        } else {
+            stack[sp] = node.left_or_first;
+            stack[sp + 1u] = node.left_or_first + 1u;
+            sp = sp + 2u;
+        }
+    }
+    return best;
+}
+
 // ----------------------------------------------------------------------------
 // Ambient occlusion
 // ----------------------------------------------------------------------------
@@ -465,9 +506,13 @@ fn golden_seq(i: u32) -> f32 {
     return fract(f32(i) * GOLDEN);
 }
 
-/// Compute hemisphere AO against terrain (from `origin`) and scenery (from
-/// `mesh_origin`, out to ao_radius) — the latter gives contact shadows.
-/// Returns the fraction of unoccluded rays ∈ [0, 1].
+/// Distance-weighted hemisphere visibility against terrain (from `origin`)
+/// and scenery (from `mesh_origin`), out to ao_radius. A ray hitting at
+/// distance t contributes t / ao_radius, so near occluders dominate — the
+/// contact shadow under a chair — and a canopy far overhead only dims.
+/// Terrain is marched first (ordered along the ray, so first hit = nearest),
+/// then scenery is searched inside that distance. Mirrors raycast::compute_ao.
+/// Returns mean visibility ∈ [0, 1].
 fn compute_ao(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>) -> f32 {
     if u.ao_rays == 0u {
         return 1.0;
@@ -475,30 +520,26 @@ fn compute_ao(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>) -> f
 
     let tf        = make_tangent_frame(normal);
     let step_size = u.ao_radius / f32(u.ao_steps);
-    var unoccluded: f32 = 0.0;
+    var visibility: f32 = 0.0;
 
     for (var i: u32 = 0u; i < u.ao_rays; i = i + 1u) {
         let world_dir = hemisphere_dir(i, u.ao_rays, normal, tf, 0.0);
-        if dot(world_dir, normal) <= 0.0 {
-            continue;
-        }
 
-        var occluded = bvh_occluded(mesh_origin, world_dir, u.ao_radius);
-        if !occluded {
-            for (var s: u32 = 1u; s <= u.ao_steps; s = s + 1u) {
-                let p = origin + world_dir * (f32(s) * step_size);
-                if world_height(p.x, p.z) > p.y {
-                    occluded = true;
-                    break;
-                }
+        var hit_t = u.ao_radius;
+        for (var s: u32 = 1u; s <= u.ao_steps; s = s + 1u) {
+            let t = f32(s) * step_size;
+            let p = origin + world_dir * t;
+            if world_height(p.x, p.z) > p.y {
+                hit_t = t;
+                break;
             }
         }
-        if !occluded {
-            unoccluded = unoccluded + 1.0;
-        }
+        hit_t = bvh_nearest(mesh_origin, world_dir, hit_t);
+
+        visibility = visibility + hit_t / u.ao_radius;
     }
 
-    return unoccluded / f32(u.ao_rays);
+    return visibility / f32(u.ao_rays);
 }
 
 // ----------------------------------------------------------------------------

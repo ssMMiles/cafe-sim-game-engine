@@ -263,14 +263,24 @@ pub fn cast_shadow_ray_segment(
 // Ambient Occlusion
 // ============================================================================
 
-/// Compute ambient occlusion by casting `n_rays` hemisphere rays in the
-/// half-space defined by `normal`, against both the heightmap (from
-/// `origin`) and scenery triangles (from `mesh_origin`, out to `radius`).
-/// The latter is what gives contact shadows under furniture.
+/// Ambient visibility: `n_rays` cosine-weighted hemisphere rays around
+/// `normal`, against both the heightmap (from `origin`) and scenery
+/// triangles (from `mesh_origin`), out to `radius`. The latter is what gives
+/// contact shadows under furniture.
 ///
-/// Returns the fraction of unoccluded rays ∈ [0, 1].  Uses a simple
-/// deterministic cosine-weighted hemisphere distribution built from the
-/// incoming normal so the result is stable across bakes.
+/// **Distance-weighted.** A ray that hits something at distance `t`
+/// contributes `t / radius` rather than 0, so an occluder's weight falls off
+/// linearly with how far away it is: a chair leg 2 cm away is full
+/// occlusion, a canopy 10 m up on a 20 m radius is half. The old binary
+/// count gave both the same weight, which turned the 20 m sky-visibility
+/// radius into a contact-shadow-strength blanket under anything large.
+/// The terrain march runs first because it is ordered along the ray (so
+/// its first hit is its nearest, and the `above_terrain` early-out stays
+/// valid), then scenery is searched only *inside* that distance.
+///
+/// Returns mean visibility ∈ [0, 1]. The hemisphere distribution is
+/// deterministic, so the result is stable across bakes. Mirrors
+/// `compute_ao` in `lightmap_bake.wgsl`.
 pub fn compute_ao(
     origin: Vec3,
     mesh_origin: Vec3,
@@ -287,40 +297,41 @@ pub fn compute_ao(
 
     let (tangent, bitangent) = build_tangent_frame(normal);
     let step_size = radius / steps as f32;
-    let mut unoccluded: u32 = 0;
+    let mut visibility = 0.0_f32;
 
     for i in 0..n_rays {
-        let (world_dir, cos_w) =
+        // Every direction the generator returns is strictly above the
+        // tangent plane (`local.y = sqrt(1 - u) > 0`), so no back-facing
+        // check is needed; one here used to silently count such a ray as
+        // occluded.
+        let (world_dir, _cos_w) =
             hemisphere_dir_for_seed(i, n_rays, normal, tangent, bitangent, 0.0);
-        if cos_w <= 0.0 {
-            continue;
-        }
 
-        let mut occluded = bvh.occluded(mesh_origin, world_dir, radius);
-        if !occluded {
-            // Hemisphere rays point up by construction, so this early-out
-            // fires often: on gentle terrain most rays clear the tallest
-            // tile within a few steps of their 32.
-            let climbing = world_dir.y >= 0.0;
-            for s in 1..=steps {
-                let sample_pos = origin + world_dir * (s as f32 * step_size);
-                if climbing && cache.above_terrain(sample_pos.y) {
-                    break;
-                }
-                let terrain_h = cache.sample_height(sample_pos.x, sample_pos.z);
-                if terrain_h > sample_pos.y {
-                    occluded = true;
-                    break;
-                }
+        // Nearest terrain hit. Hemisphere rays point up by construction, so
+        // the early-out fires often: on gentle terrain most rays clear the
+        // tallest tile within a few steps of their 32.
+        let mut hit_t = radius;
+        let climbing = world_dir.y >= 0.0;
+        for s in 1..=steps {
+            let t = s as f32 * step_size;
+            let sample_pos = origin + world_dir * t;
+            if climbing && cache.above_terrain(sample_pos.y) {
+                break;
+            }
+            if cache.sample_height(sample_pos.x, sample_pos.z) > sample_pos.y {
+                hit_t = t;
+                break;
             }
         }
-
-        if !occluded {
-            unoccluded += 1;
+        // Scenery closer than that, if any.
+        if let Some(t) = bvh.nearest_hit(mesh_origin, world_dir, hit_t) {
+            hit_t = t;
         }
+
+        visibility += hit_t / radius;
     }
 
-    unoccluded as f32 / n_rays as f32
+    visibility / n_rays as f32
 }
 
 // ============================================================================
@@ -524,6 +535,114 @@ fn hemisphere_dir_for_seed(
     let dir = (tangent * local.x + normal * local.y + bitangent * local.z).normalize();
     let cos_w = dir.dot(normal).max(0.0);
     (dir, cos_w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::world::terrain::HeightmapData;
+
+    fn flat_cache() -> BakeHeightCache {
+        let mut hm = HeightmapData::new((0.25, 0.25));
+        for tx in -200..200 {
+            for tz in -200..200 {
+                hm.set_tile(tx, tz, 0.0);
+            }
+        }
+        BakeHeightCache::extract(&hm, -40.0, -40.0, 40.0, 40.0)
+    }
+
+    /// A big horizontal slab at height `y` over the origin.
+    fn ceiling(y: f32) -> TriangleBvh {
+        TriangleBvh::build(vec![
+            [
+                Vec3::new(-100.0, y, -100.0),
+                Vec3::new(100.0, y, -100.0),
+                Vec3::new(-100.0, y, 100.0),
+            ],
+            [
+                Vec3::new(100.0, y, -100.0),
+                Vec3::new(100.0, y, 100.0),
+                Vec3::new(-100.0, y, 100.0),
+            ],
+        ])
+    }
+
+    /// Occlusion is weighted by distance: a near ceiling darkens far more
+    /// than a far one, and a far one no longer reads as total darkness.
+    /// Under the old binary count every row here was 0.0.
+    #[test]
+    fn ao_weights_occluders_by_distance() {
+        let cache = flat_cache();
+        let origin = Vec3::new(0.0, 0.5, 0.0);
+        let mesh_origin = Vec3::new(0.0, 0.02, 0.0);
+        let radius = 20.0;
+        let ao = |bvh: &TriangleBvh| {
+            compute_ao(origin, mesh_origin, Vec3::Y, &cache, bvh, radius, 16, 32)
+        };
+
+        let open = ao(&TriangleBvh::build(Vec::new()));
+        assert!(
+            (open - 1.0).abs() < 1e-6,
+            "flat open ground is fully visible: {open}"
+        );
+
+        let near = ao(&ceiling(0.5));
+        let mid = ao(&ceiling(10.0));
+        let far = ao(&ceiling(19.0));
+        assert!(
+            near < 0.1,
+            "a ceiling 0.5 m up is near-total occlusion: {near}"
+        );
+        assert!(
+            mid > 0.4 && mid < 0.75,
+            "a ceiling 10 m up on a 20 m radius is about half: {mid}"
+        );
+        assert!(
+            far > mid && far < 1.0,
+            "19 m up is lighter still but not open: {far}"
+        );
+        assert!(near < mid && mid < far);
+
+        // Beyond the radius there is no occluder at all.
+        let beyond = ao(&ceiling(25.0));
+        assert!((beyond - 1.0).abs() < 1e-6, "{beyond}");
+    }
+
+    /// Terrain is weighted the same way as scenery — a wall of ground is an
+    /// occluder like any other, and the nearest one wins.
+    #[test]
+    fn ao_takes_the_nearer_of_terrain_and_scenery() {
+        let mut hm = HeightmapData::new((0.25, 0.25));
+        for tx in -200..200 {
+            for tz in -200..200 {
+                // A cliff: everything at x >= 1 m is 50 m tall.
+                hm.set_tile(tx, tz, if tx >= 4 { 50.0 } else { 0.0 });
+            }
+        }
+        let cache = BakeHeightCache::extract(&hm, -40.0, -40.0, 40.0, 40.0);
+        let origin = Vec3::new(0.0, 0.5, 0.0);
+        let mesh_origin = Vec3::new(0.0, 0.02, 0.0);
+        let radius = 20.0;
+
+        let empty = TriangleBvh::build(Vec::new());
+        let cliff_only = compute_ao(origin, mesh_origin, Vec3::Y, &cache, &empty, radius, 16, 32);
+        assert!(cliff_only < 1.0 && cliff_only > 0.3, "{cliff_only}");
+
+        // A ceiling nearer than the cliff lowers it further; one farther
+        // than every cliff hit along the ray changes nothing on that ray.
+        let with_near = compute_ao(
+            origin,
+            mesh_origin,
+            Vec3::Y,
+            &cache,
+            &ceiling(0.3),
+            radius,
+            16,
+            32,
+        );
+        assert!(with_near < cliff_only, "{with_near} vs {cliff_only}");
+    }
 }
 
 // ============================================================================
