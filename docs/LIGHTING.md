@@ -252,8 +252,16 @@ For the illuminance-volume / dynamic-object work, the contact surface is small:
   `BakedSun` via `StandardMaterial`, so they are lit *nothing like* the static
   world. A probe sampled at the object's position and fed into a toon material
   would close that gap.
-- **Read §7.1 first.** Any dynamic-lighting work inherits the transfer function
-  in §3; fixing it is a prerequisite, not a follow-up.
+- The lightmap's **alpha channel is unused** (`to_rgba16_bytes` writes a
+  constant 1.0, both shaders read `.rgb`). Storing the baked `ndotl * shadow`
+  scalar there is what lets a runtime shadow subtract the sun term alone
+  instead of darkening the whole summed radiance.
+- §7.1's banding fix was a prerequisite, and is done.
+
+**`docs/DYNAMIC_LIGHTING_PLAN.md` is the investigation of how to do this** —
+verified platform constraints (bevy's own `IrradianceVolume` is compiled out
+on *all* wasm, so it is not an option), the options for both halves, and a
+recommendation. Read it before designing anything here.
 
 ---
 

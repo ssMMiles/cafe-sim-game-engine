@@ -266,6 +266,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 
 ## Rendering Pipeline
 
+- **`docs/DYNAMIC_LIGHTING_PLAN.md`** investigates illuminance volumes + dynamic shadows (not implemented). Key verified constraints: bevy's `IrradianceVolume` is `cfg!(not(target_arch = "wasm32"))` so it is unusable on *any* wasm target; `WEBGL2` is a compile-time cfg and `webgpu` wins when both features are set, so one wasm binary cannot serve both backends (we currently build `webgpu` only, and `VolumetricFog` already requires it); the lightmap's alpha channel is free and is what would let a runtime shadow subtract only the sun term.
 - **`docs/LIGHTING.md` is the reference for the whole baked lighting system** — units, the one shading equation, the three baker implementations, the runtime transfer function, the invariants, and a reviewed list of its current defects. Read it before changing anything below the "All lighting is baked" bullet.
 - The camera uses `Tonemapping::Linear` (no tone curve, keeps the clamp). Bevy 0.20 made `None` a full passthrough that drops the negative-channel clamp — never put that in front of the 5-band quantiser
 - Camera renders to a float16 HDR image (`GameRenderTarget`): 1920x1080 displayed via sprite on layer 1 in gameplay; in the editor the image is resized to the egui viewport tab and drawn as an egui texture (bevy_egui binds any filterable float texture and does its own linear→sRGB, so colours match the sprite path)
