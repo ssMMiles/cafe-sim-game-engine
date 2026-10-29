@@ -34,7 +34,10 @@ pub use toon_material::{DefaultToonLightmap, ToonMaterial, create_default_toon_l
 ///   `WorldAssetRoot`, extraction is generic over worlds) and the `add!`
 ///   macro now registers `Time` via `register_component`. A dylib built
 ///   against the 0.18/0.19 engine-api must be refused, not loaded.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 7;
+/// - 8: dynamic lighting. [`BlobShadow`] and [`DynamicLit`] components;
+///   `ToonMaterial` carries the probe volume bindings and `ToonShading`
+///   (source + unlit) replaces its `use_lightmap` flag.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 8;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -302,6 +305,32 @@ pub struct PlayerCollider;
 /// Marker for all in-game entities (despawned on exit).
 #[derive(Component)]
 pub struct GameEntity;
+
+/// A moving object that should carry a soft dark disc on whatever is under
+/// it. All *static* shadows are baked into lightmaps, so without this a
+/// character stands on sunlit ground with no visual contact at all.
+///
+/// Put it on the object's root. The host spawns and drives a separate disc
+/// entity: an avian ray straight down from the root (ignoring the root's own
+/// colliders) finds the surface — terrain or a placed floor — and the disc
+/// sits on it, aligned to the hit normal, scaled by `radius` and shrinking
+/// with height above the surface until it vanishes at `fade_height`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct BlobShadow {
+    /// Disc radius in metres when the object is on the ground.
+    pub radius: f32,
+    /// Height above the surface at which the disc has shrunk to nothing.
+    pub fade_height: f32,
+}
+
+impl BlobShadow {
+    pub fn with_radius(radius: f32) -> Self {
+        Self {
+            radius,
+            fade_height: 4.0,
+        }
+    }
+}
 
 /// Player physics state.
 #[derive(Component, Debug)]

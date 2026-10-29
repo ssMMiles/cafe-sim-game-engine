@@ -241,38 +241,84 @@ Neither is estimable from reading code.
 
 ---
 
-## 7. Suggested phasing
+## 7. Decisions (2026-10-28)
 
-1. **Sun term into lightmap alpha** (format bump, re-bake). Independent of
-   everything else, unblocks every shadow option, and is verifiable on its own
-   — with `dynamic_shadow = 1` hardcoded, output must be bit-identical.
-2. **`DynamicLit` / `DynamicShadowCaster` marker components** and the
-   `NotShadowCaster` sweep over static spawn sites, with a guard test.
-3. **Blob shadows (S1)** — ships a visible improvement immediately and is the
-   permanent low-end fallback.
-4. **Probe bake + per-object SH uniform (A2)** — the bigger piece; the toon
-   shaders gain a "radiance from SH" path beside the lightmap path.
-5. **Dynamic-only shadow map (S3)**, composited through the alpha channel.
-6. Measure on a phone. If it holds, make S1 a quality setting rather than a
-   fallback.
+- **WebGPU only.** WebGL2 is dropped as a target; the §2 constraints about it
+  stay as the record of why.
+- **A3** for receiving: a probe volume sampled per pixel, so any number of
+  dynamic objects share one set of materials.
+- **S1 blob shadows** for casting, for now. No shadow pass on `BakedSun` — the
+  first game is mostly interiors where a point light's shadow matters more than
+  the sun's, and a dynamic-only sun shadow map would not help there anyway.
+- **Placed point/spot lights do light dynamic objects**, through the probe bake.
+- **Dynamic objects do not shadow each other.**
 
-Steps 1–3 are low-risk and independently useful. Step 4 is where the real
-design work is (probe validity, interpolation, streaming the grid).
+## 8. Design as built
 
----
+### Probe lattice
+One world-aligned lattice, `PROBE_CELL` metres per cell on every axis (2 m),
+with cell `i` spanning `[i·c, (i+1)·c)` and its probe at the centre. Chunks do
+not tile it (63.75 m is not a multiple of 2) and don't need to: a chunk's probe
+file stores the lattice cells whose centres fall inside the chunk's footprint,
+from `probe_depth_below` under its lowest terrain to `probe_height_above` over
+its highest.
 
-## 8. Open questions for you
+### Per-probe data
+L1 in the *linear* basis, pre-convolved to irradiance in lightmap units:
+`E(n) = c0 + c1·n.x + c2·n.y + c3·n.z`, clamped at 0. Twelve `f16`s. Fitted by
+projecting the per-normal radiance `f(n)` evaluated at 32 Fibonacci normals.
+`f(n)` is the same model as the lightmap, evaluated at the probe position:
 
-- **Is WebGL2 actually a target?** It is a second build with its own feature
-  set, and `VolumetricFog` already doesn't work there. If "web" means WebGPU
-  only, several constraints above relax and A3 becomes more attractive. If
-  WebGL2 is real, we should stand up that build *before* building against its
-  assumptions, because nothing currently proves it runs.
-- **How many dynamic objects, and how big?** A handful of characters points
-  firmly at A2. Dozens of moving props, or large ones, pushes toward A3.
-- **Should placed point/spot lights affect dynamic objects?** The probe bake
-  gives this for free (they're in `BakeLighting::local_lights`), but it means
-  a character's lighting changes only at probe resolution — a lamp passed
-  closely will pop between probes rather than sweep.
-- **Do dynamic objects need to shadow each other**, or only the static world?
-  Only-the-world is cheaper and simpler.
+```
+f(n) = sun_rgb · vis_sun · max(n·s, 0)                      direct sun
+     + Σ_lights  color·atten·spot·vis · max(n·d, 0)          placed lights
+     + (4/M) Σ_j max(n·d_j, 0) · L_j                         environment, M sphere rays
+```
+
+where an environment ray escaping to sky returns `ambient_rgb`, hitting terrain
+returns `albedo·(sun_rgb·ndotl·vis + ambient_rgb)` (the lightmap's bounce
+model), and hitting scenery returns `0.5·ambient_rgb` (no hit normal from the
+BVH; treated as shaded). A probe below the terrain surface is invalid and takes
+the value of the first valid probe above it in its column.
+
+**Known approximation:** L1 cannot represent the clamped sun lobe, so the side
+of a character facing away from the sun reads ~¼ of the sun's intensity rather
+than 0. The toon quantiser usually hides this; if it doesn't, the fix is
+storing the sun's direction + visibility separately and evaluating the clamp in
+the shader.
+
+### Runtime volume
+Three `Rgba16Float` 3D textures of fixed size `PROBE_VOLUME_DIMS`
+(128×24×128 cells = 256 m × 48 m × 256 m, ~9 MB total), addressed
+**toroidally**: cell `i` lives in texel `i mod dims`, the sampler repeats, and
+the shader computes `uvw = world_pos / (cell · dims)` with no origin uniform.
+The window re-centres on `WorldFocus` when the focus leaves its middle third,
+rebuilding the CPU buffer from `ProbeStore` (per-chunk probe grids from
+streaming and from bakes) and rewriting the `Image` data. Bevy's `GpuImage`
+prepare writes a same-shaped image **in place** (`write_texture` on the existing
+texture), so no material bind group is touched and every toon material shares
+the three handles for the life of the app. Cells no loaded chunk covers get a
+default open-sky probe derived from `EnvironmentData`, so an unbaked world shows
+a sunlit character rather than a black one.
+
+### Material
+`ToonMaterial` gains the three volume textures, one shared repeat sampler, and
+`ToonShading { source: 1 lightmap | 2 probes, unlit }` in place of the old
+`use_lightmap` flag — `unlit` is Shift+L and is orthogonal to the source, so
+toggling it no longer forgets which path a material was on. Both are
+ABI-visible, so `ENGINE_SCRIPTS_ABI_VERSION` goes to 8. `DynamicLit` on a
+scene root makes `ConvertToToon` pick the probe source for its materials.
+
+### Blob shadow
+`BlobShadow { radius }` on the dynamic root. A detached disc entity follows it:
+an avian raycast straight down (excluding the caster's own colliders) places the
+disc on whatever is underneath — terrain or a floor mesh — aligned to the hit
+normal, scaled by radius and faded with height above the surface. Unlit,
+alpha-blended, so it is absent from the depth prepass and the edge detector
+never outlines it.
+
+## 9. Still open
+
+- BVH-interior probes (a probe landing inside a wall) are not detected; only
+  below-terrain ones are. Needs an all-hits parity query if it shows up.
+- Light "pop" as a character passes a lamp is at lattice resolution (2 m).

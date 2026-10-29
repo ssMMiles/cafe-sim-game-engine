@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod animation;
+pub mod blob_shadow;
 pub mod gfx;
 pub mod gltf_loading;
 pub mod physics;
@@ -141,6 +142,8 @@ impl Plugin for SimulationPlugin {
         // for plugins that want to freeze the simulation.
         app.add_systems(OnEnter(SimulationState::Paused), pause_animations);
         app.add_systems(OnExit(SimulationState::Paused), resume_animations);
+
+        app.add_plugins(blob_shadow::BlobShadowPlugin);
 
         // ── Update ────────────────────────────────────────────────────────
         app.init_resource::<WorldFocus>();

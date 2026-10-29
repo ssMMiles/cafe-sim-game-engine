@@ -7,7 +7,7 @@ use crate::editor::EditorMode;
 use crate::game::gfx::camera::setup_camera;
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
-use engine_api::{CharacterState, GameEntity, SimulationConfig};
+use engine_api::{BlobShadow, CharacterState, GameEntity, SimulationConfig};
 pub use engine_api::{Player, PlayerCollider};
 
 pub fn setup(
@@ -42,6 +42,9 @@ pub fn setup(
             Visibility::Inherited,
             WorldAssetRoot(mr_windmill),
             RigidBody::Kinematic,
+            // Static shadows are baked; this is the only shadow a moving
+            // character casts.
+            BlobShadow::with_radius(CHAR_RADIUS * 1.8),
         ))
         .id();
 
