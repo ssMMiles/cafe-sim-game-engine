@@ -43,7 +43,10 @@ use crate::game::world::terrain::storage::EnvironmentData;
 /// - v7: ambient occlusion is distance-weighted (an occluder at distance `t`
 ///   counts `1 - t / ao_radius`, not 1), so the ambient term means
 ///   something different under anything large.
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 7;
+/// - v8: object texels receive indirect terrain bounce, as terrain texels
+///   always have (v7 objects had none, so they sat darker than the ground
+///   they stood on).
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 8;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -1203,7 +1206,7 @@ mod tests {
 
         let key = terrain_lightmap_key("my-world", -1, 2);
         let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
-        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v7.exr");
+        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v8.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1211,7 +1214,7 @@ mod tests {
 
         let key = object_lightmap_key("my-world", 7, 3);
         let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
-        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v7.exr");
+        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v8.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())

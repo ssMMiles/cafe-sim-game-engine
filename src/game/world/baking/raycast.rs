@@ -345,7 +345,8 @@ pub fn compute_ao(
 /// attenuated by the current path throughput, then multiplies throughput by
 /// `terrain_albedo` so successive bounces contribute diminishing amounts.
 /// Scenery triangles absorb bounce rays (no light leaks through walls) but
-/// are not themselves reflectors — only terrain bounces light.
+/// are not themselves reflectors — only terrain bounces light. Both terrain
+/// and object texels *receive* it.
 ///
 /// `seed_offset` is a per-texel hash used to rotate the azimuth of the primary
 /// rays and decorrelate the structured golden-ratio pattern across texels,

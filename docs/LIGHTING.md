@@ -34,7 +34,7 @@ radiance = sun_rgb * (ndotl * shadow + bounce_strength * bounce)   // direct sun
 |---|---|---|---|
 | `shadow` | 0 or 1 | `raycast::cast_shadow_ray` | Heightmap DDA out to `ao_radius × 4` (80 m), then an exact BVH test. Binary per texel; the blur is what makes a penumbra |
 | `ao` | [0, 1] | `raycast::compute_ao` | Mean over `ao_rays` cosine-weighted hemisphere rays of `hit_t / ao_radius` (1 if nothing is hit within `ao_radius`, 20 m), against terrain **and** the BVH — an occluder's weight falls off linearly with distance |
-| `bounce` | [0, ∞) | `raycast::compute_indirect_bounce` | Terrain-only multi-bounce. Scenery absorbs bounce rays but never re-emits. **Terrain bake only — objects pass `0.0`** |
+| `bounce` | [0, ∞) | `raycast::compute_indirect_bounce` | Multi-bounce off **terrain only**: scenery absorbs bounce rays but never re-emits. Received by terrain and object texels alike (objects since v8) |
 | `atten` | [0, 1] | `BakedLight::sample` | `(1 − d²/r²)²`. Smooth and bounded, deliberately *not* inverse-square |
 | `spot` | [0, 1] | `BakedLight::sample` | `clamp(cosθ·scale + offset, 0, 1)`; a point light stores `scale = 0, offset = 1` so the same branchless maths yields exactly 1 |
 | `vis` | 0 or 1 | `raycast::cast_shadow_ray_segment` | Segment ray that *stops at the light*, unlike the sun's fixed reach |
@@ -123,8 +123,8 @@ mesh asset — shared mesh assets share UVs, so a per-asset atlas would collide.
 ### Storage
 
 ```
-worlds/{id}/chunks/chunk_X_Y_lightmap.v7.exr
-worlds/{id}/objects/obj_{id}_{k}_lightmap.v7.exr     # k = sub-mesh index
+worlds/{id}/chunks/chunk_X_Y_lightmap.v8.exr
+worlds/{id}/objects/obj_{id}_{k}_lightmap.v8.exr     # k = sub-mesh index
 ```
 
 OpenEXR, f16 RGB, ZIP16. The format version is in the **file name**, so an
@@ -384,8 +384,14 @@ turns out to leave large canopies too dark, since it only halves them.
 
 ### 7.4 Objects get no indirect bounce; terrain does
 
-`baking/objects.rs:565` passes `bounce = 0.0` to `sun_and_ambient`, while
-`baking/terrain.rs:226` passes `config.bounce_strength * bounce`.
+**Fixed 2026-10-28** (lightmap format v8): `shade_geometry` now calls
+`compute_indirect_bounce` per covered texel, seeded by atlas index, and
+passes `bounce_strength × bounce` exactly as the terrain bake does. The
+analysis below is of the state before.
+
+`shade_geometry` in `baking/objects.rs` passed `bounce = 0.0` to
+`sun_and_ambient`, while `bake_chunk` in `baking/terrain.rs` passes
+`config.bounce_strength * bounce`.
 
 A box standing on sunlit terrain has a shadowed side lit by `ambient × ao`
 alone, where the terrain 10 cm away also receives `sun_rgb × bounce`. With
@@ -393,11 +399,14 @@ alone, where the terrain 10 cm away also receives `sun_rgb × bounce`. With
 lands precisely at the object/terrain junction where the eye is looking. It
 makes objects read darker than their surroundings in shade and compounds §7.3.
 
-Objects already carry everything needed (`origin`, `normal`, the cache, the
-BVH); `compute_indirect_bounce` would work as-is. The cost is the catch — it
-was ~45% of the CPU terrain bake's rays, and the object bake is CPU on every
-platform and single-threaded on wasm. A cheap middle ground is a constant
-bounce approximation for objects rather than rays.
+Objects already carried everything needed (`origin`, `normal`, the cache,
+the BVH), so `compute_indirect_bounce` was dropped in as-is. The cost is the
+thing to watch: it was ~45% of the CPU terrain bake's rays, the object bake
+is CPU on every platform and single-threaded on wasm, and unlike the terrain
+bake there is no coarse-grid shortcut (atlas texels aren't spatially
+coherent across cells), so it runs per texel. `BakeStats` logs the shade
+time; if it becomes a problem the fallback is a constant bounce estimate for
+objects rather than rays.
 
 ### 7.5 The object bake's terrain march starts at the surface, not 0.5 m up
 
@@ -472,7 +481,7 @@ light count.
    it.
 2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
 3. §7.5 object ray origin — needs a repro case first.
-4. ~~§7.3 AO weighting~~ — **done** (v7). §7.4 object bounce — a bake-model
-   change that needs another `LIGHTMAP_FORMAT_VERSION` bump and a re-bake.
+4. ~~§7.3 AO weighting~~ — **done** (v7). ~~§7.4 object bounce~~ — **done**
+   (v8). Re-bake (Shift+B) to see either.
 5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`
    so a stock scene actually occupies the middle bands.

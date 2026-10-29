@@ -226,9 +226,9 @@ pub fn collect_object_bake_jobs(
 /// 1. Rasterize the triangles in UV2 space into a per-texel surface buffer
 ///    ([`rasterize_geometry`]).
 /// 2. Shade every covered texel with the shared lighting model
-///    ([`shade_geometry`], in parallel): sun shadow rays, ambient×AO, and
-///    every placed point/spot light; no indirect bounce for objects yet.
-///    Shadow rays test the scene BVH, which includes this very object, so it
+///    ([`shade_geometry`], in parallel): sun shadow rays, ambient×AO,
+///    indirect terrain bounce, and every placed point/spot light. Shadow
+///    rays test the scene BVH, which includes this very object, so it
 ///    shadows itself; ray origins are nudged along the *face* normal to keep
 ///    a triangle from occluding its own texels.
 /// 3. Blur, dilate, and write the EXR.
@@ -350,10 +350,12 @@ impl BakeStats {
             return;
         }
         let total = self.rasterize + self.shade + self.post + self.io;
-        // Rays per covered texel: one sun shadow ray, the AO hemisphere, and
-        // one segment ray per placed light (an upper bound — lights out of
-        // range or behind the surface cast none). Objects cast no bounce rays.
-        let rays_per_texel = 1 + config.ao_rays as usize + light_count;
+        // Rays per covered texel: one sun shadow ray, the AO hemisphere, the
+        // bounce hemisphere, and one segment ray per placed light (an upper
+        // bound — lights out of range or behind the surface cast none, and a
+        // bounce ray only casts its shadow ray if it lands on terrain).
+        let rays_per_texel =
+            1 + config.ao_rays as usize + config.bounce_rays as usize + light_count;
         let est_rays = self.texels_covered * rays_per_texel;
 
         info!(
@@ -512,10 +514,18 @@ fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize) -> Vec<
 /// Shade every covered texel with the baked lighting model.
 ///
 /// This is where an object bake spends essentially all of its time: each
-/// covered texel casts a sun shadow ray, an AO hemisphere, and one segment
-/// ray per placed light. None of them depend on any other texel, so the pass
-/// is `par_iter` — matching what the CPU terrain bake has always done
-/// (`terrain.rs`) and what the object path was missing.
+/// covered texel casts a sun shadow ray, an AO hemisphere, a bounce
+/// hemisphere, and one segment ray per placed light. None of them depend on
+/// any other texel, so the pass is `par_iter` — matching what the CPU
+/// terrain bake has always done (`terrain.rs`).
+///
+/// Bounce is the same terrain-only indirect term the terrain bake uses.
+/// Objects used to get none, so a crate's shaded side was lit by
+/// `ambient × ao` alone while the ground 10 cm away also had
+/// `sun × bounce` — a visible step exactly at the object/terrain junction.
+/// Unlike the terrain bake there is no coarse grid for it: object texels are
+/// sparse in the atlas and not spatially coherent across cells, so it is
+/// evaluated per texel, seeded by atlas index for decorrelated azimuths.
 ///
 /// Uncovered texels stay black; `dilate` floods lit values into them after
 /// the blur, so nothing ever samples one.
@@ -531,7 +541,8 @@ fn shade_geometry(
 
     let texels: Vec<Vec3> = geometry
         .par_iter()
-        .map(|slot| {
+        .enumerate()
+        .map(|(idx, slot)| {
             let Some(g) = slot else {
                 return Vec3::ZERO;
             };
@@ -561,9 +572,24 @@ fn shade_geometry(
                 config.ao_rays,
                 config.ao_steps,
             );
+            let bounce = raycast::compute_indirect_bounce(
+                origin,
+                origin,
+                g.normal,
+                cache,
+                bvh,
+                sun_dir,
+                config.ao_radius * 4.0,
+                config.bounce_rays,
+                config.shadow_steps,
+                config.terrain_albedo,
+                config.bounce_count,
+                idx as u32,
+            );
             let ndotl = g.normal.dot(sun_dir).max(0.0);
 
-            let mut radiance = lighting.sun_and_ambient(ndotl, shadow, ao, 0.0);
+            let mut radiance =
+                lighting.sun_and_ambient(ndotl, shadow, ao, config.bounce_strength * bounce);
             radiance += lighting.local_lights(origin, g.normal, |dir, dist| {
                 raycast::cast_shadow_ray_segment(
                     origin,
