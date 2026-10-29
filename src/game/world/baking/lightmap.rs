@@ -3,8 +3,9 @@
 //! A lightmap texel is *outgoing radiance in lightmap units*: linear RGB where
 //! `1.0` means "this surface shows its full base colour". The runtime toon
 //! shaders do nothing but sample this, band it, and multiply by base colour,
-//! so every light source — the sun and ambient today, point/spot lights next —
-//! has to be folded in here at bake time. Texels are HDR (f16) so overlapping
+//! so every light source — sun, ambient×AO, terrain bounce and every placed
+//! point/spot light — has to be folded in here at bake time. The full model
+//! and its units are written up in `docs/LIGHTING.md`. Texels are HDR (f16) so overlapping
 //! lights can exceed 1.0 without clipping on disk; the shader clamps when it
 //! bands.
 //!

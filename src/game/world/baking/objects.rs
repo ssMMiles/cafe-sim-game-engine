@@ -314,7 +314,7 @@ pub fn run_object_bake_jobs(
         });
     }
 
-    stats.report(config);
+    stats.report(config, lighting.lights.len());
     results
 }
 
@@ -345,14 +345,15 @@ struct BakeStats {
 }
 
 impl BakeStats {
-    fn report(&self, config: &BakeConfig) {
+    fn report(&self, config: &BakeConfig, light_count: usize) {
         if self.sub_meshes == 0 {
             return;
         }
         let total = self.rasterize + self.shade + self.post + self.io;
         // Rays per covered texel: one sun shadow ray, the AO hemisphere, and
-        // one segment ray per placed light. Objects cast no bounce rays.
-        let rays_per_texel = 1 + config.ao_rays as usize;
+        // one segment ray per placed light (an upper bound — lights out of
+        // range or behind the surface cast none). Objects cast no bounce rays.
+        let rays_per_texel = 1 + config.ao_rays as usize + light_count;
         let est_rays = self.texels_covered * rays_per_texel;
 
         info!(

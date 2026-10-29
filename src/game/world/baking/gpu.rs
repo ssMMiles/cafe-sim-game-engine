@@ -168,7 +168,10 @@ pub struct BakeUniformsData {
     pub num_lights: u32,
     /// Extra texels baked on every side of the chunk (`ChunkBakeGrid::margin`).
     pub margin: u32,
-    pub _pad0: u32,
+    /// Clamp on a local light's shadow-ray step count. Was a `48u` literal in
+    /// the WGSL, which silently desynced the GPU terrain bake from the CPU
+    /// paths the moment `BakeConfig::max_light_shadow_steps` changed.
+    pub max_light_shadow_steps: u32,
     pub _pad1: u32,
     pub _pad2: u32,
 }
@@ -474,7 +477,7 @@ pub fn enqueue_terrain_bake_jobs(
             ambient_b: lighting.ambient_rgb.z,
             num_lights: lighting.lights.len() as u32,
             margin: grid.margin as u32,
-            _pad0: 0,
+            max_light_shadow_steps: config.max_light_shadow_steps.max(4),
             _pad1: 0,
             _pad2: 0,
         };

@@ -33,7 +33,8 @@ struct TerrainFlags {
 var<uniform> terrain_flags: TerrainFlags;
 
 const TOON_BANDS: f32 = 5.0;
-// Darkest a surface can get, as a fraction of its base colour. Fully
+// Darkest a surface can get, as a fraction of its base colour, and the
+// bottom of the band range: the bands are spread over [TOON_FLOOR, 1]. Fully
 // shadowed geometry reads as a dark tint rather than dropping to pure black.
 const TOON_FLOOR: f32 = 0.18;
 
@@ -116,19 +117,33 @@ fn toon_band(value: f32, bands: f32) -> f32 {
 
 // Quantize brightness into toon bands while preserving the hue of coloured
 // light. Banding each channel separately would shift hue at band edges.
-// Anything in the bottom band reads as a neutral TOON_FLOOR: neutral rather
-// than hue-preserving, so a trace of tinted light reaching a dark corner
-// doesn't paint the whole corner that colour.
 //
-// That floor used to be an `if`, which is one more hard threshold and
-// aliased exactly like an un-antialiased band edge. It is a cross-fade now,
-// over a range the banded value only ever crosses inside the bottom band —
-// so above the first boundary this is bit-for-bit the old behaviour.
+// The banded value is spread over [TOON_FLOOR, 1], not [0, 1]: with five
+// bands the levels are 0.18, 0.34, 0.51, 0.67, 0.84, 1.0. When the bands
+// spanned [0, 1] and the floor was glued on underneath, the two darkest
+// outputs were 0.18 and 0.20 — indistinguishable — so a light that lifted a
+// shadow into the first band changed its *hue* (which `tinted` tracks
+// continuously) and not its brightness, and the scene effectively had four
+// bands with a dead one at the bottom.
+//
+// `level` is the output luminance whatever the hue mix below does: both mix
+// endpoints have exactly that luminance, so the curve is monotone in `band`.
+// The old form mixed a constant 0.18 with a value climbing 0 → 0.2 and dipped
+// 26% below the floor in the middle — a one-pixel dark line along every
+// contour where the lightmap crossed the first band boundary, i.e. the edge
+// of every shadow in the game.
+//
+// The bottom band is neutral rather than hue-preserving, so a trace of
+// tinted light reaching a dark corner doesn't paint the whole corner that
+// colour. The fade is over a range `band` only ever crosses inside the
+// bottom band's antialiasing ramp, so above the first boundary the hue is
+// kept exactly.
 fn toon_shade(radiance: vec3<f32>) -> vec3<f32> {
     let lum = luminance(radiance);
     let band = toon_band(lum, TOON_BANDS);
-    let tinted = radiance * (band / max(lum, 1e-4));
-    return mix(vec3<f32>(TOON_FLOOR), tinted, smoothstep(0.0, TOON_FLOOR, band));
+    let level = mix(TOON_FLOOR, 1.0, band);
+    let tinted = radiance * (level / max(lum, 1e-4));
+    return mix(vec3<f32>(level), tinted, smoothstep(0.0, TOON_FLOOR, band));
 }
 
 @fragment

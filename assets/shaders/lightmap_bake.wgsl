@@ -80,7 +80,8 @@ struct BakeUniforms {
     // Extra texels baked on every side of the chunk so the CPU blur sees
     // real neighbour data at the chunk edge; cropped after readback.
     margin: u32,
-    _pad0: u32,
+    // Clamp on a local light's shadow-ray step count (BakeConfig::max_light_shadow_steps).
+    max_light_shadow_steps: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -411,7 +412,7 @@ fn cast_shadow_ray_segment(origin: vec3<f32>, mesh_origin: vec3<f32>, dir: vec3<
 /// sampling density. Mirrors `BakeConfig::light_shadow_steps`.
 fn light_shadow_steps(dist: f32) -> u32 {
     let step_len = max((u.ao_radius * 4.0) / f32(max(u.shadow_steps, 1u)), 0.0001);
-    return clamp(u32(ceil(dist / step_len)), 4u, 48u);
+    return clamp(u32(ceil(dist / step_len)), 4u, max(u.max_light_shadow_steps, 4u));
 }
 
 /// Summed contribution of every placed light at a surface point.

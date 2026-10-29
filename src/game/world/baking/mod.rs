@@ -2,8 +2,9 @@
 //!
 //! Triggered by Shift+B. Iterates all loaded terrain chunks and placed mesh
 //! instances, computes per-texel HDR radiance (sun shadow rays, ambient × AO,
-//! terrain bounce), writes EXR lightmaps to disk, and swaps them into the
-//! live GPU materials. All lighting is baked — the runtime shaders only
+//! terrain bounce, and a shadowed contribution from every placed point/spot
+//! light), writes EXR lightmaps to disk, and swaps them into the live GPU
+//! materials. All lighting is baked — the runtime shaders only
 //! sample the result (see `lightmap.rs` for the model and units).
 //!
 //! Module layout:
