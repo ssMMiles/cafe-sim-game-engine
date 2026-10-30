@@ -100,7 +100,9 @@ impl DynamicPlugin for CafeSimPlugin {
     fn register(&self, _world: &mut World, registry: &mut ScriptRegistry) {
         registry.register_script(
             PLUGIN_NAME,
-            ScriptSchema::new("cafe-shell").with_default_mesh(CAFE_SHELL_MESH),
+            ScriptSchema::new("cafe-shell")
+                .with_display_name("Cafe Shell")
+                .with_default_mesh(CAFE_SHELL_MESH),
             hydrate_cafe_shell,
         );
     }

@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use engine_api::{PropValue, ScriptBinding, ScriptProp};
+use engine_api::{PropDef, PropValue, ScriptBinding, ScriptProp};
 
 use super::Panels;
 use crate::editor::actions::EditorAction;
@@ -182,15 +182,23 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         } else {
             ui.weak("Baked lighting matches the level.");
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        if is_mesh && let Some(tw) = panels.terrain_world.as_deref() {
-            use crate::game::world::baking::object_lightmaps::object_lightmap_path;
-            let has = object_lightmap_path(&tw.world_path, id, 0).exists();
-            ui.weak(if has {
-                "This object has a baked lightmap."
-            } else {
-                "No lightmap baked for this object yet."
-            });
+        if is_mesh && panels.dynamic_lit.get(entity).unwrap_or(false) {
+            ui.weak(
+                "Dynamic: a script marked this entity DynamicLit, so it is lit \
+                 from the irradiance probe volume as it moves — it uses no \
+                 baked lightmap and casts no baked shadow.",
+            );
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            if is_mesh && let Some(tw) = panels.terrain_world.as_deref() {
+                use crate::game::world::baking::object_lightmaps::object_lightmap_path;
+                let has = object_lightmap_path(&tw.world_path, id, 0).exists();
+                ui.weak(if has {
+                    "This object has a baked lightmap."
+                } else {
+                    "No lightmap baked for this object yet."
+                });
+            }
         }
         if ui.button("Bake (Shift+B)").clicked() {
             panels.actions.write(EditorAction::Bake);
@@ -513,16 +521,20 @@ fn script_section(
     panels: &mut Panels,
     names: &[(u64, String)],
 ) {
-    let title = format!("{}/{}", binding.plugin, binding.script);
-    let known = panels
+    // `id` is the stable machine identity (what the binding stores); the
+    // schema's display name is presentation only, so widget ids key off `id`.
+    let id = format!("{}/{}", binding.plugin, binding.script);
+    let schema = panels
         .script_registry
         .get(&binding.plugin, &binding.script)
-        .is_some();
+        .map(|r| r.schema);
+    let title = schema.map_or(id.as_str(), |s| s.title());
 
-    egui::CollapsingHeader::new(&title)
+    let section = egui::CollapsingHeader::new(title)
+        .id_salt(&id)
         .default_open(true)
         .show(ui, |ui| {
-            if !known {
+            if schema.is_none() {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 200, 80),
                     "Plugin not loaded — props shown raw.",
@@ -559,12 +571,18 @@ fn script_section(
             if draft.props.is_empty() {
                 ui.weak("No props.");
             }
-            egui::Grid::new(("props", &title))
+            egui::Grid::new(("props", &id))
                 .num_columns(2)
                 .show(ui, |ui| {
                     for prop in &mut draft.props {
-                        ui.label(&prop.key);
-                        let (changed, busy) = prop_widget(ui, &mut prop.value, names);
+                        let def = schema
+                            .as_ref()
+                            .and_then(|s| s.props.iter().find(|d| d.key == prop.key));
+                        let label = ui.label(def.map_or(prop.key.as_str(), |d| d.title()));
+                        if let Some(doc) = def.and_then(|d| d.doc) {
+                            label.on_hover_text(doc);
+                        }
+                        let (changed, busy) = prop_widget(ui, &mut prop.value, names, def);
                         touched |= changed;
                         interacting |= busy;
                         ui.end_row();
@@ -594,21 +612,41 @@ fn script_section(
                 });
             }
         });
+    if schema.is_some_and(|s| s.display_name.is_some()) {
+        section.header_response.on_hover_text(&id);
+    }
 }
 
 /// One widget per `PropValue` variant. Returns `(changed, still_interacting)`.
-fn prop_widget(ui: &mut egui::Ui, value: &mut PropValue, names: &[(u64, String)]) -> (bool, bool) {
+/// `def` is the schema's definition when the plugin is loaded: `Int`/`Float`
+/// widgets take their drag speed and bounds from it.
+fn prop_widget(
+    ui: &mut egui::Ui,
+    value: &mut PropValue,
+    names: &[(u64, String)],
+    def: Option<&PropDef>,
+) -> (bool, bool) {
+    let speed = |fallback: f64| def.and_then(|d| d.speed).unwrap_or(fallback);
+    let range = def.and_then(|d| d.range);
     match value {
         PropValue::Bool(v) => {
             let r = ui.checkbox(v, "");
             (r.changed(), false)
         }
         PropValue::Int(v) => {
-            let r = ui.add(egui::DragValue::new(v).speed(0.1));
+            let mut w = egui::DragValue::new(v).speed(speed(0.1));
+            if let Some((min, max)) = range {
+                w = w.range(min as i64..=max as i64);
+            }
+            let r = ui.add(w);
             (r.changed(), r.dragged() || r.has_focus())
         }
         PropValue::Float(v) => {
-            let r = ui.add(egui::DragValue::new(v).speed(0.01));
+            let mut w = egui::DragValue::new(v).speed(speed(0.01));
+            if let Some((min, max)) = range {
+                w = w.range(min..=max);
+            }
+            let r = ui.add(w);
             (r.changed(), r.dragged() || r.has_focus())
         }
         PropValue::Str(v) => {
@@ -654,11 +692,17 @@ fn attach_picker(
     bindings: &[ScriptBinding],
     panels: &mut Panels,
 ) {
-    let mut available: Vec<(String, String)> = panels
+    let mut available: Vec<(String, String, String)> = panels
         .script_registry
         .scripts()
-        .map(|s| (s.plugin.clone(), s.schema.name.to_owned()))
-        .filter(|(p, s)| !bindings.iter().any(|b| &b.plugin == p && &b.script == s))
+        .map(|s| {
+            (
+                s.plugin.clone(),
+                s.schema.name.to_owned(),
+                s.schema.title().to_owned(),
+            )
+        })
+        .filter(|(p, s, _)| !bindings.iter().any(|b| &b.plugin == p && &b.script == s))
         .collect();
     available.sort();
     if available.is_empty() {
@@ -670,8 +714,11 @@ fn attach_picker(
     egui::ComboBox::from_id_salt("attach_script")
         .selected_text("Attach script…")
         .show_ui(ui, |ui| {
-            for (plugin, script) in available {
-                if ui.button(format!("{plugin}/{script}")).clicked() {
+            for (plugin, script, title) in available {
+                let r = ui
+                    .button(&title)
+                    .on_hover_text(format!("{plugin}/{script}"));
+                if r.clicked() {
                     panels.script_edits.write(ScriptEdit::Attach {
                         entity,
                         plugin,

@@ -158,6 +158,9 @@ pub type PlacedQuery<'w, 's> = Query<
 pub struct Panels<'w, 's> {
     pub selection: ResMut<'w, Selection>,
     pub placed: PlacedQuery<'w, 's>,
+    /// Whether an entity is probe-lit (`Has` is archetype-only, so this
+    /// never conflicts with `placed`'s mutable access).
+    pub dynamic_lit: Query<'w, 's, Has<crate::game::gltf_loading::DynamicLit>>,
     pub script_registry: Res<'w, ScriptRegistry>,
     pub loaded_plugins: Res<'w, LoadedPluginIds>,
     pub active: Option<Res<'w, ActiveProject>>,

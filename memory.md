@@ -698,3 +698,15 @@ Not done (deliberately): a `DynamicLit` placed object still gets
 `NeedsObjectLightmaps` (its lightmap is baked then ignored — wasted bake
 time, nothing more) and keeps its `RigidBody::Static` trimesh collider even
 though the script rotates the transform.
+
+### Script schema editor metadata (ABI 9) — 2026-10-30
+
+`ScriptSchema::display_name` + `PropDef {label, doc, range, speed}` — const
+builders, optional, editor falls back to raw names/generic widgets. The
+inspector's Scripts section keys its egui ids on the stable `plugin/script`
+string (never the display name), the attach picker and catalog presets show
+titles with the machine id as hover text. The inspector's Lighting section
+now says when a mesh is `DynamicLit` (probe-lit, no lightmap, no baked
+shadow) instead of reporting lightmap-file state; `Panels.dynamic_lit` is a
+`Query<Has<DynamicLit>>` (archetype-only, so it can't conflict with the
+mutable `placed` query).

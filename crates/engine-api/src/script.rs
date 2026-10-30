@@ -182,15 +182,59 @@ impl ScriptBindings {
 
 /// A property a script understands, with the value the editor seeds when the
 /// binding is first attached.
+///
+/// Everything beyond `key` + `default` is editor presentation: the inspector
+/// falls back to the raw key and generic widgets when it is absent, so the
+/// metadata is never required for a script to work.
 #[derive(Clone, Copy, Debug)]
 pub struct PropDef {
     pub key: &'static str,
     pub default: PropDefault,
+    /// Human-facing row label in the inspector; the raw `key` when absent.
+    pub label: Option<&'static str>,
+    /// Hover text for the row in the inspector.
+    pub doc: Option<&'static str>,
+    /// Drag bounds for `Int` / `Float` props; other kinds ignore it.
+    pub range: Option<(f64, f64)>,
+    /// Drag speed (value change per point dragged) for `Int` / `Float` props.
+    pub speed: Option<f64>,
 }
 
 impl PropDef {
     pub const fn new(key: &'static str, default: PropDefault) -> Self {
-        Self { key, default }
+        Self {
+            key,
+            default,
+            label: None,
+            doc: None,
+            range: None,
+            speed: None,
+        }
+    }
+
+    pub const fn with_label(mut self, label: &'static str) -> Self {
+        self.label = Some(label);
+        self
+    }
+
+    pub const fn with_doc(mut self, doc: &'static str) -> Self {
+        self.doc = Some(doc);
+        self
+    }
+
+    pub const fn with_range(mut self, min: f64, max: f64) -> Self {
+        self.range = Some((min, max));
+        self
+    }
+
+    pub const fn with_speed(mut self, speed: f64) -> Self {
+        self.speed = Some(speed);
+        self
+    }
+
+    /// What the editor prints for this prop's row.
+    pub fn title(&self) -> &'static str {
+        self.label.unwrap_or(self.key)
     }
 }
 
@@ -225,8 +269,12 @@ impl PropDefault {
 /// list it and seed sensible props without the plugin owning any UI.
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptSchema {
-    /// Script name, unique within the plugin.
+    /// Script name, unique within the plugin. This is the stable id bindings
+    /// store and save files carry — renaming it orphans existing bindings.
     pub name: &'static str,
+    /// Human-facing name the editor shows; `name` when absent. Purely
+    /// presentation, safe to change at any time.
+    pub display_name: Option<&'static str>,
     pub props: &'static [PropDef],
     /// Mesh the editor offers as a preset when placing this script, letting a
     /// plugin's catalog entry be a one-click "mesh + binding" placement.
@@ -237,9 +285,15 @@ impl ScriptSchema {
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
+            display_name: None,
             props: &[],
             default_mesh: None,
         }
+    }
+
+    pub const fn with_display_name(mut self, display_name: &'static str) -> Self {
+        self.display_name = Some(display_name);
+        self
     }
 
     pub const fn with_props(mut self, props: &'static [PropDef]) -> Self {
@@ -250,6 +304,11 @@ impl ScriptSchema {
     pub const fn with_default_mesh(mut self, asset_path: &'static str) -> Self {
         self.default_mesh = Some(asset_path);
         self
+    }
+
+    /// What the editor prints for this script.
+    pub fn title(&self) -> &'static str {
+        self.display_name.unwrap_or(self.name)
     }
 
     /// The prop list the editor attaches for a fresh binding.
@@ -380,6 +439,34 @@ mod tests {
         assert_eq!(props[0].value, PropValue::Int(4));
         assert_eq!(props[1].value, PropValue::Str("brew".to_owned()));
         assert_eq!(schema.default_mesh, Some("cafe-sim/machine.gltf#Scene0"));
+    }
+
+    /// Editor metadata is optional presentation: titles fall back to the
+    /// machine names, and the builders are `const` so a decorated schema can
+    /// still live in a `static` (which is where plugins keep theirs).
+    #[test]
+    fn display_metadata_is_const_constructible_and_falls_back() {
+        static DECORATED: &[PropDef] = &[PropDef::new("speed", PropDefault::Float(1.0))
+            .with_label("Speed")
+            .with_doc("Radians per second.")
+            .with_range(-25.0, 25.0)
+            .with_speed(0.05)];
+        static SCHEMA: ScriptSchema = ScriptSchema::new("spinner")
+            .with_display_name("Spinner")
+            .with_props(DECORATED);
+
+        assert_eq!(SCHEMA.title(), "Spinner");
+        assert_eq!(DECORATED[0].title(), "Speed");
+        assert_eq!(DECORATED[0].range, Some((-25.0, 25.0)));
+        assert_eq!(DECORATED[0].speed, Some(0.05));
+        assert_eq!(DECORATED[0].doc, Some("Radians per second."));
+
+        let bare = ScriptSchema::new("spinner");
+        assert_eq!(bare.title(), "spinner");
+        assert_eq!(
+            PropDef::new("speed", PropDefault::Float(1.0)).title(),
+            "speed"
+        );
     }
 
     #[test]

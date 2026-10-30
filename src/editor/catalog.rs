@@ -199,9 +199,16 @@ impl AssetCatalog {
             .scripts()
             .filter_map(|s| {
                 let mesh = s.schema.default_mesh?;
+                // The display name when the schema carries one; the raw
+                // plugin/script id otherwise (`preset_script` always keeps
+                // the machine ids either way).
+                let name = match s.schema.display_name {
+                    Some(title) => title.to_owned(),
+                    None => format!("{}/{}", s.plugin, s.schema.name),
+                };
                 Some(AssetEntry {
                     kind: AssetKind::Mesh,
-                    name: format!("{}/{}", s.plugin, s.schema.name),
+                    name,
                     path: format!("preset://{}/{}", s.plugin, s.schema.name),
                     placed: Some(PlacedKind::mesh(mesh)),
                     preset_script: Some((s.plugin.clone(), s.schema.name.to_owned())),

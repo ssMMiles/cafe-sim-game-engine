@@ -27,7 +27,11 @@ struct Spinner {
 }
 
 /// Props the editor seeds when a `spinner` binding is attached.
-static SPINNER_PROPS: &[PropDef] = &[PropDef::new("speed", PropDefault::Float(1.0))];
+static SPINNER_PROPS: &[PropDef] = &[PropDef::new("speed", PropDefault::Float(1.0))
+    .with_label("Speed")
+    .with_doc("Yaw speed in radians per second; negative spins the other way.")
+    .with_range(-25.0, 25.0)
+    .with_speed(0.05)];
 
 /// Level-scoped state owned by this plugin, persisted inside `world.meta`.
 #[derive(Resource, Default, Debug)]
@@ -41,7 +45,9 @@ impl DynamicPlugin for ExamplePlugin {
     fn register(&self, _world: &mut World, registry: &mut ScriptRegistry) {
         registry.register_script(
             PLUGIN_NAME,
-            ScriptSchema::new("spinner").with_props(SPINNER_PROPS),
+            ScriptSchema::new("spinner")
+                .with_display_name("Spinner")
+                .with_props(SPINNER_PROPS),
             hydrate_spinner,
         );
 

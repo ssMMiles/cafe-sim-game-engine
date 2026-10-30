@@ -40,7 +40,10 @@ pub use toon_material::{
 /// - 8: dynamic lighting. [`BlobShadow`] and [`DynamicLit`] components;
 ///   `ToonMaterial` carries the probe volume bindings and `ToonShading`
 ///   (source + unlit) replaces its `use_lightmap` flag.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 8;
+/// - 9: editor metadata on script schemas. `ScriptSchema::display_name` and
+///   `PropDef { label, doc, range, speed }` — both structs cross the FFI
+///   surface by value, so their layouts gate loading.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 9;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
