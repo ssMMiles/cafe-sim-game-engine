@@ -672,3 +672,29 @@ worth remembering that aren't obvious from the code:
 - The lightmap's alpha channel is still unused (written as constant 1.0).
   Storing the baked `ndotl * shadow` there is the enabler for any future
   runtime shadow that should subtract only the sun term (plan §5).
+
+### DynamicLit on placed entities (scripts) — 2026-10-30
+
+A script that moves its placed entity marks it by inserting
+`engine_api::DynamicLit` in its hydrate factory (`example`'s spinner does) —
+being hydrated, the host strips it on detach/unload automatically. Two host
+pieces make the marker reliable:
+
+- **`sync_dynamic_lit_source` (gltf_loading.rs)** rewrites
+  `shading.source` on the sub-mesh materials under a root whose `DynamicLit`
+  toggled *after* `on_scene_ready` already converted the scene (hydration
+  landing late, inspector attach/detach, hot-reload). Editor-mode-only by
+  decision (authoring traffic; gameplay converts with the marker hydrated).
+  Known gap, accepted: a removal while in Gameplay mode is missed
+  (`RemovedComponents` buffers two frames) — e.g. removing a plugin from the
+  project mid-session leaves that instance probe-lit until it respawns.
+- **`is_static_scenery` (baking/bvh.rs)** treats `DynamicLit` anywhere on the
+  ancestry path as disqualifying, and it wins over `PlacedObject` /
+  `RigidBody::Static` on the same entity — so a scripted placed entity casts
+  no baked shadow (BVH feeds sun, AO and bounce rays on both CPU and GPU
+  paths).
+
+Not done (deliberately): a `DynamicLit` placed object still gets
+`NeedsObjectLightmaps` (its lightmap is baked then ignored — wasted bake
+time, nothing more) and keeps its `RigidBody::Static` trimesh collider even
+though the script rotates the transform.

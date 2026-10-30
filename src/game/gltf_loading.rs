@@ -1,7 +1,7 @@
 use crate::game::{
     GameEntity,
     gfx::toon_material::{
-        DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource, ToonSun,
+        DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonSource, ToonSun,
     },
 };
 pub use engine_api::DynamicLit;
@@ -222,6 +222,51 @@ pub fn spawn_interactable_scene<B: Bundle>(commands: &mut Commands, bundle: B) -
     commands.spawn(bundle).observe(on_scene_ready).id()
 }
 
+/// Keep converted scenes' material source in step with their [`DynamicLit`]
+/// marker.
+///
+/// [`on_scene_ready`] picks lightmap-vs-probes once, when the instance
+/// readies, and removes `ConvertToToon` — so a marker that arrives later (a
+/// script binding hydrating after the scene settled, or attached in the
+/// inspector) or leaves (detach, hot-reload dehydration) would otherwise be
+/// silently ignored until the entity respawns. Every toon material binds the
+/// shared probe volume precisely so `shading.source` can flip without
+/// touching a bind group; this rewrites it on the meshes under a root whose
+/// marker just changed.
+///
+/// Editor-only (`run_if(in_state(EditorMode::Editor))`): attach/detach and
+/// hydration timing are authoring traffic. A removal while in gameplay (a
+/// plugin unloaded mid-session) is missed — `RemovedComponents` buffers for
+/// two frames — leaving that instance probe-lit until it respawns and the
+/// conversion reads the marker's absence.
+pub fn sync_dynamic_lit_source(
+    added: Query<Entity, Added<DynamicLit>>,
+    mut removed: RemovedComponents<DynamicLit>,
+    children_query: Query<&Children>,
+    material_query: Query<&MeshMaterial3d<ToonMat>>,
+    mut materials: ResMut<Assets<ToonMat>>,
+) {
+    // Removals first, so an entity dehydrated and re-hydrated inside the same
+    // detection window (hot-reload) lands on the re-add's source.
+    let changes = removed
+        .read()
+        .map(|e| (e, ToonSource::Lightmap))
+        .chain(added.iter().map(|e| (e, ToonSource::ProbeVolume)));
+    for (root, source) in changes {
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if let Ok(handle) = material_query.get(entity)
+                && let Some(mut mat) = materials.get_mut(&handle.0)
+            {
+                mat.extension.shading.source = source as u32;
+            }
+            if let Ok(children) = children_query.get(entity) {
+                stack.extend(children.iter());
+            }
+        }
+    }
+}
+
 fn propagate_to_mesh_children(
     commands: &mut Commands,
     children: &Children,
@@ -411,5 +456,63 @@ pub fn handle_interactable_clicks(
 ) {
     for event in click_events.read() {
         let _entity = event.entity;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn source_of(world: &World, handle: &Handle<ToonMat>) -> u32 {
+        world
+            .resource::<Assets<ToonMat>>()
+            .get(handle)
+            .unwrap()
+            .extension
+            .shading
+            .source
+    }
+
+    /// `on_scene_ready` picks the source exactly once, so a `DynamicLit`
+    /// toggled afterwards (script hydration, inspector attach/detach,
+    /// hot-reload) must be carried into the already-built materials by
+    /// `sync_dynamic_lit_source` — including on nested sub-meshes.
+    #[test]
+    fn toggling_dynamic_lit_rewrites_a_converted_scenes_source() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<ToonMat>::default());
+        let add_material = |world: &mut World| {
+            world
+                .resource_mut::<Assets<ToonMat>>()
+                .add(bevy::pbr::ExtendedMaterial {
+                    base: StandardMaterial::default(),
+                    extension: ToonMaterial::default(), // ToonSource::Lightmap
+                })
+        };
+        let child_mat = add_material(&mut world);
+        let nested_mat = add_material(&mut world);
+
+        let root = world.spawn_empty().id();
+        let child = world.spawn(MeshMaterial3d(child_mat.clone())).id();
+        let nested = world.spawn(MeshMaterial3d(nested_mat.clone())).id();
+        world.entity_mut(root).add_child(child);
+        world.entity_mut(child).add_child(nested);
+
+        world.entity_mut(root).insert(DynamicLit);
+        world.run_system_once(sync_dynamic_lit_source).unwrap();
+        assert_eq!(
+            source_of(&world, &child_mat),
+            ToonSource::ProbeVolume as u32
+        );
+        assert_eq!(
+            source_of(&world, &nested_mat),
+            ToonSource::ProbeVolume as u32
+        );
+
+        world.entity_mut(root).remove::<DynamicLit>();
+        world.run_system_once(sync_dynamic_lit_source).unwrap();
+        assert_eq!(source_of(&world, &child_mat), ToonSource::Lightmap as u32);
+        assert_eq!(source_of(&world, &nested_mat), ToonSource::Lightmap as u32);
     }
 }

@@ -26,7 +26,9 @@ use animation::{
     init_animation_player, pause_animations, resume_animations, setup_character_animations,
     update_character_animation,
 };
-use gltf_loading::{InteractableClicked, check_interactions, detect_interactable_clicks};
+use gltf_loading::{
+    InteractableClicked, check_interactions, detect_interactable_clicks, sync_dynamic_lit_source,
+};
 use physics::character_physics;
 use simulation::{Player, exit, setup};
 
@@ -163,6 +165,17 @@ impl Plugin for SimulationPlugin {
                 .in_set(SimSet::Running),
         );
         app.add_systems(Update, init_animation_player.in_set(SimSet::InGame));
+        // `on_scene_ready` picks a scene's lighting source once; while
+        // authoring, `DynamicLit` also toggles after the fact (script
+        // hydration, inspector attach/detach, hot-reload), so the editor
+        // keeps converted materials in step. Gameplay converts with the
+        // marker already hydrated and skips the per-frame check.
+        app.add_systems(
+            Update,
+            sync_dynamic_lit_source
+                .in_set(SimSet::InGame)
+                .run_if(in_state(EditorMode::Editor)),
+        );
         app.add_systems(
             Update,
             (

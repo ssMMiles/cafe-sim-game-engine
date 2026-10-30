@@ -24,6 +24,7 @@ use bevy::{
 use bytemuck::Zeroable;
 
 use super::object_lightmaps::ToonMat;
+use crate::game::gltf_loading::DynamicLit;
 use crate::game::world::objects::PlacedObject;
 
 /// Triangles per leaf before splitting stops.
@@ -331,15 +332,18 @@ pub fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Op
 /// overlaps `bounds_xz` (`None` = everywhere).
 ///
 /// "Static" means the mesh, or an ancestor, is a placed object or a
-/// `RigidBody::Static`. That takes in editor-placed props and plugin-spawned
+/// `RigidBody::Static` — and nothing on that path is [`DynamicLit`]. The
+/// placed/static markers take in editor-placed props and plugin-spawned
 /// scenery such as the cafe shell (which gets a static body from
-/// `AutoCollider`), while leaving out anything that moves — a plugin's
-/// animated toon mesh would otherwise bake a shadow wherever it happened to
-/// be standing.
+/// `AutoCollider`), while leaving out anything that moves: a plugin's
+/// animated toon mesh has neither marker, and a *placed* entity a script
+/// animates (so it is `PlacedObject` yet moves) declares itself with
+/// `DynamicLit`, which wins — it would otherwise bake a shadow of whatever
+/// orientation it was authored in.
 pub fn collect_occluder_triangles(
     toon_meshes: &Query<(Entity, &Mesh3d, &GlobalTransform), With<MeshMaterial3d<ToonMat>>>,
     parents: &Query<&ChildOf>,
-    scenery: &Query<(Option<&PlacedObject>, Option<&RigidBody>)>,
+    scenery: &Query<(Option<&PlacedObject>, Option<&RigidBody>, Has<DynamicLit>)>,
     meshes: &Assets<Mesh>,
     bounds_xz: Option<(Vec2, Vec2)>,
 ) -> Vec<[Vec3; 3]> {
@@ -407,15 +411,21 @@ pub fn collect_occluder_triangles(
 fn is_static_scenery(
     entity: Entity,
     parents: &Query<&ChildOf>,
-    scenery: &Query<(Option<&PlacedObject>, Option<&RigidBody>)>,
+    scenery: &Query<(Option<&PlacedObject>, Option<&RigidBody>, Has<DynamicLit>)>,
 ) -> bool {
     let mut current = entity;
     // Bounded walk: hierarchies are shallow and this guards against cycles.
     for _ in 0..64 {
-        if let Ok((placed, body)) = scenery.get(current)
-            && (placed.is_some() || matches!(body, Some(RigidBody::Static)))
-        {
-            return true;
+        if let Ok((placed, body, dynamic)) = scenery.get(current) {
+            // Dynamic wins over the static markers on the same path: a
+            // placed entity whose script moves it must not leave a baked
+            // shadow behind.
+            if dynamic {
+                return false;
+            }
+            if placed.is_some() || matches!(body, Some(RigidBody::Static)) {
+                return true;
+            }
         }
         match parents.get(current) {
             Ok(child_of) => current = child_of.parent(),
@@ -621,6 +631,49 @@ mod tests {
             hits > 100,
             "test scene too sparse to be meaningful ({hits} hits)"
         );
+    }
+
+    /// A placed object is static scenery — unless it (or an ancestor) is
+    /// `DynamicLit`, i.e. a script moves it: then it must not bake a shadow
+    /// of its authored pose. The player (kinematic body, no `PlacedObject`)
+    /// stays excluded as before.
+    #[test]
+    fn dynamic_lit_ancestry_is_excluded_from_static_scenery() {
+        use crate::game::world::objects::{PlacedKind, PlacedObject};
+        use bevy::ecs::system::SystemState;
+
+        let placed = |id: u64| PlacedObject {
+            id,
+            chunk: (0, 0),
+            name: String::new(),
+            kind: PlacedKind::Empty,
+            parent: None,
+            prefab: None,
+        };
+
+        let mut world = World::new();
+        let static_root = world.spawn((placed(1), RigidBody::Static)).id();
+        let static_mesh = world.spawn_empty().id();
+        world.entity_mut(static_root).add_child(static_mesh);
+
+        // Same shape, plus the marker a hydrated script put on the root.
+        let dynamic_root = world.spawn((placed(2), RigidBody::Static, DynamicLit)).id();
+        let dynamic_mesh = world.spawn_empty().id();
+        world.entity_mut(dynamic_root).add_child(dynamic_mesh);
+
+        let player_root = world.spawn((RigidBody::Kinematic, DynamicLit)).id();
+        let player_mesh = world.spawn_empty().id();
+        world.entity_mut(player_root).add_child(player_mesh);
+
+        let mut state: SystemState<(
+            Query<&ChildOf>,
+            Query<(Option<&PlacedObject>, Option<&RigidBody>, Has<DynamicLit>)>,
+        )> = SystemState::new(&mut world);
+        let (parents, scenery) = state.get(&world).unwrap();
+
+        assert!(is_static_scenery(static_mesh, &parents, &scenery));
+        assert!(!is_static_scenery(dynamic_mesh, &parents, &scenery));
+        assert!(!is_static_scenery(player_mesh, &parents, &scenery));
     }
 
     /// Many coincident triangles can't be separated by a median split; the

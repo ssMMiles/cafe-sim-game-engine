@@ -330,8 +330,17 @@ pub struct BakeSceneQueries<'w, 's> {
     /// `collect_occluder_triangles` keeps only the static ones.
     pub occluder_meshes: Query<'w, 's, OccluderMeshItem, With<MeshMaterial3d<ToonMat>>>,
     pub parents: Query<'w, 's, &'static ChildOf>,
-    /// What marks a subtree as static scenery for shadow casting.
-    pub scenery: Query<'w, 's, (Option<&'static PlacedObject>, Option<&'static RigidBody>)>,
+    /// What marks a subtree as static scenery for shadow casting — and what
+    /// un-marks it (`DynamicLit`: a placed entity a script moves).
+    pub scenery: Query<
+        'w,
+        's,
+        (
+            Option<&'static PlacedObject>,
+            Option<&'static RigidBody>,
+            Has<crate::game::gltf_loading::DynamicLit>,
+        ),
+    >,
 }
 
 // ============================================================================

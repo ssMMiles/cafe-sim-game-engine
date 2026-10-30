@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use engine_api::{
-    DynamicPlugin, LevelDataHooks, Player, PropDef, PropDefault, ScriptBinding, ScriptOwned,
-    ScriptRegistry, ScriptSchema, add,
+    DynamicLit, DynamicPlugin, LevelDataHooks, Player, PropDef, PropDefault, ScriptBinding,
+    ScriptOwned, ScriptRegistry, ScriptSchema, add,
 };
 
 #[derive(Default)]
@@ -72,9 +72,16 @@ impl DynamicPlugin for ExamplePlugin {
 /// tracks inserts via an archetype diff, but anything spawned here would need
 /// its own `ScriptOwned` tag to get cleaned up.
 fn hydrate_spinner(entity: &mut bevy::ecs::world::EntityWorldMut, binding: &ScriptBinding) {
-    entity.insert(Spinner {
-        radians_per_sec: binding.float_or("speed", 1.0),
-    });
+    entity.insert((
+        Spinner {
+            radians_per_sec: binding.float_or("speed", 1.0),
+        },
+        // A spinning mesh can't live with lighting baked at its authored
+        // orientation: `DynamicLit` lights it from the probe volume and keeps
+        // it out of the bake's shadow BVH. Hydrated, so the host strips it on
+        // detach/unload like everything else the factory inserts.
+        DynamicLit,
+    ));
 }
 
 fn spin(time: Res<Time>, mut q: Query<(&Spinner, &mut Transform)>) {
