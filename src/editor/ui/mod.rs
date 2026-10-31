@@ -53,6 +53,7 @@ use crate::settings::UserSettings;
 mod assets;
 mod history_panel;
 mod inspector;
+mod layout;
 mod menu;
 mod outliner;
 mod place;
@@ -79,6 +80,7 @@ impl Plugin for EditorUiPlugin {
             ..default()
         });
         app.init_resource::<DockLayout>();
+        app.init_resource::<layout::LayoutPersist>();
         app.init_resource::<InspectorState>();
         app.init_resource::<AssetsBrowserState>();
         app.init_resource::<OutlinerState>();
@@ -87,12 +89,26 @@ impl Plugin for EditorUiPlugin {
             EguiPrimaryContextPass,
             editor_ui.run_if(in_state(AppState::InGame).and_then(in_state(EditorMode::Editor))),
         );
+
+        // Dock layout persistence (user-level `editor_settings.json`): load
+        // once, save debounced while the editor shows (the only time the dock
+        // mutates), flush on the way out to the menu.
+        app.add_systems(Startup, layout::load_layout);
+        app.add_systems(
+            Update,
+            layout::save_layout
+                .run_if(in_state(AppState::InGame).and_then(in_state(EditorMode::Editor))),
+        );
+        app.add_systems(OnExit(AppState::InGame), layout::save_layout_now);
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Update, layout::poll_layout);
     }
 }
 
-/// A dock tab. The layout is rebuilt from [`DockLayout::default`] every run
-/// (no persistence yet — `docs/EDITOR_UI_DESIGN.md` §4.14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A dock tab. Persisted as part of the user-level dock layout
+/// (`ui::layout`), so renaming a variant resets saved layouts to the default
+/// — which is the intended failure mode, never a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EditorTab {
     Viewport,
     Outliner,

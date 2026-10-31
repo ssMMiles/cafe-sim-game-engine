@@ -173,37 +173,14 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     });
 
     // ── Lighting ─────────────────────────────────────────────────────────────
-    ui.collapsing("Lighting", |ui| {
-        if panels.lighting.stale {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 200, 80),
-                "Baked lighting is out of date.",
-            );
-        } else {
-            ui.weak("Baked lighting matches the level.");
-        }
-        if is_mesh && panels.dynamic_lit.get(entity).unwrap_or(false) {
-            ui.weak(
-                "Dynamic: a script marked this entity DynamicLit, so it is lit \
-                 from the irradiance probe volume as it moves — it uses no \
-                 baked lightmap and casts no baked shadow.",
-            );
-        } else {
-            #[cfg(not(target_arch = "wasm32"))]
-            if is_mesh && let Some(tw) = panels.terrain_world.as_deref() {
-                use crate::game::world::baking::object_lightmaps::object_lightmap_path;
-                let has = object_lightmap_path(&tw.world_path, id, 0).exists();
-                ui.weak(if has {
-                    "This object has a baked lightmap."
-                } else {
-                    "No lightmap baked for this object yet."
-                });
-            }
-        }
-        if ui.button("Bake (Shift+B)").clicked() {
-            panels.actions.write(EditorAction::Bake);
-        }
-    });
+    // One line only; bake state and the trigger live in the menu/status bar.
+    if is_mesh {
+        let dynamic = panels.dynamic_lit.get(entity).unwrap_or(false);
+        ui.label(format!(
+            "Lighting: {}",
+            if dynamic { "Dynamic" } else { "Baked" }
+        ));
+    }
 }
 
 struct HeaderInfo {

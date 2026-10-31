@@ -709,4 +709,20 @@ titles with the machine id as hover text. The inspector's Lighting section
 now says when a mesh is `DynamicLit` (probe-lit, no lightmap, no baked
 shadow) instead of reporting lightmap-file state; `Panels.dynamic_lit` is a
 `Query<Has<DynamicLit>>` (archetype-only, so it can't conflict with the
-mutable `placed` query).
+mutable `placed` query). Per Miles (2026-10-30) the Lighting section is a
+single `Lighting: Dynamic/Baked` line for meshes — no explanation, no bake
+button in the inspector (bake lives in the menu / Shift+B; stale state in
+the status bar).
+
+### Dock layout persistence — 2026-10-30
+
+`editor/ui/layout.rs`: the dock layout persists to a user-level
+`editor_settings.json` (gitignored; cwd on native, OPFS key on web),
+deliberately not tied to any project. JSON on purpose: an `EditorTab`
+rename makes the file fail to parse and the default layout take over.
+Saves are debounced to 1 s (serialize + string-compare against the disk
+copy) and flushed on `OnExit(AppState::InGame)`; writes on web are
+fire-and-forget like prefabs/manifests. This pulled `serde` + `serde_json`
+in as direct deps and turned on `egui_dock/serde`. The file is a struct
+(`EditorSettingsFile { dock }`) so future user-level editor settings can
+join as `#[serde(default)]` fields.

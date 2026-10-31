@@ -76,6 +76,9 @@ src/
 │   ├── tool.rs             # EditorTool state (Select/Place/Terrain): 1/2/3, Shift+E, Shift+G, Esc cancels
 │   ├── ui/                 # egui chrome (EguiPrimaryContextPass, runs in PostUpdate)
 │   │   ├── mod.rs          #   EguiPlugin bootstrap, DockLayout, `Panels` SystemParam, status bar
+│   │   ├── layout.rs       #   Dock layout persistence: user-level editor_settings.json (cwd native /
+│   │   │                   #   OPFS key web), 1 s debounced save + flush on exit to menu; parse
+│   │   │                   #   failure falls back to the default layout
 │   │   ├── viewport.rs     #   TabViewer; viewport tab draws the render texture, fills ViewportInput
 │   │   ├── menu.rs         #   Menu bar (File/Edit/View/Tools/Plugins), toolbar, New-world dialog
 │   │   ├── outliner.rs     #   Loaded placed entities: filter, select, focus, context menu

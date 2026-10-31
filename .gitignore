@@ -3,3 +3,4 @@ bevy_docs
 worlds
 pkg.worktrees/
 projects
+editor_settings.json
