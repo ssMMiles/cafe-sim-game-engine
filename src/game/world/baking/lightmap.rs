@@ -51,7 +51,12 @@ use crate::game::world::terrain::storage::EnvironmentData;
 ///   function of position, so the blur could not remove it — it biased the
 ///   ambient term by up to 8% of its range in a pattern that follows the
 ///   sample directions, not the geometry.
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 9;
+/// - v10: scenery re-emits indirect bounce, where only terrain did. An
+///   enclosed interior previously received no indirect light at all — every
+///   bounce ray from inside a building hit the building and the path ended
+///   there — and probe gathering returned a flat constant for any scenery
+///   hit, which left objects lit from an indoor probe completely unshaded.
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 10;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -1211,7 +1216,7 @@ mod tests {
 
         let key = terrain_lightmap_key("my-world", -1, 2);
         let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
-        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v9.exr");
+        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v10.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1219,7 +1224,7 @@ mod tests {
 
         let key = object_lightmap_key("my-world", 7, 3);
         let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
-        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v9.exr");
+        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v10.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())

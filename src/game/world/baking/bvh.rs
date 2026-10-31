@@ -166,11 +166,24 @@ impl TriangleBvh {
     /// estimate, which weights an occluder by how close it is. Mirrors
     /// `bvh_nearest` in the WGSL.
     pub fn nearest_hit(&self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
+        self.nearest_hit_normal(origin, dir, max_t).map(|(t, _)| t)
+    }
+
+    /// As [`Self::nearest_hit`], but also the geometric normal of the
+    /// triangle that was hit, flipped to face the incoming ray.
+    ///
+    /// Bounce and probe gathering need it: a surface can only re-emit what
+    /// it receives, and what it receives depends on which way it faces.
+    /// Winding is not trusted — occluder triangles come from whatever
+    /// meshes the level happens to contain — so the side the ray arrives
+    /// from is taken as the front.
+    pub fn nearest_hit_normal(&self, origin: Vec3, dir: Vec3, max_t: f32) -> Option<(f32, Vec3)> {
         if self.nodes.is_empty() {
             return None;
         }
         let inv_dir = Vec3::new(safe_inv(dir.x), safe_inv(dir.y), safe_inv(dir.z));
         let mut best = max_t;
+        let mut best_normal = Vec3::ZERO;
         let mut found = false;
 
         let mut stack = [0u32; 64];
@@ -190,11 +203,12 @@ impl TriangleBvh {
             if node.count > 0 {
                 let first = node.left_or_first as usize;
                 for tri in &self.tris[first..first + node.count as usize] {
-                    if let Some(t) =
-                        ray_triangle(origin, dir, tri.v0.into(), tri.v1.into(), tri.v2.into())
+                    let (v0, v1, v2) = (tri.v0.into(), tri.v1.into(), tri.v2.into());
+                    if let Some(t) = ray_triangle(origin, dir, v0, v1, v2)
                         && t < best
                     {
                         best = t;
+                        best_normal = (v1 - v0).cross(v2 - v0);
                         found = true;
                     }
                 }
@@ -204,7 +218,13 @@ impl TriangleBvh {
                 sp += 2;
             }
         }
-        found.then_some(best)
+        if !found {
+            return None;
+        }
+        // Face the ray, and fall back to -dir for a degenerate triangle so
+        // callers never see a zero normal.
+        let n = best_normal.normalize_or(-dir);
+        Some((best, if n.dot(dir) > 0.0 { -n } else { n }))
     }
 }
 

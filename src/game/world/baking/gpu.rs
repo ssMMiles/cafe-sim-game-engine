@@ -149,6 +149,7 @@ pub struct BakeUniformsData {
     pub bounce_rays: u32,
     pub bounce_strength: f32,
     pub terrain_albedo: f32,
+    pub scenery_albedo: f32,
     pub bounce_count: u32,
     /// Starting row of this dispatch strip. Set per-strip by `dispatch_strip`.
     pub row_offset: u32,
@@ -172,7 +173,6 @@ pub struct BakeUniformsData {
     /// the WGSL, which silently desynced the GPU terrain bake from the CPU
     /// paths the moment `BakeConfig::max_light_shadow_steps` changed.
     pub max_light_shadow_steps: u32,
-    pub _pad1: u32,
     pub _pad2: u32,
 }
 
@@ -465,6 +465,7 @@ pub fn enqueue_terrain_bake_jobs(
             bounce_rays: config.bounce_rays,
             bounce_strength: config.bounce_strength,
             terrain_albedo: config.terrain_albedo,
+            scenery_albedo: config.scenery_albedo,
             bounce_count: config.bounce_count,
             row_offset: 0,
             num_bvh_nodes: bvh.nodes.len() as u32,
@@ -478,7 +479,6 @@ pub fn enqueue_terrain_bake_jobs(
             num_lights: lighting.lights.len() as u32,
             margin: grid.margin as u32,
             max_light_shadow_steps: config.max_light_shadow_steps.max(4),
-            _pad1: 0,
             _pad2: 0,
         };
 
@@ -892,6 +892,31 @@ mod tests {
     fn bake_uniforms_are_vec4_aligned() {
         let size = std::mem::size_of::<super::BakeUniformsData>();
         assert_eq!(size % 16, 0, "BakeUniformsData is {size} bytes");
+    }
+
+    /// `BakeUniformsData` and the shader's `BakeUniforms` must be the same
+    /// size, or every field past the first discrepancy is read from the
+    /// wrong offset — and nothing else catches it. The alignment test above
+    /// passes happily while the two disagree, and the naga validation test
+    /// only looks at the shader in isolation; the failure surfaces as a
+    /// wrong-looking bake, or a binding-size validation error at dispatch.
+    #[test]
+    fn bake_uniforms_match_the_shader_struct() {
+        let module =
+            naga::front::wgsl::parse_str(SHADER_SRC).expect("lightmap_bake.wgsl should parse");
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("BakeUniforms"))
+            .expect("shader should declare BakeUniforms");
+        let naga::TypeInner::Struct { span, .. } = ty.inner else {
+            panic!("BakeUniforms is not a struct");
+        };
+        assert_eq!(
+            span as usize,
+            std::mem::size_of::<super::BakeUniformsData>(),
+            "BakeUniforms (shader) and BakeUniformsData (Rust) differ in size"
+        );
     }
 
     /// The bake shader must validate with *no* optional capabilities: it is

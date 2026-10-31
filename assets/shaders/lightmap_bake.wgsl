@@ -60,6 +60,8 @@ struct BakeUniforms {
     bounce_rays: u32,
     bounce_strength: f32,
     terrain_albedo: f32,
+    // Fraction of the light reaching a scenery surface that it bounces on.
+    scenery_albedo: f32,
     bounce_count: u32,
     // Starting row of this dispatch strip within the full lightmap.
     // Strip-based dispatch writes `strip_rows` rows at a time to avoid TDR.
@@ -82,7 +84,6 @@ struct BakeUniforms {
     margin: u32,
     // Clamp on a local light's shadow-ray step count (BakeConfig::max_light_shadow_steps).
     max_light_shadow_steps: u32,
-    _pad1: u32,
     _pad2: u32,
 }
 
@@ -497,6 +498,70 @@ fn bvh_nearest(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> f32 {
     return best;
 }
 
+struct BvhHit {
+    t: f32,
+    normal: vec3<f32>,
+    hit: bool,
+}
+
+/// As `bvh_nearest`, but also the geometric normal of the triangle hit,
+/// flipped to face the incoming ray. Mirrors `TriangleBvh::nearest_hit_normal`.
+/// Winding is not trusted, so the side the ray arrives from is the front.
+fn bvh_nearest_normal(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> BvhHit {
+    var out: BvhHit;
+    out.t = max_t;
+    out.normal = vec3<f32>(0.0, 1.0, 0.0);
+    out.hit = false;
+    if u.num_bvh_nodes == 0u {
+        return out;
+    }
+    let inv_d = vec3<f32>(safe_inv(rd.x), safe_inv(rd.y), safe_inv(rd.z));
+    var best = max_t;
+    var best_tri: u32 = 0u;
+
+    var stack: array<u32, 64>;
+    var sp: u32 = 1u;
+    stack[0] = 0u;
+
+    loop {
+        if sp == 0u {
+            break;
+        }
+        sp = sp - 1u;
+        let node = bvh_nodes[stack[sp]];
+        if !slab_hit(node.aabb_min, node.aabb_max, ro, inv_d, best) {
+            continue;
+        }
+        if node.count > 0u {
+            let end = node.left_or_first + node.count;
+            for (var i = node.left_or_first; i < end; i = i + 1u) {
+                let t = ray_tri_hit(ro, rd, bvh_tris[i]);
+                if t > 0.0 && t < best {
+                    best = t;
+                    best_tri = i;
+                    out.hit = true;
+                }
+            }
+        } else {
+            stack[sp] = node.left_or_first;
+            stack[sp + 1u] = node.left_or_first + 1u;
+            sp = sp + 2u;
+        }
+    }
+
+    if out.hit {
+        let tri = bvh_tris[best_tri];
+        let n = normalize(cross(tri.v1 - tri.v0, tri.v2 - tri.v0));
+        out.t = best;
+        if dot(n, rd) > 0.0 {
+            out.normal = -n;
+        } else {
+            out.normal = n;
+        }
+    }
+    return out;
+}
+
 // ----------------------------------------------------------------------------
 // Ambient occlusion
 // ----------------------------------------------------------------------------
@@ -619,51 +684,79 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
         var cur_pos      = origin;
         var cur_mesh_pos = mesh_origin;
         var cur_dir      = dir0;
-        var cur_cos_w    = cos_w0;
         var throughput   = 1.0;
 
         for (var b = 0u; b < u.bounce_count; b = b + 1u) {
-            var hit = false;
+            // Nearest terrain hit along the ray, by DDA.
+            var terrain_t   = -1.0;
+            var terrain_pos = vec3<f32>(0.0);
             for (var s = 1u; s <= u.shadow_steps; s = s + 1u) {
-                let pos = cur_pos + cur_dir * (f32(s) * step_size);
-                let h   = world_height(pos.x, pos.z);
-                // Bug fix: strict > to avoid self-intersection on flat terrain.
-                if h > pos.y {
-                    // A wall between here and the terrain hit absorbs the
-                    // path: scenery is opaque to bounce light, not a mirror.
-                    if bvh_occluded(cur_mesh_pos, cur_dir, f32(s) * step_size) {
-                        break;
-                    }
-                    // Bug fix: 0.5 unit offset (was 0.1) to clear the step size
-                    // (~1.25 units) so the next bounce doesn't immediately re-hit.
-                    let hit_pos      = vec3<f32>(pos.x, h + 0.5, pos.z);
-                    let hit_mesh_pos = vec3<f32>(pos.x, h + 0.02, pos.z);
-                    let hn      = world_normal(pos.x, pos.z);
-                    let ndotl_q = max(dot(hn, sun_dir), 0.0);
-                    let vis_q   = cast_shadow_ray(hit_pos, hit_mesh_pos, sun_dir);
-                    // Bug fix: no cur_cos_w — it cancels with the PDF for
-                    // cosine-weighted hemisphere sampling.
-                    accum = accum + throughput * ndotl_q * vis_q * u.terrain_albedo;
-                    throughput = throughput * u.terrain_albedo;
-
-                    // Resample direction at hit point using a proper per-bounce hash
-                    // rather than a cyclic seed shift — avoids correlated directions.
-                    let bounce_seed = hash_u32(
-                        texel_seed + i * 1000003u + b * 2654435761u
-                    );
-                    let bounce_az  = float01(hash_u32(bounce_seed + 1u)) * TAU;
-                    let bounce_idx = u32(float01(bounce_seed) * f32(u.bounce_rays)) % u.bounce_rays;
-                    let tf         = make_tangent_frame(hn);
-                    let new_dir    = hemisphere_dir(bounce_idx, u.bounce_rays, hn, tf, bounce_az);
-                    cur_cos_w      = max(dot(new_dir, hn), 0.0);
-                    cur_pos        = hit_pos;
-                    cur_mesh_pos   = hit_mesh_pos;
-                    cur_dir        = new_dir;
-                    hit            = true;
+                let t   = f32(s) * step_size;
+                let pos = cur_pos + cur_dir * t;
+                // Strict > to avoid self-intersection on flat terrain.
+                if world_height(pos.x, pos.z) > pos.y {
+                    terrain_t   = t;
+                    terrain_pos = pos;
                     break;
                 }
             }
-            if !hit || cur_cos_w <= 0.0 {
+
+            // Scenery nearer than the terrain re-emits rather than simply
+            // absorbing — without this an enclosed interior gets no indirect
+            // light at all, since every bounce ray from inside hits the
+            // building. Mirrors raycast::compute_indirect_bounce.
+            var bound = u.ao_radius * 4.0;
+            if terrain_t >= 0.0 {
+                bound = terrain_t;
+            }
+            let sc = bvh_nearest_normal(cur_mesh_pos, cur_dir, bound);
+
+            var hit_pos:      vec3<f32>;
+            var hit_mesh_pos: vec3<f32>;
+            var hn:           vec3<f32>;
+            var albedo:       f32;
+            if sc.hit {
+                // Lift the terrain march off the surface as a terrain hit
+                // does: a wall's base sits at ground level, where the
+                // bilinear heightmap can read as above it and kill the ray.
+                let p        = cur_mesh_pos + cur_dir * sc.t + sc.normal * 0.02;
+                hit_pos      = p + vec3<f32>(0.0, 0.5, 0.0);
+                hit_mesh_pos = p;
+                hn           = sc.normal;
+                albedo       = u.scenery_albedo;
+            } else if terrain_t >= 0.0 {
+                let h        = world_height(terrain_pos.x, terrain_pos.z);
+                // 0.5 clears the step size (~1.25 units) so the next bounce
+                // doesn't immediately re-hit the ground it left.
+                hit_pos      = vec3<f32>(terrain_pos.x, h + 0.5, terrain_pos.z);
+                hit_mesh_pos = vec3<f32>(terrain_pos.x, h + 0.02, terrain_pos.z);
+                hn           = world_normal(terrain_pos.x, terrain_pos.z);
+                albedo       = u.terrain_albedo;
+            } else {
+                // Escaped to the sky: nothing to re-emit.
+                break;
+            }
+
+            let ndotl_q = max(dot(hn, sun_dir), 0.0);
+            let vis_q   = cast_shadow_ray(hit_pos, hit_mesh_pos, sun_dir);
+            // No cur_cos_w — it cancels with the PDF for cosine-weighted
+            // hemisphere sampling.
+            accum = accum + throughput * ndotl_q * vis_q * albedo;
+            throughput = throughput * albedo;
+
+            // Resample direction at hit point using a proper per-bounce hash
+            // rather than a cyclic seed shift — avoids correlated directions.
+            let bounce_seed = hash_u32(
+                texel_seed + i * 1000003u + b * 2654435761u
+            );
+            let bounce_az  = float01(hash_u32(bounce_seed + 1u)) * TAU;
+            let bounce_idx = u32(float01(bounce_seed) * f32(u.bounce_rays)) % u.bounce_rays;
+            let tf         = make_tangent_frame(hn);
+            let new_dir    = hemisphere_dir(bounce_idx, u.bounce_rays, hn, tf, bounce_az);
+            cur_pos        = hit_pos;
+            cur_mesh_pos   = hit_mesh_pos;
+            cur_dir        = new_dir;
+            if max(dot(new_dir, hn), 0.0) <= 0.0 {
                 break;
             }
         }

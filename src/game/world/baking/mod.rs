@@ -149,6 +149,15 @@ pub struct BakeConfig {
     pub gpu_parallel_chunks: u32,
     /// Number of hemisphere rays for indirect lighting. Set to 0 to disable.
     pub bounce_rays: u32,
+    /// Fraction of the light reaching a *scenery* surface that it bounces
+    /// on, the counterpart of [`BakeConfig::terrain_albedo`]. Scenery is
+    /// every triangle in the bake BVH — placed objects and plugin level
+    /// geometry — and it re-emits because otherwise an enclosed interior
+    /// receives no indirect light at all: every bounce ray from inside a
+    /// building hits the building. One grey number rather than per-material
+    /// albedo: the BVH carries triangles, not materials, so there is no
+    /// colour bleed.
+    pub scenery_albedo: f32,
     /// Strength of the indirect bounce contribution. 0.0 = no bounce, 1.0 = natural.
     pub bounce_strength: f32,
     /// Diffuse reflectance of the terrain surface used in bounce calculations.
@@ -229,6 +238,7 @@ impl Default for BakeConfig {
             bounce_rays: 8,
             bounce_strength: 1.0,
             terrain_albedo: 0.5,
+            scenery_albedo: 0.5,
             bounce_count: 1,
             cpu_lowfreq_downsample: 4,
             blur_radius: 4,

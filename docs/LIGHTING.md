@@ -508,11 +508,16 @@ so the chunk-seam invariant (§5) is unaffected.
 
 ### 7.10 Enclosed interiors receive only `ambient x ao`, and land on a band boundary
 
-**Open.** Only *terrain* re-emits indirect bounce (`compute_indirect_bounce`
-accumulates at terrain hits; scenery absorbs). Inside a closed building every
-bounce ray hits the building, so an interior gets no indirect light at all,
-the sun is correctly blocked, and the shading reduces to `ambient_rgb x ao`
-plus whatever placed lights are inside.
+**Mostly fixed 2026-10-31** (lightmap format v10): scenery now re-emits
+indirect bounce. The analysis below is of the state before, and the last
+subsection is what is still missing.
+
+Only *terrain* re-emitted indirect bounce — `compute_indirect_bounce`
+accumulated at terrain hits, and a scenery hit simply ended the path
+(`bvh.occluded(...) => break`, "scenery is opaque to bounce light, not a
+mirror"). Inside a closed building every bounce ray hits the building, so an
+interior got no indirect light at all, the sun is correctly blocked, and the
+shading reduced to `ambient_rgb x ao` plus whatever placed lights are inside.
 
 Measured AO on the floor of a 3 m-high room is ~0.22, rising to ~0.34 at a
 doorway. The cafe's own baked lightmaps (v8, five sub-meshes) came out:
@@ -525,29 +530,51 @@ doorway. The cafe's own baked lightmaps (v8, five sub-meshes) came out:
 `toon_band` splits the **input** at 0.2/0.4/0.6/0.8 (the output is then
 remapped to `[TOON_FLOOR, 1]`, which is where 0.18/0.34/0.51/… come from —
 easy to confuse). The floor's median is 0.193, i.e. **0.007 from the first
-boundary**, so the band contour wanders across the whole floor driven by
-whatever small variation exists rather than by any lighting feature. That is
-what reads as "curves and outcrops that don't make sense": not shadows, but
-the iso-line of a nearly flat, nearly unlit field. §7.9 was supplying a good
-part of that variation; removing it makes the contour follow real geometry,
-but does not make the interior *lit*.
+boundary**, so the band contour wandered across the whole floor driven by
+whatever small variation existed rather than by any lighting feature.
 
-Options, cheapest first:
+### 7.11 Probe gathering returned a constant for scenery — why objects looked flat
 
-1. **Place lights inside.** Local lights are baked and do reach interior
-   surfaces; this is the authoring answer and needs no engine change.
-2. **Let scenery re-emit bounce**, not just terrain. Physically the right
-   fix — sunlight through the doorway would fill the room — and the one that
-   makes interiors work without hand-placed lights. Costs another material
-   lookup per bounce hit and makes the object bake materially slower (it is
-   CPU on every platform, single-threaded on wasm).
-3. **Tune `ambient_intensity` per world** so interiors sit mid-band rather
-   than astride a boundary. Helps the symptom, blows out exteriors — this is
-   the open half of §7.1.
+**Fixed 2026-10-31** (v10). The same gap, in the path that lights everything
+*dynamic*. `ProbeContext::shade` gathered its environment as:
 
-`LightmapBuffer::dump_lightmap` (ignored test, `LIGHTMAP=<path> cargo test
-dump_lightmap -- --ignored --nocapture`, `BANDS=1` / `CROP=x,y,w`) is how the
-numbers above were read off a real bake.
+```rust
+let radiance = match self.bvh.nearest_hit(p, d, bound) {
+    Some(_) => lighting.ambient_rgb * 0.5,   // any scenery, any direction
+    ...
+```
+
+A flat constant, ignoring the surface's orientation and whether the sun
+reached it. Indoors nearly every probe ray hits the building, so the gathered
+environment was **the same constant in every direction** — and an L1 fit of a
+constant has no directional term at all (`s1 = s2 = s3 = 0`). `probe_radiance`
+then returns the same value for every normal, so a probe-lit object renders
+identically whichever way its faces point. That is why the cafe furniture read
+as flat, with a seam only where the constant drifted across a band.
+
+Both paths now shade a scenery hit the way a terrain hit is shaded —
+`albedo x (sun x ndotl x visibility + sky)` against the triangle's own
+geometric normal, from `TriangleBvh::nearest_hit_normal`. `BakeConfig::scenery_albedo`
+(default 0.5) is its albedo; the BVH carries triangles, not materials, so it
+is one grey number and there is no colour bleed.
+
+Guarded by `scenery_re_emits_by_its_own_normal_not_a_constant` and
+`a_sunlit_wall_bounces_light_onto_a_shaded_surface`.
+
+### 7.12 Placed lights still do not bounce — **open**
+
+Re-emission carries **sun and sky, not local lights**, in every path
+(`terrain_radiance`, `scenery_radiance`, `compute_indirect_bounce` all
+evaluate `sun_rgb * ndotl * vis` and the ambient term, never
+`BakeLighting::local_lights`). So a sealed room the daylight never reaches
+still gathers `ambient x albedo` from every direction, and a lamp inside it
+lights the surfaces it can see directly but nothing those surfaces face.
+
+For a shop interior that is the remaining gap: the fix is to add
+`local_lights` to the re-emission in all three paths at once (they must agree
+— §5), costing one segment shadow ray per light per bounce hit on top of the
+sun ray already cast there. Worth doing if hand-placed lamps still read as
+isolated pools rather than lighting the room.
 
 ---
 
@@ -560,9 +587,8 @@ numbers above were read off a real bake.
    it.
 2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
 3. §7.5 object ray origin — needs a repro case first.
-3b. ~~§7.9 AO sample rotation~~ — **done** (v9). §7.10 interior lighting is
-   the open one: decide between placing lights and making scenery re-emit
-   bounce.
+3b. ~~§7.9 AO sample rotation~~ (v9), ~~§7.10/§7.11 scenery re-emits bounce~~
+   (v10) — **done.** §7.12 (local lights do not bounce) is the open one.
 4. ~~§7.3 AO weighting~~ — **done** (v7). ~~§7.4 object bounce~~ — **done**
    (v8). Re-bake (Shift+B) to see either.
 5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`

@@ -844,3 +844,52 @@ second is the bigger one:
   0.51, 0.67, 0.84) are the **output** levels after remapping to
   `[TOON_FLOOR, 1]`. The thresholds a lightmap value is compared against are
   plain fifths: 0.2, 0.4, 0.6, 0.8.
+
+## Scenery re-emits bounce; why the cafe furniture was flat — 31 October 2026
+
+Lightmap v10. Two sites had the same gap, and the *second* is the one that
+mattered for the visible symptom:
+
+- `compute_indirect_bounce` ended a path at the first scenery hit
+  (`bvh.occluded(..) => break`). Only terrain re-emitted, so an enclosed
+  interior received no indirect light at all.
+- **`ProbeContext::shade` returned a flat `ambient_rgb * 0.5` for any scenery
+  hit** — ignoring the surface's normal and whether the sun reached it.
+  Indoors nearly every probe ray hits the building, so the gathered
+  environment was the same constant in every direction, and **an L1 fit of a
+  constant has no directional term** (`s1 = s2 = s3 = 0`). `probe_radiance`
+  then returns the same value for every normal, so probe-lit objects render
+  identically whichever way they face. That — not the lightmap bake — is why
+  the cafe furniture looked flat. Worth remembering: furniture spawned by
+  cafe-sim is `DynamicLit`, so the object *bake* never touches it; chase the
+  probe path for anything dynamic.
+
+Both now shade a scenery hit like a terrain hit, against the triangle's own
+geometric normal from the new `TriangleBvh::nearest_hit_normal` (winding is
+not trusted — the side the ray arrives from is the front). WGSL mirrors it.
+Still missing: re-emission carries sun and sky but **not** placed lights, so a
+sealed room the daylight never reaches remains flat (LIGHTING.md 7.12).
+
+Process notes worth keeping:
+
+- A regression test for this class must be checked against the *old* code.
+  My first probe test passed with the constant restored — the room I built
+  was open to sky and terrain, which supplied the directionality by
+  themselves. Testing `scenery_radiance` directly (sunlit face vs shaded
+  face) discriminates; the whole-probe test did not.
+- **`BakeUniformsData` and the shader's `BakeUniforms` must be the same
+  size.** I removed a `_pad1` from the Rust side and not the WGSL, which
+  would have made the GPU read 160 bytes from a 144-byte binding. Neither the
+  vec4-alignment test nor the naga validation test catches that; there is now
+  `bake_uniforms_match_the_shader_struct`, which reads the struct's span out
+  of the parsed module.
+- Re-measured for the GPU question (`interior_bake_cost`, ignored test):
+  indoors, per texel, sun 57 ns / AO 1919 ns / bounce 1917 ns. Scenery
+  re-emission roughly doubles interior bounce. The cafe shell's ~528k covered
+  texels are ~2.1 s of CPU work, spread over cores by rayon and already off
+  the main thread. **The GPU port is still not the lever**: AO + bounce are
+  98.5% of the cost, and the terrain bake's coarse-grid trick was wrongly
+  ruled out for objects — "atlas cells aren't spatially coherent" is true
+  *between* cells and false *within* one, and each cell is a single triangle
+  mapped linearly (the cafe floor's is 256x256 texels over 20x12 m). A
+  per-cell coarse lattice is ~10x for a few lines. See GPU_OBJECT_BAKE_PLAN.md.

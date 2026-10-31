@@ -3,7 +3,8 @@
 Status: **stage 1 done and measured; the frame stall is fixed too.** The bake
 now runs on `AsyncComputeTaskPool`. Stage 2 (the GPU path itself) is **not
 started, and the measurements argue against it** — see "What measuring
-actually showed" below.
+actually showed" below, and "Re-measured after scenery re-emission" for the
+current numbers and a cheaper lever that should be pulled first.
 
 ## Where the time actually goes
 
@@ -39,8 +40,9 @@ Per-texel ray budget, at the current defaults (`ao_rays: 16`,
 | AO rays | 16 (32 steps each + BVH) |
 | Local light rays | 1 per light in range (4–48 steps) |
 
-Objects skip indirect bounce (`sun_and_ambient(..., 0.0)`), so they are
-cheaper per texel than terrain — but there is no parallelism to hide it.
+(Objects skipped indirect bounce when this was written. They receive it as
+of lightmap v8, and since v10 scenery re-emits it as well, which makes bounce
+the joint-largest term indoors — see the re-measurement below.)
 
 A 512² atlas is ~262k texels, of which ~20% are covered: the gutter leaves an
 inset of `1 - 2 × 0.18` per axis, and the triangle fills half of that, so
@@ -302,6 +304,59 @@ One task for the whole pass, not one per sub-mesh — jobs are gathered
 together and applied together, and a single slot makes "a bake is already
 running" trivial to detect. Leaving the world drops the `Task`, which
 cancels it.
+
+## Re-measured after scenery re-emission (2026-10-31)
+
+Scenery now re-emits indirect bounce (`docs/LIGHTING.md` §7.10–7.11), which
+is the first change to make the object bake *more* expensive rather than
+less: a bounce ray used to end at the first wall it hit, and now shades that
+wall — a sun shadow ray — and carries on. Indoors, where every bounce ray
+hits something, that is the difference between almost free and the single
+largest term.
+
+Measured per texel inside a closed room
+(`cargo test --release interior_bake_cost -- --ignored --nocapture`), against
+the outdoor terrain figures from `terrain_bake_cost_breakdown`:
+
+| term | interior | outdoor terrain |
+|---|---|---|
+| sun shadow | 57 ns | 41 ns |
+| AO (16 rays) | 1919 ns | 1621 ns |
+| bounce (8 rays) | **1917 ns** | 793 ns |
+| total | 3893 ns | 2454 ns |
+
+The cafe shell's five sub-meshes cover ~528k texels in the real bake (read
+off the EXRs with `dump_lightmap`), so ~**2.1 s of CPU work**, which
+`shade_geometry`'s `par_iter` spreads across cores — a few hundred ms of
+wall clock, on top of whatever the rest of the scene costs. The bake has run
+on `AsyncComputeTaskPool` since stage 1, so this is background time, not a
+frame stall.
+
+### The case for stage 2 is still weak, and there is a much better lever
+
+Everything in "Which makes the case for stage 2 weak" still holds, and the
+ceiling is still only the shade pass. But the measurements point somewhere
+else entirely: **AO and bounce are 3836 ns of the 3893** — 98.5%. The terrain
+bake already solved exactly this, by evaluating both on a grid
+`cpu_lowfreq_downsample` times coarser and interpolating (12.8x at the
+default 4).
+
+That trick was ruled out for objects because "atlas cells aren't spatially
+coherent". That is true *between* cells and false *within* one — and within
+is where it matters. Every cell holds exactly one triangle, so its texels are
+contiguous in UV **and** in world space, by a linear map. The cafe floor's
+cell is 256x256 texels over a 20x12 m triangle: as coherent as any terrain
+chunk, and far larger than the ~25 cm the blur already smears over.
+
+So the shape of the fix is a per-cell coarse lattice: for each cell, evaluate
+AO and bounce on every `n`th texel of that cell's own grid, bilinearly
+interpolate inside it, and keep the sun and local-light rays per texel as
+terrain does. Cells smaller than `n` fall back to per-texel. On these numbers
+that is roughly a 10x cut of the object bake for a handful of lines in
+`shade_geometry`, against ~950 lines of render-graph plumbing and a fourth
+copy of the lighting model for less.
+
+**Do that before reconsidering the GPU.** Measure after, as ever.
 
 ## Suggested order
 

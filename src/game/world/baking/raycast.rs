@@ -351,7 +351,8 @@ pub fn compute_ao(
 /// Multi-bounce indirect lighting: cast `n_rays` hemisphere rays from `origin`,
 /// following each ray through up to `bounce_count` terrain reflections.
 ///
-/// Each bounce accumulates the direct-lit contribution at the hit point
+/// Both terrain and scenery re-emit, each with its own albedo. Each bounce
+/// accumulates the direct-lit contribution at the hit point
 /// attenuated by the current path throughput, then multiplies throughput by
 /// `terrain_albedo` so successive bounces contribute diminishing amounts.
 /// Scenery triangles absorb bounce rays (no light leaks through walls) but
@@ -375,6 +376,7 @@ pub fn compute_indirect_bounce(
     n_rays: u32,
     steps: u32,
     terrain_albedo: f32,
+    scenery_albedo: f32,
     bounce_count: u32,
     seed_offset: u32,
 ) -> f32 {
@@ -407,67 +409,88 @@ pub fn compute_indirect_bounce(
         let mut cur_pos = origin;
         let mut cur_mesh_pos = mesh_origin;
         let mut cur_dir = dir;
-        let mut cur_cos_w = _cos_w;
         let mut throughput = 1.0_f32;
 
         for b in 0..bounce_count {
-            let mut hit = false;
+            // Nearest terrain hit along the ray, by DDA.
+            let mut terrain_hit: Option<(f32, Vec3)> = None;
             let climbing = cur_dir.y >= 0.0;
             for s in 1..=steps {
-                let pos = cur_pos + cur_dir * (s as f32 * step_size);
+                let t = s as f32 * step_size;
+                let pos = cur_pos + cur_dir * t;
                 if climbing && cache.above_terrain(pos.y) {
                     break;
                 }
-                let h = cache.sample_height(pos.x, pos.z);
-                // Bug fix: strict > to avoid self-intersection on flat terrain.
-                if h > pos.y {
-                    // A wall between here and the terrain hit absorbs the
-                    // path: scenery is opaque to bounce light, not a mirror.
-                    if bvh.occluded(cur_mesh_pos, cur_dir, s as f32 * step_size) {
-                        break;
-                    }
-                    // Bug fix: 0.5 unit offset (was 0.1) to clear the step size
-                    // and prevent the next bounce from immediately re-hitting.
-                    let hit_pos = Vec3::new(pos.x, h + 0.5, pos.z);
-                    let hit_mesh_pos = Vec3::new(pos.x, h + 0.02, pos.z);
-                    let (hit_normal, _) = cache.sample_normal(pos.x, pos.z);
-                    let ndotl_q = hit_normal.dot(sun_dir).max(0.0);
-                    let vis_q = cast_shadow_ray(
-                        hit_pos,
-                        hit_mesh_pos,
-                        sun_dir,
-                        cache,
-                        bvh,
-                        shadow_max_dist,
-                        steps,
-                    );
-                    // Bug fix: no cur_cos_w here — it cancels with the PDF for
-                    // cosine-weighted hemisphere sampling.
-                    accum += throughput * ndotl_q * vis_q * terrain_albedo;
-                    throughput *= terrain_albedo;
-
-                    // Resample direction at the hit point using a proper per-bounce
-                    // hash rather than a cyclic seed shift — avoids correlated directions.
-                    let bounce_seed = hash_u32(
-                        seed_offset
-                            .wrapping_add(i.wrapping_mul(1_000_003))
-                            .wrapping_add(b.wrapping_mul(2_654_435_761)),
-                    );
-                    let bounce_az =
-                        float01(hash_u32(bounce_seed.wrapping_add(1))) * std::f32::consts::TAU;
-                    let bounce_idx = (float01(bounce_seed) * n_rays as f32) as u32 % n_rays;
-                    let (t, bt) = build_tangent_frame(hit_normal);
-                    let (new_dir, new_cos_w) =
-                        hemisphere_dir_for_seed(bounce_idx, n_rays, hit_normal, t, bt, bounce_az);
-                    cur_pos = hit_pos;
-                    cur_mesh_pos = hit_mesh_pos;
-                    cur_dir = new_dir;
-                    cur_cos_w = new_cos_w;
-                    hit = true;
+                // Strict > to avoid self-intersection on flat terrain.
+                if cache.sample_height(pos.x, pos.z) > pos.y {
+                    terrain_hit = Some((t, pos));
                     break;
                 }
             }
-            if !hit || cur_cos_w <= 0.0 {
+
+            // Scenery nearer than the terrain re-emits rather than simply
+            // absorbing. It used to `break` here, which left an enclosed
+            // interior with no indirect light at all: every bounce ray from
+            // inside a building hits the building.
+            let bound = terrain_hit.map_or(shadow_max_dist, |(t, _)| t);
+            let scenery = bvh.nearest_hit_normal(cur_mesh_pos, cur_dir, bound);
+
+            let (hit_pos, hit_mesh_pos, hit_normal, albedo) = match (scenery, terrain_hit) {
+                (Some((t, n)), _) => {
+                    // Lift the *terrain* march off the surface the way a
+                    // terrain hit does: a wall's base sits at ground level,
+                    // where the bilinear heightmap can read as above it and
+                    // kill the sun ray outright.
+                    let p = cur_mesh_pos + cur_dir * t + n * 0.02;
+                    (p + Vec3::Y * 0.5, p, n, scenery_albedo)
+                }
+                (None, Some((_, pos))) => {
+                    let h = cache.sample_height(pos.x, pos.z);
+                    let (n, _) = cache.sample_normal(pos.x, pos.z);
+                    // 0.5 clears the step size so the next bounce cannot
+                    // immediately re-hit the ground it left.
+                    (
+                        Vec3::new(pos.x, h + 0.5, pos.z),
+                        Vec3::new(pos.x, h + 0.02, pos.z),
+                        n,
+                        terrain_albedo,
+                    )
+                }
+                // Escaped to the sky: nothing to re-emit.
+                (None, None) => break,
+            };
+
+            let ndotl_q = hit_normal.dot(sun_dir).max(0.0);
+            let vis_q = cast_shadow_ray(
+                hit_pos,
+                hit_mesh_pos,
+                sun_dir,
+                cache,
+                bvh,
+                shadow_max_dist,
+                steps,
+            );
+            // No cur_cos_w here — it cancels with the PDF for cosine-weighted
+            // hemisphere sampling.
+            accum += throughput * ndotl_q * vis_q * albedo;
+            throughput *= albedo;
+
+            // Resample direction at the hit point using a proper per-bounce
+            // hash rather than a cyclic seed shift — avoids correlated directions.
+            let bounce_seed = hash_u32(
+                seed_offset
+                    .wrapping_add(i.wrapping_mul(1_000_003))
+                    .wrapping_add(b.wrapping_mul(2_654_435_761)),
+            );
+            let bounce_az = float01(hash_u32(bounce_seed.wrapping_add(1))) * std::f32::consts::TAU;
+            let bounce_idx = (float01(bounce_seed) * n_rays as f32) as u32 % n_rays;
+            let (t, bt) = build_tangent_frame(hit_normal);
+            let (new_dir, new_cos_w) =
+                hemisphere_dir_for_seed(bounce_idx, n_rays, hit_normal, t, bt, bounce_az);
+            cur_pos = hit_pos;
+            cur_mesh_pos = hit_mesh_pos;
+            cur_dir = new_dir;
+            if new_cos_w <= 0.0 {
                 break;
             }
         }
@@ -549,7 +572,7 @@ fn hemisphere_dir_for_seed(
 }
 
 #[cfg(test)]
-mod ao_sampling {
+mod indoor {
     use super::*;
     use crate::game::world::terrain::HeightmapData;
 
@@ -627,6 +650,59 @@ mod ao_sampling {
             }
         }
         out
+    }
+
+    /// Scenery must re-emit bounce light, not just absorb it.
+    ///
+    /// A sunlit wall is the only indirect light an enclosed interior ever
+    /// gets: every bounce ray from inside a building hits the building, and
+    /// the path used to end there. Terrain albedo is zeroed in both cases so
+    /// only the scenery term can contribute.
+    #[test]
+    fn a_sunlit_wall_bounces_light_onto_a_shaded_surface() {
+        // One wall at x = +5, facing us at the origin; the sun is behind us
+        // so the face we can see is the lit one.
+        let wall = TriangleBvh::build(vec![
+            [
+                Vec3::new(5.0, 0.0, -6.0),
+                Vec3::new(5.0, 6.0, -6.0),
+                Vec3::new(5.0, 0.0, 6.0),
+            ],
+            [
+                Vec3::new(5.0, 6.0, -6.0),
+                Vec3::new(5.0, 6.0, 6.0),
+                Vec3::new(5.0, 0.0, 6.0),
+            ],
+        ]);
+        let cache = ground();
+        let sun_dir = Vec3::new(-1.0, 0.5, 0.0).normalize();
+        let o = Vec3::new(0.0, 1.0, 0.0);
+        let n = Vec3::X;
+
+        let bounce = |scenery_albedo: f32| {
+            compute_indirect_bounce(
+                o,
+                o,
+                n,
+                &cache,
+                &wall,
+                sun_dir,
+                80.0,
+                16,
+                64,
+                0.0,
+                scenery_albedo,
+                1,
+                7,
+            )
+        };
+        let absorbed = bounce(0.0);
+        let reemitted = bounce(0.5);
+        assert_eq!(absorbed, 0.0, "nothing else may contribute to this test");
+        assert!(
+            reemitted > 0.01,
+            "a sunlit wall should bounce light onto a surface facing it, got {reemitted}"
+        );
     }
 
     /// AO must rotate its sample set per texel, or the blur cannot clean up
@@ -868,6 +944,122 @@ mod cost {
             .collect()
     }
 
+    /// An enclosed room: four walls, a ceiling and a doorway.
+    fn room_scene() -> (BakeHeightCache, TriangleBvh) {
+        let mut hm = HeightmapData::new((0.25, 0.25));
+        for tx in -400..400 {
+            for tz in -400..400 {
+                hm.set_tile(tx, tz, 0.0);
+            }
+        }
+        let cache = BakeHeightCache::extract(&hm, -90.0, -90.0, 90.0, 90.0);
+
+        let (hx, hz, h) = (10.0f32, 6.0f32, 3.0f32);
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        let mut quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| {
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        };
+        quad(
+            Vec3::new(-hx, h, -hz),
+            Vec3::new(hx, h, -hz),
+            Vec3::new(hx, h, hz),
+            Vec3::new(-hx, h, hz),
+        );
+        for (a, b) in [
+            (Vec3::new(-hx, 0.0, -hz), Vec3::new(hx, 0.0, -hz)),
+            (Vec3::new(-hx, 0.0, -hz), Vec3::new(-hx, 0.0, hz)),
+            (Vec3::new(hx, 0.0, -hz), Vec3::new(hx, 0.0, hz)),
+            (Vec3::new(0.75, 0.0, hz), Vec3::new(hx, 0.0, hz)),
+            (Vec3::new(-hx, 0.0, hz), Vec3::new(-0.75, 0.0, hz)),
+        ] {
+            quad(a, b, b + Vec3::Y * h, a + Vec3::Y * h);
+        }
+        (cache, TriangleBvh::build(tris))
+    }
+
+    /// Per-texel cost *inside* a building, which is where scenery
+    /// re-emission changes the arithmetic: a scenery hit used to end the
+    /// path immediately, and now casts a sun ray and keeps bouncing.
+    ///
+    /// `cargo test --release interior_bake_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing benchmark, not a correctness check"]
+    fn interior_bake_cost() {
+        const N: usize = 20_000;
+        let (cache, bvh) = room_scene();
+        let sun_dir = Vec3::new(0.4, 0.8, 0.3).normalize();
+        let (ao_radius, shadow_steps, ao_rays, ao_steps, bounce_rays) =
+            (20.0_f32, 64_u32, 16_u32, 32_u32, 8_u32);
+        let reach = ao_radius * 4.0;
+
+        // Points spread over the room's floor.
+        let pts: Vec<Vec3> = (0..N)
+            .map(|i| {
+                let u = (i % 137) as f32 / 137.0;
+                let v = (i / 137) as f32 / (N as f32 / 137.0);
+                Vec3::new(-9.5 + u * 19.0, 0.02, -5.5 + v * 11.0)
+            })
+            .collect();
+
+        let mut sink = 0.0f32;
+        let t = Instant::now();
+        for &o in &pts {
+            sink += cast_shadow_ray(o, o, sun_dir, &cache, &bvh, reach, shadow_steps);
+        }
+        let sun = t.elapsed();
+
+        let t = Instant::now();
+        for (i, &o) in pts.iter().enumerate() {
+            sink += compute_ao(
+                o,
+                o,
+                Vec3::Y,
+                &cache,
+                &bvh,
+                ao_radius,
+                ao_rays,
+                ao_steps,
+                i as u32,
+            );
+        }
+        let ao = t.elapsed();
+
+        let t = Instant::now();
+        for (i, &o) in pts.iter().enumerate() {
+            sink += compute_indirect_bounce(
+                o,
+                o,
+                Vec3::Y,
+                &cache,
+                &bvh,
+                sun_dir,
+                reach,
+                bounce_rays,
+                shadow_steps,
+                0.5,
+                0.5,
+                1,
+                i as u32,
+            );
+        }
+        let bounce = t.elapsed();
+
+        let per = |d: std::time::Duration| d.as_secs_f64() * 1e9 / N as f64;
+        println!(
+            "interior, per texel: sun {:.0} ns | ao {:.0} ns | bounce {:.0} ns",
+            per(sun),
+            per(ao),
+            per(bounce)
+        );
+        // The cafe shell's five sub-meshes cover ~528k texels in the real bake.
+        let total_us = (per(sun) + per(ao) + per(bounce)) * 528_000.0 / 1e3;
+        println!(
+            "  x 528k covered texels (the cafe shell) = {:.2}s single-threaded, sink={sink}",
+            total_us / 1e6
+        );
+    }
+
     #[test]
     #[ignore = "timing benchmark, not a correctness check"]
     fn terrain_bake_cost_breakdown() {
@@ -914,6 +1106,7 @@ mod cost {
                 reach,
                 bounce_rays,
                 shadow_steps,
+                0.5,
                 0.5,
                 1,
                 i as u32,

@@ -584,6 +584,7 @@ fn shade_geometry(
                 config.bounce_rays,
                 config.shadow_steps,
                 config.terrain_albedo,
+                config.scenery_albedo,
                 config.bounce_count,
                 idx as u32,
             );

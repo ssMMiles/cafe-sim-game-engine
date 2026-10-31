@@ -303,6 +303,36 @@ impl ProbeContext<'_> {
             * self.config.terrain_albedo
     }
 
+    /// Radiance a scenery hit at `t` along `dir` sends back. The same model
+    /// as [`Self::terrain_radiance`] — albedo x (direct sun + sky) — but
+    /// against the triangle's own normal.
+    ///
+    /// This used to be a flat `ambient x 0.5` for every scenery hit, which
+    /// is what made interiors unshaded: inside a building nearly every probe
+    /// ray hits the building, so the gathered environment was the *same
+    /// constant in every direction*, and an L1 fit of a constant has no
+    /// directional term at all. Objects lit from such a probe render the
+    /// same whichever way they face — flat, with a seam wherever the
+    /// constant drifts across a toon band.
+    fn scenery_radiance(&self, p: Vec3, dir: Vec3, t: f32, normal: Vec3) -> Vec3 {
+        let q = p + dir * t + normal * 0.02;
+        let ndotl = normal.dot(self.lighting.sun_dir).max(0.0);
+        let vis = raycast::cast_shadow_ray(
+            // Lift the terrain march as a terrain hit does: a wall's base
+            // sits at ground level, where the bilinear heightmap can read as
+            // above it and kill the sun ray outright.
+            q + Vec3::Y * 0.5,
+            q,
+            self.lighting.sun_dir,
+            self.cache,
+            self.bvh,
+            self.config.ao_radius * 4.0,
+            self.config.shadow_steps,
+        );
+        (self.lighting.sun_rgb * (ndotl * vis) + self.lighting.ambient_rgb)
+            * self.config.scenery_albedo
+    }
+
     /// Nearest terrain hit along `dir` within `reach`, marching from `p`.
     fn terrain_hit(&self, p: Vec3, dir: Vec3, reach: f32, steps: u32) -> Option<f32> {
         let step = reach / steps.max(1) as f32;
@@ -374,8 +404,8 @@ impl ProbeContext<'_> {
             .map(|&d| {
                 let terrain_t = self.terrain_hit(p, d, reach, self.config.ao_steps);
                 let bound = terrain_t.unwrap_or(reach);
-                let radiance = match self.bvh.nearest_hit(p, d, bound) {
-                    Some(_) => lighting.ambient_rgb * 0.5,
+                let radiance = match self.bvh.nearest_hit_normal(p, d, bound) {
+                    Some((t, n)) => self.scenery_radiance(p, d, t, n),
                     None => match terrain_t {
                         Some(t) => self.terrain_radiance(p, d, t),
                         None => lighting.ambient_rgb,
@@ -645,6 +675,57 @@ mod tests {
             }
         }
         hm
+    }
+
+    /// Scenery must re-emit according to its *own* normal and sun
+    /// visibility, not a flat constant.
+    ///
+    /// Every scenery hit used to return `ambient x 0.5` whatever the
+    /// direction, the surface's orientation or whether the sun reached it.
+    /// Indoors nearly every probe ray hits the building, so the gathered
+    /// environment was the same constant in every direction — and an L1 fit
+    /// of a constant has no directional term at all, which is why objects
+    /// lit from an indoor probe shaded identically whichever way they faced.
+    ///
+    /// Note what this does *not* fix: a sealed room the sun never enters
+    /// still gathers `ambient x albedo` from every direction, because
+    /// re-emission carries sun and sky but not placed lights. Interiors need
+    /// either daylight through an opening or the lamp-bounce that is still
+    /// missing (see docs/LIGHTING.md 7.10).
+    #[test]
+    fn scenery_re_emits_by_its_own_normal_not_a_constant() {
+        let hm = flat_world();
+        let cache = BakeHeightCache::extract(&hm, -60.0, -60.0, 60.0, 60.0);
+        let config = quick_config();
+        let bvh = TriangleBvh::build(Vec::new());
+        let lighting = BakeLighting {
+            sun_dir: Vec3::Y,
+            sun_rgb: Vec3::splat(3.0),
+            ambient_rgb: Vec3::splat(0.3),
+            lights: Vec::new(),
+        };
+        let ctx = ProbeContext {
+            cache: &cache,
+            bvh: &bvh,
+            lighting: &lighting,
+            config: &config,
+            env_dirs: fibonacci_sphere(config.probe_rays as usize),
+            normals: fibonacci_sphere(FIT_NORMALS),
+        };
+
+        let p = Vec3::new(0.0, 5.0, 0.0);
+        // The same hit, seen as an upward face (the sun reaches it) and as a
+        // downward one (it does not). A constant cannot tell them apart.
+        let facing_sun = ctx.scenery_radiance(p, Vec3::X, 2.0, Vec3::Y);
+        let facing_away = ctx.scenery_radiance(p, Vec3::X, 2.0, Vec3::NEG_Y);
+        assert!(
+            facing_sun.length() > facing_away.length() * 2.0,
+            "a sunlit face must re-emit more than a shaded one: \
+             {facing_sun:?} vs {facing_away:?}"
+        );
+        // The shaded face still carries sky, scaled by the albedo.
+        let expected = lighting.ambient_rgb * config.scenery_albedo;
+        assert!((facing_away - expected).length() < 1e-5);
     }
 
     fn quick_config() -> BakeConfig {

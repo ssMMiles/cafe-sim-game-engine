@@ -193,6 +193,7 @@ pub fn bake_chunk(
                 config.bounce_rays,
                 config.shadow_steps,
                 config.terrain_albedo,
+                config.scenery_albedo,
                 config.bounce_count,
                 seed_offset,
             );
