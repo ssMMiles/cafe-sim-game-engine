@@ -1,7 +1,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
-    pbr::MaterialExtension,
+    pbr::{ExtendedMaterial, MaterialExtension},
     prelude::*,
     render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     shader::ShaderRef,
@@ -141,6 +141,10 @@ pub fn create_probe_volume_images(images: &mut Assets<Image>) -> ProbeVolumeImag
         c3: make(),
     }
 }
+
+/// The material every toon-shaded mesh renders with: bevy's PBR inputs for
+/// base colour and textures, the toon extension for how it is lit.
+pub type ToonMat = ExtendedMaterial<StandardMaterial, ToonMaterial>;
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct ToonMaterial {

@@ -15,6 +15,7 @@
 //! mirrors [`crate::delivery::handle_delivery_click`].
 
 use bevy::prelude::*;
+use engine_api::ToonMat;
 use rand::Rng;
 use std::collections::HashSet;
 
@@ -27,6 +28,7 @@ use crate::drinks::{brew_secs_for, price_for};
 use crate::grid::{CafeAnchor, step_along_floor};
 use crate::pause_menu::GamePaused;
 use crate::placement::CoffeeMachine;
+use crate::shading::probe_lit_in;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 use crate::staff::{Job, Staff};
 
@@ -55,7 +57,7 @@ const NOTICE_LIFETIME_SECS: f32 = 6.0;
 #[derive(Resource)]
 pub struct StaffAssets {
     pub mesh: Handle<Mesh>,
-    pub material: Handle<StandardMaterial>,
+    pub material: Handle<ToonMat>,
 }
 
 /// Names of staff who quit at the last close for lack of pay. Drained into a
@@ -111,19 +113,13 @@ pub struct StaffAgent {
 // Assets
 // ----------------------------------------------------------------------------
 
-/// Cache the green cube mesh + material once at plugin setup, mirroring
+/// Cache the green cube mesh + probe-lit material once at plugin setup, mirroring
 /// `init_customer_assets`.
 pub fn init_staff_assets(world: &mut World) {
     let mesh = world
         .resource_mut::<Assets<Mesh>>()
         .add(Cuboid::from_length(STAFF_SIZE));
-    let material = world
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.8, 0.3),
-            unlit: true,
-            ..default()
-        });
+    let material = probe_lit_in(world, Color::srgb(0.2, 0.8, 0.3));
     world.insert_resource(StaffAssets { mesh, material });
 }
 

@@ -16,7 +16,7 @@ pub use script::{
     ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
 };
 pub use toon_material::{
-    DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonShading, ToonSource,
+    DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonShading, ToonSource,
     create_default_toon_lightmap, create_probe_volume_images,
 };
 
@@ -43,7 +43,9 @@ pub use toon_material::{
 /// - 9: editor metadata on script schemas. `ScriptSchema::display_name` and
 ///   `PropDef { label, doc, range, speed }` — both structs cross the FFI
 ///   surface by value, so their layouts gate loading.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 9;
+/// - 10: [`ConvertToToon`] is shared, so a plugin's own glTF scenes can ask
+///   the host for the same toon conversion level objects get.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 10;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -338,12 +340,27 @@ impl BlobShadow {
     }
 }
 
+/// Ask the host to re-dress a glTF scene in toon materials once it has
+/// spawned: every sub-mesh's `StandardMaterial` becomes the base of an
+/// `ExtendedMaterial<StandardMaterial, ToonMaterial>`, colours and textures
+/// preserved, and the marker is removed. Put it on the `WorldAssetRoot`
+/// entity. Without [`DynamicLit`] the scene is treated as static level
+/// geometry and shades from a baked lightmap (white until one is applied);
+/// with it, from the probe volume at its own position — and then every
+/// instance of one glTF material shares one toon material, so identical
+/// pieces batch into one draw.
+///
+/// Plugins spawning scenes at runtime (furniture, props) want
+/// `(ConvertToToon, DynamicLit)`. A translucent preview cannot be toon
+/// (the extension forces opaque) — leave it on `StandardMaterial`.
+#[derive(Component, Debug, Default, Clone, Copy)]
+pub struct ConvertToToon;
+
 /// A scene root whose meshes move through the world and should be lit from
 /// the irradiance probe volume rather than a baked lightmap. Put it beside
-/// the host's `ConvertToToon` marker; the conversion then builds every
-/// sub-mesh's toon material with [`ToonSource::ProbeVolume`]. Plugins that
-/// build toon materials by hand pick the source directly in
-/// [`ToonMaterial::new`].
+/// [`ConvertToToon`]; the conversion then builds every sub-mesh's toon
+/// material with [`ToonSource::ProbeVolume`]. Plugins that build toon
+/// materials by hand pick the source directly in [`ToonMaterial::new`].
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub struct DynamicLit;
 

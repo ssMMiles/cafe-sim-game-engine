@@ -6,15 +6,13 @@
 //! materials (`ToonMaterial::new`) against the same `TypeId`s.
 
 pub use engine_api::toon_material::{
-    DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonShading, ToonSource,
+    DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonShading, ToonSource,
     create_default_toon_lightmap, create_probe_volume_images,
 };
 
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 
 use crate::game::world::terrain::storage::{EnvironmentData, TerrainWorld};
-
-pub type ToonMat = ExtendedMaterial<StandardMaterial, ToonMaterial>;
 
 /// The sun as probe-lit materials evaluate it: direction *toward* the sun
 /// and its radiance in lightmap units. Derived from the level's

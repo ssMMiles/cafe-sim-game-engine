@@ -803,3 +803,17 @@ join as `#[serde(default)]` fields.
   `on_scene_ready` are host-private and the observer is attached **per entity**
   (`spawn_interactable_scene`, the player, editor previews), so a plugin's
   `WorldAssetRoot` scene can't get converted today at all.
+- Implemented 2026-10-31 (`docs/PLUGIN_LIGHTING_PLAN.md` header has the as-built
+  summary). Decisions: ABI 10 yes, blob shadows no (also not on characters),
+  dedupe lightmapped conversions no. The trap found while doing it: once probe-lit
+  materials are shared, `sync_dynamic_lit_source` must **copy** the material
+  with the new `source` and rebind, never `get_mut` — a write in place flips
+  every sharer (test `toggling_dynamic_lit_rebinds_a_converted_scenes_source`
+  has a bystander for exactly this). cafe-sim's `PaintMaterial` grew a
+  `PaintShading { Pbr, ProbeLit }`: the ghost (alpha 0.55) and the thumbnail
+  rig (own light, private layer) must stay PBR — toon forces opaque, and a
+  probe-lit thumbnail at y=−5000-ish would sample an unbaked volume.
+- Bindless: `TEXTURE_BINDING_ARRAY`/`BUFFER_BINDING_ARRAY` are documented
+  "native only" in wgpu-types 27, so WebGPU never gets bevy's bindless path;
+  making `ToonMaterial` bindless would only merge draws on native and needs
+  the shader forked behind `@if(BINDLESS)` like `pbr_fragment.wesl`. Deferred.

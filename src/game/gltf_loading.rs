@@ -4,13 +4,14 @@ use crate::game::{
         DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonSource, ToonSun,
     },
 };
-pub use engine_api::DynamicLit;
+pub use engine_api::{ConvertToToon, DynamicLit};
 
 use super::gfx::camera::PlayerCamera;
 use bevy::{
     log,
     pbr::ExtendedMaterial,
     picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
+    platform::collections::HashMap,
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
@@ -24,11 +25,24 @@ pub struct PendingMaterial {
     pub alpha_mode: bevy::material::AlphaMode,
 }
 
-/// Converts GLTF-embedded StandardMaterials to toon materials on scene load,
-/// preserving each mesh's original base colour. Saved lightmaps are applied
-/// afterwards by `baking::object_lightmaps::apply_object_lightmaps`.
-#[derive(Component)]
-pub struct ConvertToToon;
+/// One probe-lit toon material per glTF material, shared by every dynamic
+/// scene that uses it.
+///
+/// A probe-lit material carries nothing per instance — the four volume
+/// textures are the same handles app-wide and the sun is written into every
+/// material alike — so two tables converted from one `Tabletop.glb` can
+/// render with one material, and bevy batches same-mesh-same-material into
+/// a single draw. Lightmapped conversions are *not* cached: each sub-mesh
+/// gets its own lightmap, which is a material property, so they stay one
+/// material per mesh entity (`object_lightmaps::unique_material` relies on
+/// it). Keyed by the source `StandardMaterial`'s id; `None` is "the mesh had
+/// no material".
+///
+/// Handles here are strong, so cached materials live for the session — a
+/// bounded set (one per glTF material ever converted dynamically), and it
+/// keeps a key from being re-used for a dead asset.
+#[derive(Resource, Default)]
+pub struct ProbeToonMaterials(HashMap<Option<AssetId<StandardMaterial>>, Handle<ToonMat>>);
 
 pub fn apply_material_to_meshes(
     commands: &mut Commands,
@@ -81,7 +95,8 @@ pub fn on_scene_ready(
     mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
     children_query: Query<&Children>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
-    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
+    mut toon_materials: ResMut<Assets<ToonMat>>,
+    mut shared: ResMut<ProbeToonMaterials>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
     probes: Res<ProbeVolumeImages>,
     sun: Res<ToonSun>,
@@ -163,63 +178,66 @@ pub fn on_scene_ready(
             m
         };
 
-        convert_to_toon_recursive(
+        let shared = (source == ToonSource::ProbeVolume).then_some(&mut *shared);
+        convert_to_toon(
             &mut commands,
             children,
             &mesh_query,
             &children_query,
             &std_materials,
             &mut toon_materials,
+            shared,
             &template,
         );
         commands.entity(entity).remove::<ConvertToToon>();
     }
 }
 
-fn convert_to_toon_recursive(
+/// Re-dress every mesh under `children` in a toon material built on its own
+/// `StandardMaterial` (so textures and colours survive) and `template`.
+/// With `shared`, instances of one source material reuse one toon material
+/// (see [`ProbeToonMaterials`]); without it each mesh entity gets its own.
+fn convert_to_toon(
     commands: &mut Commands,
     children: &Children,
     mesh_query: &Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
     children_query: &Query<&Children>,
     std_materials: &Assets<StandardMaterial>,
-    toon_materials: &mut Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>,
+    toon_materials: &mut Assets<ToonMat>,
+    mut shared: Option<&mut ProbeToonMaterials>,
     template: &ToonMaterial,
 ) {
-    for child in children.iter() {
-        if let Ok((entity, maybe_mat)) = mesh_query.get(child) {
-            // Clone the original GLTF material so textures and colours are preserved.
-            let base = maybe_mat
-                .and_then(|m| std_materials.get(&m.0))
-                .cloned()
-                .unwrap_or_default();
-
-            let handle = toon_materials.add(ExtendedMaterial {
-                base,
-                extension: template.clone(),
-            });
+    let mut stack: Vec<Entity> = children.iter().collect();
+    while let Some(entity) = stack.pop() {
+        if let Ok((entity, maybe_mat)) = mesh_query.get(entity) {
+            let build = |toon_materials: &mut Assets<ToonMat>| {
+                let base = maybe_mat
+                    .and_then(|m| std_materials.get(&m.0))
+                    .cloned()
+                    .unwrap_or_default();
+                toon_materials.add(ExtendedMaterial {
+                    base,
+                    extension: template.clone(),
+                })
+            };
+            let handle = match shared.as_deref_mut() {
+                Some(cache) => cache
+                    .0
+                    .entry(maybe_mat.map(|m| m.id()))
+                    .or_insert_with(|| build(toon_materials))
+                    .clone(),
+                None => build(toon_materials),
+            };
 
             commands
                 .entity(entity)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
                 .insert(MeshMaterial3d(handle));
         }
-
-        if let Ok(grandchildren) = children_query.get(child) {
-            convert_to_toon_recursive(
-                commands,
-                grandchildren,
-                mesh_query,
-                children_query,
-                std_materials,
-                toon_materials,
-                template,
-            );
+        if let Ok(grandchildren) = children_query.get(entity) {
+            stack.extend(grandchildren.iter());
         }
     }
-}
-
-pub fn spawn_interactable_scene<B: Bundle>(commands: &mut Commands, bundle: B) -> Entity {
-    commands.spawn(bundle).observe(on_scene_ready).id()
 }
 
 /// Keep converted scenes' material source in step with their [`DynamicLit`]
@@ -240,6 +258,7 @@ pub fn spawn_interactable_scene<B: Bundle>(commands: &mut Commands, bundle: B) -
 /// two frames — leaving that instance probe-lit until it respawns and the
 /// conversion reads the marker's absence.
 pub fn sync_dynamic_lit_source(
+    mut commands: Commands,
     added: Query<Entity, Added<DynamicLit>>,
     mut removed: RemovedComponents<DynamicLit>,
     children_query: Query<&Children>,
@@ -256,9 +275,13 @@ pub fn sync_dynamic_lit_source(
         let mut stack = vec![root];
         while let Some(entity) = stack.pop() {
             if let Ok(handle) = material_query.get(entity)
-                && let Some(mut mat) = materials.get_mut(&handle.0)
+                && let Some(mat) = materials.get(&handle.0)
+                && mat.extension.shading.source != source as u32
             {
-                mat.extension.shading.source = source as u32;
+                let mut copy = mat.clone();
+                copy.extension.shading.source = source as u32;
+                let copy = materials.add(copy);
+                commands.entity(entity).insert(MeshMaterial3d(copy));
             }
             if let Ok(children) = children_query.get(entity) {
                 stack.extend(children.iter());
@@ -464,55 +487,139 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
 
-    fn source_of(world: &World, handle: &Handle<ToonMat>) -> u32 {
+    fn source_of(world: &World, entity: Entity) -> u32 {
+        let handle = world.get::<MeshMaterial3d<ToonMat>>(entity).unwrap();
         world
             .resource::<Assets<ToonMat>>()
-            .get(handle)
+            .get(&handle.0)
             .unwrap()
             .extension
             .shading
             .source
     }
 
+    fn material_of(world: &World, entity: Entity) -> AssetId<ToonMat> {
+        world.get::<MeshMaterial3d<ToonMat>>(entity).unwrap().id()
+    }
+
     /// `on_scene_ready` picks the source exactly once, so a `DynamicLit`
     /// toggled afterwards (script hydration, inspector attach/detach,
     /// hot-reload) must be carried into the already-built materials by
-    /// `sync_dynamic_lit_source` — including on nested sub-meshes.
+    /// `sync_dynamic_lit_source` — including on nested sub-meshes — and
+    /// without touching a material another entity may share.
     #[test]
-    fn toggling_dynamic_lit_rewrites_a_converted_scenes_source() {
+    fn toggling_dynamic_lit_rebinds_a_converted_scenes_source() {
         let mut world = World::new();
         world.insert_resource(Assets::<ToonMat>::default());
-        let add_material = |world: &mut World| {
-            world
-                .resource_mut::<Assets<ToonMat>>()
-                .add(bevy::pbr::ExtendedMaterial {
-                    base: StandardMaterial::default(),
-                    extension: ToonMaterial::default(), // ToonSource::Lightmap
-                })
-        };
-        let child_mat = add_material(&mut world);
-        let nested_mat = add_material(&mut world);
+        let shared = world
+            .resource_mut::<Assets<ToonMat>>()
+            .add(ExtendedMaterial {
+                base: StandardMaterial::default(),
+                extension: ToonMaterial::default(), // ToonSource::Lightmap
+            });
 
         let root = world.spawn_empty().id();
-        let child = world.spawn(MeshMaterial3d(child_mat.clone())).id();
-        let nested = world.spawn(MeshMaterial3d(nested_mat.clone())).id();
+        let child = world.spawn(MeshMaterial3d(shared.clone())).id();
+        let nested = world.spawn(MeshMaterial3d(shared.clone())).id();
+        let bystander = world.spawn(MeshMaterial3d(shared.clone())).id();
         world.entity_mut(root).add_child(child);
         world.entity_mut(child).add_child(nested);
 
         world.entity_mut(root).insert(DynamicLit);
         world.run_system_once(sync_dynamic_lit_source).unwrap();
+        assert_eq!(source_of(&world, child), ToonSource::ProbeVolume as u32);
+        assert_eq!(source_of(&world, nested), ToonSource::ProbeVolume as u32);
         assert_eq!(
-            source_of(&world, &child_mat),
-            ToonSource::ProbeVolume as u32
+            source_of(&world, bystander),
+            ToonSource::Lightmap as u32,
+            "an entity outside the toggled scene kept the shared material's source"
         );
-        assert_eq!(
-            source_of(&world, &nested_mat),
-            ToonSource::ProbeVolume as u32
-        );
+        assert_eq!(material_of(&world, bystander), shared.id());
 
         world.entity_mut(root).remove::<DynamicLit>();
         world.run_system_once(sync_dynamic_lit_source).unwrap();
-        assert_eq!(source_of(&world, &child_mat), ToonSource::Lightmap as u32);
-        assert_eq!(source_of(&world, &nested_mat), ToonSource::Lightmap as u32);
+        assert_eq!(source_of(&world, child), ToonSource::Lightmap as u32);
+        assert_eq!(source_of(&world, nested), ToonSource::Lightmap as u32);
+    }
+
+    /// Two scenes converted from one glTF material end up on one toon
+    /// material when they are probe-lit (so they batch), and on their own
+    /// when they are lightmapped (each gets its own lightmap later).
+    #[test]
+    fn probe_lit_conversions_share_a_material_per_source_material() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<ToonMat>::default());
+        world.init_resource::<ProbeToonMaterials>();
+        let gltf_material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+
+        let spawn_scene = |world: &mut World| {
+            let root = world.spawn_empty().id();
+            let mesh = world
+                .spawn((
+                    Mesh3d(Handle::default()),
+                    MeshMaterial3d(gltf_material.clone()),
+                ))
+                .id();
+            world.entity_mut(root).add_child(mesh);
+            (root, mesh)
+        };
+        let (table_a, mesh_a) = spawn_scene(&mut world);
+        let (table_b, mesh_b) = spawn_scene(&mut world);
+        let (house_a, mesh_c) = spawn_scene(&mut world);
+        let (house_b, mesh_d) = spawn_scene(&mut world);
+
+        fn convert(
+            In((root, source)): In<(Entity, ToonSource)>,
+            mut commands: Commands,
+            children: Query<&Children>,
+            mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
+            std_materials: Res<Assets<StandardMaterial>>,
+            mut toon_materials: ResMut<Assets<ToonMat>>,
+            mut shared: ResMut<ProbeToonMaterials>,
+        ) {
+            let template = ToonMaterial::new(
+                source,
+                Handle::default(),
+                &ProbeVolumeImages {
+                    c0: Handle::default(),
+                    c1: Handle::default(),
+                    c2: Handle::default(),
+                    c3: Handle::default(),
+                },
+            );
+            let shared = (source == ToonSource::ProbeVolume).then_some(&mut *shared);
+            convert_to_toon(
+                &mut commands,
+                children.get(root).unwrap(),
+                &mesh_query,
+                &children,
+                &std_materials,
+                &mut toon_materials,
+                shared,
+                &template,
+            );
+        }
+        for (root, source) in [
+            (table_a, ToonSource::ProbeVolume),
+            (table_b, ToonSource::ProbeVolume),
+            (house_a, ToonSource::Lightmap),
+            (house_b, ToonSource::Lightmap),
+        ] {
+            world.run_system_once_with(convert, (root, source)).unwrap();
+        }
+
+        assert_eq!(material_of(&world, mesh_a), material_of(&world, mesh_b));
+        assert_eq!(world.resource::<ProbeToonMaterials>().0.len(), 1);
+        assert_ne!(material_of(&world, mesh_c), material_of(&world, mesh_d));
+        assert_ne!(material_of(&world, mesh_a), material_of(&world, mesh_c));
+        assert!(
+            world
+                .get::<MeshMaterial3d<StandardMaterial>>(mesh_a)
+                .is_none(),
+            "the glTF material binding is replaced, not shadowed"
+        );
     }
 }

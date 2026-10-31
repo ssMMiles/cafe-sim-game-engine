@@ -27,6 +27,7 @@ mod menus;
 mod pause_menu;
 mod placement;
 mod saves;
+mod shading;
 mod shop;
 mod shop_overview;
 mod slot_picker;
@@ -69,6 +70,7 @@ use placement::{
     handle_place_click, manage_placement_hint, sync_preview, update_preview_transform,
 };
 use saves::SlotMetadataCache;
+use shading::ProbeLitColors;
 use shop::{handle_card_click, sync_shop_ui, toggle_shop};
 use shop_overview::{
     ShopNameEditing, ShopState, apply_shop_name_keystrokes, build_shop_overview,
@@ -140,6 +142,7 @@ impl DynamicPlugin for CafeSimPlugin {
         world.insert_resource(AssignJobOpenFor::default());
         world.insert_resource(PayrollNotice::default());
         world.init_resource::<CafeAnchor>();
+        world.init_resource::<ProbeLitColors>();
 
         // Start every load with the pause flag cleared — stale `true` from a
         // prior session would pop the menu open the instant the plugin runs.

@@ -8,7 +8,7 @@
 //! timer elapses the counter cube despawns and the customer walks out (+Z).
 
 use bevy::prelude::*;
-use engine_api::PlayerCamera;
+use engine_api::{PlayerCamera, ToonMat};
 
 use crate::balance::{Balance, spawn_balance_popup};
 use crate::coffee_menu::Brewing;
@@ -18,6 +18,7 @@ use crate::grid::CafeAnchor;
 use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
 use crate::placement::{CoffeeMachine, Countertop, GarbageCan, PlacedCell, PlacementSelection};
+use crate::shading::probe_lit_in;
 use crate::spawn::SpawnOwnedCommands;
 
 const HAND_OFFSET: Vec3 = Vec3::new(0.25, -0.2, -0.5);
@@ -33,7 +34,7 @@ const SERVED_HOLD_SECS_WRONG: f32 = 1.0;
 #[derive(Resource)]
 pub struct DeliveryAssets {
     pub mesh: Handle<Mesh>,
-    pub material: Handle<StandardMaterial>,
+    pub material: Handle<ToonMat>,
 }
 
 #[derive(Resource, Default)]
@@ -60,13 +61,7 @@ pub fn init_delivery_assets(world: &mut World) {
     let mesh = world
         .resource_mut::<Assets<Mesh>>()
         .add(Cuboid::from_length(1.0));
-    let material = world
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.2),
-            unlit: true,
-            ..default()
-        });
+    let material = probe_lit_in(world, Color::srgb(1.0, 0.85, 0.2));
     world.insert_resource(DeliveryAssets { mesh, material });
 }
 

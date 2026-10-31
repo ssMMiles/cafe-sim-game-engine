@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::catalog::CATALOG;
 use crate::grid::PIECE_SCALE;
-use crate::placement::PaintMaterial;
+use crate::placement::{PaintMaterial, PaintShading};
 use crate::spawn::SpawnOwnedWorld;
 
 const THUMB_SIZE: u32 = 256;
@@ -101,7 +101,7 @@ pub fn init_thumbnails(world: &mut World) {
             thumb.insert(PaintMaterial {
                 color: piece.color(),
                 alpha: 1.0,
-                unlit: false,
+                shading: PaintShading::Pbr,
             });
         }
 

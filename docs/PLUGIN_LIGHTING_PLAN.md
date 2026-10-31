@@ -1,8 +1,26 @@
 # Lighting plugin-spawned objects — investigation
 
-Status: **investigation, 2026-10-30.** Nothing below is implemented. §5 lists
-the decisions needed. Every claim about bevy was checked against the 0.20.0
-sources in the cargo registry, every claim about the engine against this tree.
+Status: **implemented, 2026-10-31**, as §4 steps 1–3 with the §5 decisions
+taken as: (1) yes — `ConvertToToon` is in engine-api (ABI 10), `on_scene_ready`
+is one global observer, and probe-lit conversions share one `ToonMat` per glTF
+material (`gltf_loading::ProbeToonMaterials`); (2) no blob shadows under
+furniture, and none added to characters either; (3) no — lightmapped
+conversions stay one material per mesh. cafe-sim's side is `shading.rs`
+(one shared probe-lit material per colour for cubes and tinted pieces) and
+`(ConvertToToon, DynamicLit)` on untinted pieces; the ghost preview and the
+shop thumbnails stay PBR. §3.4 A and §3.5 are open as described. The text
+below is the investigation as written; every claim about bevy was checked
+against the 0.20.0 sources in the cargo registry.
+
+Bindless, asked afterwards: `#[bindless]` on `ToonMaterial` would let
+*different* toon materials (e.g. per-sub-mesh lightmaps) share a draw, but
+only on native — `TEXTURE_BINDING_ARRAY` et al. are "native only" wgpu
+features, so WebGPU falls back to the non-bindless path regardless, and that
+is the platform where draw count matters most. It also needs the shader
+forked behind `@if(BINDLESS)` for every binding (material array indexed by
+slot, lightmap and probe textures through binding arrays), matching
+`pbr_fragment.wesl`. Not done; revisit if a native profile shows the
+per-sub-mesh draws of *level* objects as a cost.
 
 Background: `docs/DYNAMIC_LIGHTING_PLAN.md` §8 (the probe volume as built),
 `docs/LIGHTING.md` (the baked system), `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md`

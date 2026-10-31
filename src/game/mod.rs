@@ -27,7 +27,8 @@ use animation::{
     update_character_animation,
 };
 use gltf_loading::{
-    InteractableClicked, check_interactions, detect_interactable_clicks, sync_dynamic_lit_source,
+    InteractableClicked, ProbeToonMaterials, check_interactions, detect_interactable_clicks,
+    on_scene_ready, sync_dynamic_lit_source,
 };
 use physics::character_physics;
 use simulation::{Player, exit, setup};
@@ -165,6 +166,12 @@ impl Plugin for SimulationPlugin {
                 .in_set(SimSet::Running),
         );
         app.add_systems(Update, init_animation_player.in_set(SimSet::InGame));
+        // One observer for every readied scene instance, the host's and the
+        // plugins' alike: it reacts to the markers on the root
+        // (`Interactable`, `PendingMaterial`, `ConvertToToon`) and ignores
+        // roots without any, such as editor thumbnails.
+        app.init_resource::<ProbeToonMaterials>();
+        app.add_observer(on_scene_ready);
         // `on_scene_ready` picks a scene's lighting source once; while
         // authoring, `DynamicLit` also toggles after the fact (script
         // hydration, inspector attach/detach, hot-reload), so the editor

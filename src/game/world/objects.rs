@@ -32,7 +32,7 @@ use engine_api::{AutoCollider, ScriptBinding, ScriptBindings};
 
 use crate::game::{
     GameEntity,
-    gltf_loading::{ConvertToToon, Interactable, spawn_interactable_scene},
+    gltf_loading::{ConvertToToon, Interactable},
     world::terrain::storage::StorageError,
 };
 
@@ -687,9 +687,8 @@ fn spawn_single_record(
             collider,
         } => {
             let handle: Handle<WorldAsset> = asset_server.load(asset_path);
-            let entity = spawn_interactable_scene(
-                commands,
-                (
+            let entity = commands
+                .spawn((
                     GameEntity,
                     placed,
                     Interactable {
@@ -706,8 +705,8 @@ fn spawn_single_record(
                     transform,
                     GlobalTransform::default(),
                     Visibility::Inherited,
-                ),
-            );
+                ))
+                .id();
             if *collider == ColliderMode::Trimesh {
                 commands.entity(entity).insert((
                     RigidBody::Static,

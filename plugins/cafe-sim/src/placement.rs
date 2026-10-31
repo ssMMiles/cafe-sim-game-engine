@@ -1,10 +1,14 @@
 use bevy::prelude::*;
-use engine_api::{AutoCollider, PlayerCamera};
+use engine_api::{
+    AutoCollider, ConvertToToon, DefaultToonLightmap, DynamicLit, PlayerCamera, ProbeVolumeImages,
+    ToonMat,
+};
 use std::collections::HashMap;
 
 use crate::catalog::{PieceDef, PieceKind};
 use crate::grid::{CafeAnchor, PIECE_SCALE};
 use crate::menus::ActiveMenu;
+use crate::shading::{ProbeLitColors, probe_lit};
 use crate::spawn::SpawnOwnedCommands;
 
 /// Currently selected piece for placement.
@@ -48,12 +52,25 @@ pub struct PlacementPreview;
 
 /// Queues a one-shot material override on every mesh descendant of this entity
 /// once the scene has finished spawning. Used to tint pieces by their catalog
-/// color for both the translucent placement preview and the placed instance.
+/// color for the translucent placement preview, the shop thumbnails and the
+/// placed instance.
 #[derive(Component)]
 pub struct PaintMaterial {
     pub color: Color,
     pub alpha: f32,
-    pub unlit: bool,
+    pub shading: PaintShading,
+}
+
+/// How a tinted piece is lit. See [`crate::shading`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PaintShading {
+    /// Bevy's PBR under the engine's sun and ambient — for the placement
+    /// ghost (toon can't be translucent) and the thumbnail rig, which has
+    /// its own light.
+    Pbr,
+    /// The toon shading the level uses, lit from the probe volume where the
+    /// piece stands. Opaque only; `alpha` is ignored.
+    ProbeLit,
 }
 
 #[derive(Component)]
@@ -109,7 +126,7 @@ pub fn sync_preview(
             preview.insert(PaintMaterial {
                 color: piece.color(),
                 alpha: 0.55,
-                unlit: false,
+                shading: PaintShading::Pbr,
             });
         }
         preview_entity.0 = Some(preview.id());
@@ -121,6 +138,10 @@ pub fn sync_preview(
 pub fn apply_paint_when_loaded(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut toon_materials: ResMut<Assets<ToonMat>>,
+    mut colors: ResMut<ProbeLitColors>,
+    lightmap: Res<DefaultToonLightmap>,
+    probes: Res<ProbeVolumeImages>,
     needs_q: Query<(Entity, &PaintMaterial)>,
     children_q: Query<&Children>,
     mesh_q: Query<(), With<Mesh3d>>,
@@ -142,22 +163,38 @@ pub fn apply_paint_when_loaded(
             continue;
         }
 
-        let srgba = paint.color.to_srgba();
-        let alpha_mode = if paint.alpha < 1.0 {
-            AlphaMode::Blend
-        } else {
-            AlphaMode::Opaque
-        };
-        let tinted = materials.add(StandardMaterial {
-            base_color: Color::srgba(srgba.red, srgba.green, srgba.blue, paint.alpha),
-            alpha_mode,
-            unlit: paint.unlit,
-            ..default()
-        });
-
-        for &e in &descendants {
-            if mesh_q.contains(e) {
-                commands.entity(e).insert(MeshMaterial3d(tinted.clone()));
+        let meshes = descendants.iter().copied().filter(|&e| mesh_q.contains(e));
+        match paint.shading {
+            PaintShading::Pbr => {
+                let srgba = paint.color.to_srgba();
+                let alpha_mode = if paint.alpha < 1.0 {
+                    AlphaMode::Blend
+                } else {
+                    AlphaMode::Opaque
+                };
+                let tinted = materials.add(StandardMaterial {
+                    base_color: Color::srgba(srgba.red, srgba.green, srgba.blue, paint.alpha),
+                    alpha_mode,
+                    ..default()
+                });
+                for e in meshes {
+                    commands.entity(e).insert(MeshMaterial3d(tinted.clone()));
+                }
+            }
+            PaintShading::ProbeLit => {
+                let tinted = probe_lit(
+                    paint.color,
+                    &mut colors,
+                    &mut toon_materials,
+                    &lightmap,
+                    &probes,
+                );
+                for e in meshes {
+                    commands
+                        .entity(e)
+                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .insert(MeshMaterial3d(tinted.clone()));
+                }
             }
         }
 
@@ -279,12 +316,18 @@ pub fn spawn_piece(
             piece_idx: indices.1,
         },
     ));
+    // Lit like the room it stands in, from the probe volume (see
+    // `shading`). A tinted piece gets its colour's shared toon material
+    // once its meshes exist; an untinted one keeps its glTF materials and
+    // asks the host to convert them.
     if piece.tint {
         placed.insert(PaintMaterial {
             color: piece.color(),
             alpha: 1.0,
-            unlit: false,
+            shading: PaintShading::ProbeLit,
         });
+    } else {
+        placed.insert((ConvertToToon, DynamicLit));
     }
     match piece.kind {
         PieceKind::Countertop => {

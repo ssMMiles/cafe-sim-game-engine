@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use engine_api::PlayerCamera;
+use engine_api::{PlayerCamera, ToonMat};
 use rand::seq::SliceRandom;
 use std::collections::HashSet;
 
@@ -17,6 +17,7 @@ use crate::drinks::DRINKS;
 use crate::grid::{CafeAnchor, step_along_floor};
 use crate::pause_menu::GamePaused;
 use crate::placement::{CoffeeMachine, Countertop, GridOccupancy, PlacedCell};
+use crate::shading::probe_lit_in;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 
 const MAX_CUSTOMERS: usize = 3;
@@ -33,7 +34,7 @@ const POPUP_FONT_SIZE: f32 = 16.0;
 #[derive(Resource)]
 pub struct CustomerAssets {
     pub mesh: Handle<Mesh>,
-    pub material: Handle<StandardMaterial>,
+    pub material: Handle<ToonMat>,
 }
 
 #[derive(Resource, Default)]
@@ -110,19 +111,13 @@ pub struct CustomerPopup {
     pub customer: Entity,
 }
 
-/// Build the cached cube mesh + red unlit material once at plugin setup so the
-/// spawn system doesn't re-add identical assets every customer.
+/// Build the cached cube mesh + red probe-lit material once at plugin setup
+/// so the spawn system doesn't re-add identical assets every customer.
 pub fn init_customer_assets(world: &mut World) {
     let mesh = world
         .resource_mut::<Assets<Mesh>>()
         .add(Cuboid::from_length(CUSTOMER_SIZE));
-    let material = world
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.2, 0.2),
-            unlit: true,
-            ..default()
-        });
+    let material = probe_lit_in(world, Color::srgb(1.0, 0.2, 0.2));
     world.insert_resource(CustomerAssets { mesh, material });
 }
 

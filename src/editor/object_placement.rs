@@ -17,7 +17,7 @@ use crate::editor::input::{ScrollMod, scroll_modifier, scroll_notches};
 use crate::editor::picking::{EditorRay, ViewportInput};
 use crate::editor::selection::Selection;
 use crate::game::GameEntity;
-use crate::game::gltf_loading::{PendingMaterial, spawn_interactable_scene};
+use crate::game::gltf_loading::PendingMaterial;
 use crate::game::world::objects::{
     PlacedEntityRecord, PlacedKind, PlacedObjectRegistry, PlacementConfig, spawn_entity_record,
     world_pos_to_chunk,
@@ -163,23 +163,20 @@ pub fn setup_placement_preview(
                 continue;
             };
             let scene: Handle<WorldAsset> = asset_server.load(asset_path);
-            spawn_interactable_scene(
-                &mut commands,
-                (
-                    GameEntity,
-                    ChildOf(root),
-                    WorldAssetRoot(scene),
-                    entity_def.transform(),
-                    GlobalTransform::default(),
-                    Visibility::Inherited,
-                    PendingMaterial {
-                        base_color: Color::srgba(0.8, 0.8, 0.8, 0.4),
-                        metallic: 0.0,
-                        perceptual_roughness: 0.9,
-                        alpha_mode: AlphaMode::Blend,
-                    },
-                ),
-            );
+            commands.spawn((
+                GameEntity,
+                ChildOf(root),
+                WorldAssetRoot(scene),
+                entity_def.transform(),
+                GlobalTransform::default(),
+                Visibility::Inherited,
+                PendingMaterial {
+                    base_color: Color::srgba(0.8, 0.8, 0.8, 0.4),
+                    metallic: 0.0,
+                    perceptual_roughness: 0.9,
+                    alpha_mode: AlphaMode::Blend,
+                },
+            ));
         }
         preview_entity.0 = Some(root);
         log::info!("Placement preview entity created (prefab '{}')", def.name);
@@ -189,9 +186,8 @@ pub fn setup_placement_preview(
     let entity = match &config.kind {
         PlacedKind::Mesh { asset_path, .. } => {
             let scene: Handle<WorldAsset> = asset_server.load(asset_path);
-            spawn_interactable_scene(
-                &mut commands,
-                (
+            commands
+                .spawn((
                     GameEntity,
                     PlacementPreview,
                     WorldAssetRoot(scene),
@@ -204,8 +200,8 @@ pub fn setup_placement_preview(
                         perceptual_roughness: 0.9,
                         alpha_mode: AlphaMode::Blend,
                     },
-                ),
-            )
+                ))
+                .id()
         }
         // No mesh to show; `draw_preview_gizmo` renders these.
         _ => commands
