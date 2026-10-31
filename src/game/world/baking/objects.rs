@@ -571,6 +571,7 @@ fn shade_geometry(
                 config.ao_radius,
                 config.ao_rays,
                 config.ao_steps,
+                idx as u32,
             );
             let bounce = raycast::compute_indirect_bounce(
                 origin,

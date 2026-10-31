@@ -480,6 +480,75 @@ light count.
   `toon_band`'s `clamp(value, 0, 1)`. Worth knowing before tuning intensities:
   the lightmap keeps the detail, the shader discards it.
 
+### 7.9 AO used the same hemisphere directions at every texel
+
+**Fixed 2026-10-31** (lightmap format v9). `compute_ao` called
+`hemisphere_dir_for_seed(..., azimuth_offset = 0.0)` in all three bakers,
+while `compute_indirect_bounce` right beside it rotated the set by a
+per-texel hash — the comment there ("so neighbours don't share correlated
+ray directions") names the exact problem AO still had. In `terrain.rs` the
+seed was even computed one line *below* the AO call it should have fed.
+
+Sixteen fixed directions are not a noisy estimate, they are a deterministic
+quadrature: its error is a smooth function of position, so the bake's blur
+leaves it almost untouched, and what survives follows the sample directions
+rather than the geometry. Measured on a 20 x 12 x 3 room with a doorway,
+against a 512-ray reference, both fields blurred with the bake's radius-4
+box:
+
+| sample set | mean error | max error |
+|---|---|---|
+| fixed (as shipped through v8) | 0.0159 | 0.0496 (8% of the field's range) |
+| rotated per texel | 0.0028 | 0.0137 (2%) |
+
+A roughness metric does not see this — both are perfectly smooth after the
+blur. Only comparison against a reference does. `ao_sample_rotation_survives_the_bake_blur`
+guards it. The seed is the world-texel hash both other terms already use,
+so the chunk-seam invariant (§5) is unaffected.
+
+### 7.10 Enclosed interiors receive only `ambient x ao`, and land on a band boundary
+
+**Open.** Only *terrain* re-emits indirect bounce (`compute_indirect_bounce`
+accumulates at terrain hits; scenery absorbs). Inside a closed building every
+bounce ray hits the building, so an interior gets no indirect light at all,
+the sun is correctly blocked, and the shading reduces to `ambient_rgb x ao`
+plus whatever placed lights are inside.
+
+Measured AO on the floor of a 3 m-high room is ~0.22, rising to ~0.34 at a
+doorway. The cafe's own baked lightmaps (v8, five sub-meshes) came out:
+
+| sub-mesh | p05 | p50 | p95 | max | band split at 0.2 |
+|---|---|---|---|---|---|
+| floor | 0.102 | 0.193 | 0.288 | 0.303 | 59% / 41% |
+| walls | 0.003 | 0.069–0.185 | 0.32–0.50 | 0.32–0.52 | 67/33 … 50/33/17 |
+
+`toon_band` splits the **input** at 0.2/0.4/0.6/0.8 (the output is then
+remapped to `[TOON_FLOOR, 1]`, which is where 0.18/0.34/0.51/… come from —
+easy to confuse). The floor's median is 0.193, i.e. **0.007 from the first
+boundary**, so the band contour wanders across the whole floor driven by
+whatever small variation exists rather than by any lighting feature. That is
+what reads as "curves and outcrops that don't make sense": not shadows, but
+the iso-line of a nearly flat, nearly unlit field. §7.9 was supplying a good
+part of that variation; removing it makes the contour follow real geometry,
+but does not make the interior *lit*.
+
+Options, cheapest first:
+
+1. **Place lights inside.** Local lights are baked and do reach interior
+   surfaces; this is the authoring answer and needs no engine change.
+2. **Let scenery re-emit bounce**, not just terrain. Physically the right
+   fix — sunlight through the doorway would fill the room — and the one that
+   makes interiors work without hand-placed lights. Costs another material
+   lookup per bounce hit and makes the object bake materially slower (it is
+   CPU on every platform, single-threaded on wasm).
+3. **Tune `ambient_intensity` per world** so interiors sit mid-band rather
+   than astride a boundary. Helps the symptom, blows out exteriors — this is
+   the open half of §7.1.
+
+`LightmapBuffer::dump_lightmap` (ignored test, `LIGHTMAP=<path> cargo test
+dump_lightmap -- --ignored --nocapture`, `BANDS=1` / `CROP=x,y,w`) is how the
+numbers above were read off a real bake.
+
 ---
 
 ## 8. Suggested order of work
@@ -491,6 +560,9 @@ light count.
    it.
 2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
 3. §7.5 object ray origin — needs a repro case first.
+3b. ~~§7.9 AO sample rotation~~ — **done** (v9). §7.10 interior lighting is
+   the open one: decide between placing lights and making scenery re-emit
+   bounce.
 4. ~~§7.3 AO weighting~~ — **done** (v7). ~~§7.4 object bounce~~ — **done**
    (v8). Re-bake (Shift+B) to see either.
 5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`

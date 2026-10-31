@@ -817,3 +817,30 @@ join as `#[serde(default)]` fields.
   "native only" in wgpu-types 27, so WebGPU never gets bevy's bindless path;
   making `ToonMaterial` bindless would only merge draws on native and needs
   the shader forked behind `@if(BINDLESS)` like `pbr_fragment.wesl`. Deferred.
+
+## Why the cafe interior's baked shadows looked like nonsense — 31 October 2026
+
+Diagnosed from the user's own bake, not from reading code: dump the EXRs with
+the `dump_lightmap` ignored test (`LIGHTMAP=<path> ... -- --ignored
+--nocapture`, plus `BANDS=1` / `CROP=x,y,w`). Two separate causes, and the
+second is the bigger one:
+
+- **`compute_ao` never rotated its hemisphere sample set** (fixed, lightmap
+  v9). `compute_indirect_bounce` did, and in `terrain.rs` the seed was even
+  computed one line *below* the AO call. A fixed 16-direction set is a
+  quadrature, not noise: its error is smooth in position so the bake's blur
+  cannot remove it. Measured against a 512-ray reference, blurred: mean error
+  0.0159 fixed vs 0.0028 rotated. **A roughness metric shows nothing** — both
+  are smooth after blurring — which is how I first talked myself out of the
+  fix. Only an accuracy comparison against a reference catches it.
+- **Interiors get `ambient × ao` and nothing else**: only terrain re-emits
+  bounce, so inside a closed shell every bounce ray is absorbed. AO on a 3 m
+  room's floor is ~0.22. The cafe floor's baked median was 0.193 and
+  `toon_band` splits its **input** at 0.2/0.4/0.6/0.8 — so the first band
+  boundary ran straight through the middle of the floor and its contour
+  wandered on sampling bias. Not shadows: the iso-line of a flat, unlit field.
+  Open; see LIGHTING.md §7.10.
+- Gotcha worth keeping: the toon band numbers quoted everywhere (0.18, 0.34,
+  0.51, 0.67, 0.84) are the **output** levels after remapping to
+  `[TOON_FLOOR, 1]`. The thresholds a lightmap value is compared against are
+  plain fifths: 0.2, 0.4, 0.6, 0.8.

@@ -167,6 +167,10 @@ pub fn bake_chunk(
             let gy = i / cg;
             let (origin, mesh_origin, normal) = surface_at((gx * step) as f32, (gy * step) as f32);
 
+            // Per-sample seed rotating hemisphere azimuths so neighbours
+            // don't share correlated ray directions → no stripes.
+            let seed_offset = grid.texel_seed(chunk_x, chunk_y, gx * step, gy * step);
+
             let ao = raycast::compute_ao(
                 origin,
                 mesh_origin,
@@ -176,11 +180,8 @@ pub fn bake_chunk(
                 config.ao_radius,
                 config.ao_rays,
                 config.ao_steps,
+                seed_offset,
             );
-
-            // Per-sample seed rotating hemisphere azimuths so neighbours
-            // don't share correlated ray directions → no stripes.
-            let seed_offset = grid.texel_seed(chunk_x, chunk_y, gx * step, gy * step);
             let bounce = raycast::compute_indirect_bounce(
                 origin,
                 mesh_origin,

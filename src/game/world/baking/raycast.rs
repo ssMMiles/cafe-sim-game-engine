@@ -290,11 +290,21 @@ pub fn compute_ao(
     radius: f32,
     n_rays: u32,
     steps: u32,
+    seed_offset: u32,
 ) -> f32 {
     if n_rays == 0 {
         return 1.0;
     }
 
+    // Rotate the sample set by a per-texel azimuth, exactly as
+    // `compute_indirect_bounce` does. Without it every texel sharing a
+    // normal marches the *same* `n_rays` directions, so the estimate is not
+    // noisy but structured: it steps by ~1/n_rays wherever one of those
+    // fixed directions crosses an occluder's silhouette, tracing curves
+    // across the surface that follow the sample pattern rather than the
+    // geometry. The toon quantiser then draws them. Decorrelating turns
+    // that structure into white noise, which the blur averages away.
+    let azimuth_offset = float01(hash_u32(seed_offset)) * std::f32::consts::TAU;
     let (tangent, bitangent) = build_tangent_frame(normal);
     let step_size = radius / steps as f32;
     let mut visibility = 0.0_f32;
@@ -305,7 +315,7 @@ pub fn compute_ao(
         // check is needed; one here used to silently count such a ray as
         // occluded.
         let (world_dir, _cos_w) =
-            hemisphere_dir_for_seed(i, n_rays, normal, tangent, bitangent, 0.0);
+            hemisphere_dir_for_seed(i, n_rays, normal, tangent, bitangent, azimuth_offset);
 
         // Nearest terrain hit. Hemisphere rays point up by construction, so
         // the early-out fires often: on gentle terrain most rays clear the
@@ -539,6 +549,141 @@ fn hemisphere_dir_for_seed(
 }
 
 #[cfg(test)]
+mod ao_sampling {
+    use super::*;
+    use crate::game::world::terrain::HeightmapData;
+
+    /// A room with a doorway: the case where AO carries all the shading,
+    /// because the sun is blocked and only terrain re-emits bounce.
+    fn room() -> TriangleBvh {
+        let (hx, hz, h) = (10.0f32, 6.0f32, 3.0f32);
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        let mut quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| {
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        };
+        quad(
+            Vec3::new(-hx, h, -hz),
+            Vec3::new(hx, h, -hz),
+            Vec3::new(hx, h, hz),
+            Vec3::new(-hx, h, hz),
+        );
+        quad(
+            Vec3::new(-hx, 0.0, -hz),
+            Vec3::new(hx, 0.0, -hz),
+            Vec3::new(hx, h, -hz),
+            Vec3::new(-hx, h, -hz),
+        );
+        quad(
+            Vec3::new(-hx, 0.0, -hz),
+            Vec3::new(-hx, 0.0, hz),
+            Vec3::new(-hx, h, hz),
+            Vec3::new(-hx, h, -hz),
+        );
+        quad(
+            Vec3::new(hx, 0.0, -hz),
+            Vec3::new(hx, 0.0, hz),
+            Vec3::new(hx, h, hz),
+            Vec3::new(hx, h, -hz),
+        );
+        quad(
+            Vec3::new(-hx, 0.0, hz),
+            Vec3::new(-0.75, 0.0, hz),
+            Vec3::new(-0.75, h, hz),
+            Vec3::new(-hx, h, hz),
+        );
+        quad(
+            Vec3::new(0.75, 0.0, hz),
+            Vec3::new(hx, 0.0, hz),
+            Vec3::new(hx, h, hz),
+            Vec3::new(0.75, h, hz),
+        );
+        TriangleBvh::build(tris)
+    }
+
+    fn ground() -> BakeHeightCache {
+        let mut hm = HeightmapData::new((0.25, 0.25));
+        for tx in -200..200 {
+            for tz in -200..200 {
+                hm.set_tile(tx, tz, 0.0);
+            }
+        }
+        BakeHeightCache::extract(&hm, -40.0, -40.0, 40.0, 40.0)
+    }
+
+    /// Box-blur a square field, standing in for the bake's own blur pass.
+    fn blur(field: &[f32], n: usize, r: usize) -> Vec<f32> {
+        let mut out = vec![0.0; field.len()];
+        for y in 0..n {
+            for x in 0..n {
+                let (mut sum, mut cnt) = (0.0, 0);
+                for yy in y.saturating_sub(r)..(y + r + 1).min(n) {
+                    for xx in x.saturating_sub(r)..(x + r + 1).min(n) {
+                        sum += field[yy * n + xx];
+                        cnt += 1;
+                    }
+                }
+                out[y * n + x] = sum / cnt as f32;
+            }
+        }
+        out
+    }
+
+    /// AO must rotate its sample set per texel, or the blur cannot clean up
+    /// after it.
+    ///
+    /// Sixteen *fixed* directions are a deterministic quadrature: its error
+    /// is a smooth function of position, so blurring 81 neighbours leaves it
+    /// almost untouched, and what survives is a pattern that follows the
+    /// sample directions rather than the geometry. Indoors — where the sun
+    /// is blocked and only terrain re-emits bounce, so `ambient x ao` is the
+    /// whole of the shading — that bias is comparable to the entire spread
+    /// of the field, and the toon quantiser draws its contour wherever the
+    /// bias puts it. Decorrelating makes the error zero-mean so the blur
+    /// averages it away.
+    ///
+    /// Measured against a 512-ray reference: ~6x less mean error.
+    #[test]
+    fn ao_sample_rotation_survives_the_bake_blur() {
+        let bvh = room();
+        let cache = ground();
+        let n = 20usize;
+        let d = 1.0 / 11.0;
+        let (x0, z0) = (-3.0f32, 1.5f32);
+
+        let mut reference = vec![0.0; n * n];
+        let mut fixed = vec![0.0; n * n];
+        let mut rotated = vec![0.0; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                let o = Vec3::new(x0 + i as f32 * d, 0.02, z0 + j as f32 * d);
+                let seed = (j * n + i) as u32;
+                reference[j * n + i] = compute_ao(o, o, Vec3::Y, &cache, &bvh, 20.0, 512, 32, seed);
+                // What the bake did before: the same 16 directions everywhere.
+                fixed[j * n + i] = compute_ao(o, o, Vec3::Y, &cache, &bvh, 20.0, 16, 32, 0);
+                rotated[j * n + i] = compute_ao(o, o, Vec3::Y, &cache, &bvh, 20.0, 16, 32, seed);
+            }
+        }
+
+        let blurred_reference = blur(&reference, n, 4);
+        let mean_error = |f: &[f32]| {
+            let b = blur(f, n, 4);
+            b.iter()
+                .zip(&blurred_reference)
+                .map(|(a, r)| (a - r).abs())
+                .sum::<f32>()
+                / b.len() as f32
+        };
+        let (fixed_err, rotated_err) = (mean_error(&fixed), mean_error(&rotated));
+        assert!(
+            rotated_err * 2.0 < fixed_err,
+            "rotating the sample set should more than halve the blurred AO \
+             error, got {rotated_err:.5} vs {fixed_err:.5}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::world::terrain::HeightmapData;
@@ -579,7 +724,7 @@ mod tests {
         let mesh_origin = Vec3::new(0.0, 0.02, 0.0);
         let radius = 20.0;
         let ao = |bvh: &TriangleBvh| {
-            compute_ao(origin, mesh_origin, Vec3::Y, &cache, bvh, radius, 16, 32)
+            compute_ao(origin, mesh_origin, Vec3::Y, &cache, bvh, radius, 16, 32, 0)
         };
 
         let open = ao(&TriangleBvh::build(Vec::new()));
@@ -627,7 +772,17 @@ mod tests {
         let radius = 20.0;
 
         let empty = TriangleBvh::build(Vec::new());
-        let cliff_only = compute_ao(origin, mesh_origin, Vec3::Y, &cache, &empty, radius, 16, 32);
+        let cliff_only = compute_ao(
+            origin,
+            mesh_origin,
+            Vec3::Y,
+            &cache,
+            &empty,
+            radius,
+            16,
+            32,
+            0,
+        );
         assert!(cliff_only < 1.0 && cliff_only > 0.3, "{cliff_only}");
 
         // A ceiling nearer than the cliff lowers it further; one farther
@@ -641,6 +796,7 @@ mod tests {
             radius,
             16,
             32,
+            0,
         );
         assert!(with_near < cliff_only, "{with_near} vs {cliff_only}");
     }
@@ -734,7 +890,7 @@ mod cost {
 
         let t = Instant::now();
         for &(o, mo, n) in &pts {
-            sink += compute_ao(o, mo, n, &cache, &bvh, ao_radius, ao_rays, ao_steps);
+            sink += compute_ao(o, mo, n, &cache, &bvh, ao_radius, ao_rays, ao_steps, 0);
         }
         let ao = t.elapsed();
 
@@ -742,7 +898,7 @@ mod cost {
         let empty = TriangleBvh::build(Vec::new());
         let t = Instant::now();
         for &(o, mo, n) in &pts {
-            sink += compute_ao(o, mo, n, &cache, &empty, ao_radius, ao_rays, ao_steps);
+            sink += compute_ao(o, mo, n, &cache, &empty, ao_radius, ao_rays, ao_steps, 0);
         }
         let ao_no_bvh = t.elapsed();
 

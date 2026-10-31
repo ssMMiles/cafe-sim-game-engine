@@ -46,7 +46,12 @@ use crate::game::world::terrain::storage::EnvironmentData;
 /// - v8: object texels receive indirect terrain bounce, as terrain texels
 ///   always have (v7 objects had none, so they sat darker than the ground
 ///   they stood on).
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 8;
+/// - v9: AO rotates its hemisphere sample set per texel, as the bounce
+///   already did. The fixed set was a quadrature whose error is a smooth
+///   function of position, so the blur could not remove it — it biased the
+///   ambient term by up to 8% of its range in a pattern that follows the
+///   sample directions, not the geometry.
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 9;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -1206,7 +1211,7 @@ mod tests {
 
         let key = terrain_lightmap_key("my-world", -1, 2);
         let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
-        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v8.exr");
+        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v9.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1214,7 +1219,7 @@ mod tests {
 
         let key = object_lightmap_key("my-world", 7, 3);
         let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
-        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v8.exr");
+        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v9.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1249,5 +1254,92 @@ mod tests {
         assert!(LightmapBuffer::from_exr_bytes(b"not an exr at all").is_err());
         let truncated = gradient(8).to_exr_bytes().unwrap();
         assert!(LightmapBuffer::from_exr_bytes(&truncated[..truncated.len() / 2]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod diag {
+    use super::*;
+
+    /// Dump a baked lightmap as an ASCII luminance map. Diagnostic only:
+    /// `LIGHTMAP=path cargo test dump_lightmap -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_lightmap() {
+        let path = std::env::var("LIGHTMAP").expect("set LIGHTMAP=<path to .exr>");
+        let buf = LightmapBuffer::load_exr(std::path::Path::new(&path)).unwrap();
+        let res = buf.res;
+        let lum = |v: Vec3| 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+
+        let covered: Vec<f32> = buf
+            .texels
+            .iter()
+            .map(|&t| lum(t))
+            .filter(|&l| l > 0.0)
+            .collect();
+        let n = covered.len();
+        let mean = covered.iter().sum::<f32>() / n.max(1) as f32;
+        let mut sorted = covered.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f32| sorted[((sorted.len() as f32 - 1.0) * p) as usize];
+        println!(
+            "res={res} covered={n}/{} ({:.0}%) min={:.4} p05={:.4} p50={:.4} p95={:.4} max={:.4} mean={:.4}",
+            buf.texels.len(),
+            100.0 * n as f32 / buf.texels.len() as f32,
+            sorted.first().unwrap_or(&0.0),
+            pct(0.05),
+            pct(0.50),
+            pct(0.95),
+            sorted.last().unwrap_or(&0.0),
+            mean,
+        );
+
+        // Which of the 5 toon bands each texel lands in. `toon_band`
+        // quantises the *input* luminance, so the boundaries are at
+        // 0.2/0.4/0.6/0.8 (the output is then remapped to [0.18, 1]).
+        let band = |l: f32| (l.clamp(0.0, 0.999) * 5.0) as usize;
+        let mut hist = [0usize; 5];
+        for &l in &covered {
+            hist[band(l)] += 1;
+        }
+        println!("toon bands (0=darkest): {hist:?}");
+
+        // Downsample to an ASCII grid; '.' is an uncovered texel.
+        // CROP=x,y,w renders that window at 1:1 instead of the whole atlas.
+        let crop: Option<(usize, usize, usize)> = std::env::var("CROP").ok().map(|v| {
+            let p: Vec<usize> = v.split(',').map(|n| n.parse().unwrap()).collect();
+            (p[0], p[1], p[2])
+        });
+        let (ox, oy, span) = crop.unwrap_or((0, 0, res));
+        let cols = 150usize.min(span);
+        let step = span.div_ceil(cols);
+        let ramp = b" .:-=+*#%@";
+        for y in (oy..(oy + span).min(res)).step_by(step) {
+            let mut line = String::new();
+            for x in (ox..(ox + span).min(res)).step_by(step) {
+                let mut sum = 0.0;
+                let mut cnt = 0;
+                for yy in y..(y + step).min(res) {
+                    for xx in x..(x + step).min(res) {
+                        let l = lum(buf.texels[yy * res + xx]);
+                        if l > 0.0 {
+                            sum += l;
+                            cnt += 1;
+                        }
+                    }
+                }
+                if cnt == 0 {
+                    line.push(' ');
+                } else {
+                    let l = (sum / cnt as f32).clamp(0.0, 1.0);
+                    if std::env::var("BANDS").is_ok() {
+                        line.push(b"01234"[band(l)] as char);
+                    } else {
+                        line.push(ramp[(l * 9.0) as usize] as char);
+                    }
+                }
+            }
+            println!("{line}");
+        }
     }
 }

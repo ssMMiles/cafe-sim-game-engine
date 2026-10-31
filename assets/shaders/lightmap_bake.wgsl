@@ -512,18 +512,22 @@ fn golden_seq(i: u32) -> f32 {
 /// contact shadow under a chair — and a canopy far overhead only dims.
 /// Terrain is marched first (ordered along the ray, so first hit = nearest),
 /// then scenery is searched inside that distance. Mirrors raycast::compute_ao.
+/// `texel_seed` rotates the sample azimuth per texel, as the bounce does:
+/// a fixed direction set is a quadrature whose error is a smooth function of
+/// position, so the bake's blur cannot remove it.
 /// Returns mean visibility ∈ [0, 1].
-fn compute_ao(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>) -> f32 {
+fn compute_ao(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, texel_seed: u32) -> f32 {
     if u.ao_rays == 0u {
         return 1.0;
     }
 
     let tf        = make_tangent_frame(normal);
     let step_size = u.ao_radius / f32(u.ao_steps);
+    let azimuth_offset = float01(hash_u32(texel_seed)) * TAU;
     var visibility: f32 = 0.0;
 
     for (var i: u32 = 0u; i < u.ao_rays; i = i + 1u) {
-        let world_dir = hemisphere_dir(i, u.ao_rays, normal, tf, 0.0);
+        let world_dir = hemisphere_dir(i, u.ao_rays, normal, tf, azimuth_offset);
 
         var hit_t = u.ao_radius;
         for (var s: u32 = 1u; s <= u.ao_steps; s = s + 1u) {
@@ -703,12 +707,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let mesh_origin = surface + normal * 0.02;
 
     let shadow  = cast_shadow_ray(origin, mesh_origin, sun_dir);
-    let ao      = compute_ao(origin, mesh_origin, normal);
-    let ndotl   = max(dot(normal, sun_dir), 0.0);
-
-    // Per-texel seed for decorrelated hemisphere sampling in compute_bounce,
-    // keyed by world texel (ChunkBakeGrid::texel_seed) so seams agree.
+    // Per-texel hemisphere rotation, shared by AO and bounce, and keyed by
+    // world texel (ChunkBakeGrid::texel_seed) so seams agree.
     let texel_seed: u32 = bitcast<u32>(gx) * 1000003u + bitcast<u32>(gy) * 2654435761u;
+    let ao      = compute_ao(origin, mesh_origin, normal, texel_seed);
+    let ndotl   = max(dot(normal, sun_dir), 0.0);
 
     let bounce = compute_bounce(origin, mesh_origin, normal, texel_seed);
 
