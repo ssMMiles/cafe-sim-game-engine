@@ -153,6 +153,21 @@ pub fn apply_save(
             );
             continue;
         };
+        if !anchor.contains((rec.cell_x, rec.cell_z)) {
+            // The grid is measured from whatever shell this level has, so a
+            // save made in a roomier cafe can name cells this one doesn't
+            // have. Dropping the piece beats placing it outside the walls.
+            warn!(
+                "save references cell ({}, {}), outside this cafe's {}x{} floor — skipping \
+                 piece '{}'",
+                rec.cell_x,
+                rec.cell_z,
+                anchor.width(),
+                anchor.depth(),
+                piece.name
+            );
+            continue;
+        }
         if occupancy.0.contains_key(&(rec.cell_x, rec.cell_z)) {
             warn!(
                 "save references already-occupied cell ({}, {}) — skipping piece '{}'",

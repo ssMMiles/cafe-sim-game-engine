@@ -741,3 +741,65 @@ fire-and-forget like prefabs/manifests. This pulled `serde` + `serde_json`
 in as direct deps and turned on `egui_dock/serde`. The file is a struct
 (`EditorSettingsFile { dock }`) so future user-level editor settings can
 join as `#[serde(default)]` fields.
+
+## cafe-sim anchored to the shell prefab + plugin lighting investigation — October 2026
+
+- `assets/prefabs/cafe-shell.prefab` was **generated programmatically** (group
+  root "Cafe Shell"; member "Shell" = `cafe-sim/Cafe.gltf#Scene0` + `cafe-shell`
+  binding at the root's origin; member "Player Spawn" = Empty + `spawn-point`
+  binding at local (0, 0, 7.5), identity rotation = facing −Z into the room).
+  Written with a throwaway ignored test calling `serialize_prefab`; adjust it in
+  the editor (Apply to prefab) rather than by hand. The cafe world (`worlds/cafe`)
+  had **no shell placed at all** at the time (only trees, rocks, one group, one
+  point light at (−15, 0.85, 8.9)) — the old origin fallback hid that.
+- The plugin keys off hydrated markers (`CafeShell`, `CafeSpawnPoint`), never the
+  prefab: plugins can't see `PlacedObject`/`PrefabInstanceData` (host-only), and
+  the ownership contract's rule 3 (script factory inserts) is the mechanism that
+  gets cleaned up on unload. Deliberately **no** engine-api "prefab instance"
+  marker was added.
+- `CafeAnchor { origin, shell: Option<Entity> }`; `is_resolved()` gates New/Load
+  Game in the cafe main menu (status line under the title, `sync_shell_status`)
+  and the slot picker backs out to the menu if the shell vanished meanwhile. Why:
+  `apply_save` expands saved furniture from grid cells against the anchor at that
+  instant — starting unresolved would scatter the cafe around the world origin.
+- `sync_cafe_anchor` is chained **before** `apply_phase_transitions` so entering
+  `Playing` seats the player against this frame's anchor. Seating sets both
+  `PlayerCamera.yaw` and the camera `Transform.rotation` — the look system only
+  rewrites the rotation on mouse motion. Yaw convention: `atan2(−fwd.x, −fwd.z)`
+  matches `Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0)`.
+- `spawn-point` has no default mesh on purpose (an Empty never reaches a bake or
+  a collider), so it is *not* a catalog preset: place an Empty, attach in the
+  inspector. Empties have no viewport gizmo yet — the outliner is how you find one.
+- The furniture grid is **in shell-local space and measured from the shell**
+  (2026-10-31, second pass). `CafeAnchor` = shell `GlobalTransform` + `FloorPlan`
+  {centre, width, depth} in shell-local units. Facts that drove the design:
+  `Cafe.gltf` has a node `Floor` — a unit quad on a node scaled `[10,1,6]`, i.e.
+  exactly the 20×12 that used to be `CAFE_WIDTH`/`CAFE_DEPTH` — so the grid is
+  derivable, and `cafe_scene::measure_floor` derives it. Bevy's glTF loader names
+  the *node* entity from the node (`"Floor"`) and the *primitive* entity
+  `"{mesh}.{material}"` (`"Floor.Cafe Floor"`), so the match covers both and takes
+  the subtree; `Aabb` is baked onto mesh entities by the loader itself (not
+  `calculate_bounds`), so it is there as soon as the scene instance spawns.
+  Measuring `shell_inv * mesh_global` makes the plan independent of the shell's
+  own placement, and both transforms being one frame stale cancels out.
+  `cells_across` rounds **down** with a 1e-3 epsilon — a 20-unit floor measured
+  through two matrices comes back 19.999998, and rounding up would overhang.
+  Cells are 1 *local* unit so saved cell indices survive a rescale.
+- **Two height conventions** in that grid, and picking the wrong one is the easy
+  bug: `to_world` (shell-local, scales — drinks on counters) vs `above_floor`
+  (world metres along the floor normal — customers/staff, who are the size of the
+  engine-spawned player and so do *not* scale with the shell). Movement uses
+  `step_along_floor`, projecting onto the floor plane rather than stepping in
+  world XZ, which is what makes a rotated shell work.
+- Gotcha: `Quat::angle_between` uses glam's `acos_approx`, only ~1e-3 accurate
+  near zero — a test asserting `< 1e-4` fails on quaternions that match to 1 ulp.
+  Compare rotated basis vectors instead.
+- Lighting investigation for plugin-spawned objects: `docs/PLUGIN_LIGHTING_PLAN.md`.
+  Headline facts verified in bevy 0.20 source: `ToonMaterial` has no `#[bindless]`,
+  and `combined_bind_group::bindless_slot_count` needs *both* halves bindless, so
+  every `ExtendedMaterial<StandardMaterial, ToonMaterial>` is its own bind group
+  and its own `Opaque3dBatchSetKey` — `convert_to_toon_recursive` making one
+  material per mesh entity means one draw per sub-mesh. `ConvertToToon` and
+  `on_scene_ready` are host-private and the observer is attached **per entity**
+  (`spawn_interactable_scene`, the player, editor previews), so a plugin's
+  `WorldAssetRoot` scene can't get converted today at all.

@@ -205,6 +205,16 @@ pub fn handle_slot_picker_buttons(
         _ => return,
     };
 
+    // The shell was there when the main menu let us through; if its chunk
+    // unloaded meanwhile, `apply_save` would place the furniture against a
+    // stale anchor. Back out to the menu, whose status line explains.
+    if !anchor.is_resolved() && !slots_pressed.is_empty() {
+        warn!("[cafe-sim] cafe shell lost before a slot was chosen; returning to the menu");
+        *phase = CafePhase::MainMenu;
+        mouse.clear_just_pressed(MouseButton::Left);
+        return;
+    }
+
     for slot in &slots_pressed {
         let slot = slot.0;
         let status = cache.0.get(&slot).cloned().unwrap_or(SlotStatus::Empty);

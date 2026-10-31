@@ -12,11 +12,9 @@ use engine_api::PlayerCamera;
 
 use crate::balance::{Balance, spawn_balance_popup};
 use crate::coffee_menu::Brewing;
-use crate::customer::{
-    AngryFace, Customer, CustomerState, HappyFace, ServedTimer, customer_float_y,
-};
+use crate::customer::{AngryFace, CUSTOMER_FLOAT, Customer, CustomerState, HappyFace, ServedTimer};
 use crate::drinks::price_for;
-use crate::grid::{CafeAnchor, cell_center};
+use crate::grid::CafeAnchor;
 use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
 use crate::placement::{CoffeeMachine, Countertop, GarbageCan, PlacedCell, PlacementSelection};
@@ -24,6 +22,8 @@ use crate::spawn::SpawnOwnedCommands;
 
 const HAND_OFFSET: Vec3 = Vec3::new(0.25, -0.2, -0.5);
 const HAND_SCALE: f32 = 0.1;
+/// Counter-top height above the floor, in shell-local units: a drink set down
+/// rises with the counter when the shell is scaled.
 const COUNTER_DRINK_Y_OFFSET: f32 = 1.0;
 const COUNTER_DRINK_SCALE: f32 = 0.15;
 const MACHINE_DRINK_Y_OFFSET: f32 = 1.0;
@@ -188,19 +188,18 @@ pub fn handle_delivery_click(
         spawn_balance_popup(&mut commands, price);
     }
 
-    let center = cell_center(&anchor, cell.0, cell.1);
     commands.spawn_owned((
         DeliveredDrink {
             customer: customer_entity,
         },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
-        Transform::from_xyz(
-            center.x,
-            anchor.floor_y() + COUNTER_DRINK_Y_OFFSET,
-            center.z,
-        )
-        .with_scale(Vec3::splat(COUNTER_DRINK_SCALE)),
+        anchor.place(
+            Transform::from_translation(
+                anchor.cell_local(cell.0, cell.1) + Vec3::Y * COUNTER_DRINK_Y_OFFSET,
+            )
+            .with_scale(Vec3::splat(COUNTER_DRINK_SCALE)),
+        ),
     ));
 
     customer.state = CustomerState::Served;
@@ -333,11 +332,9 @@ pub fn tick_served_timer(
             }
         }
 
-        customer.target = Vec3::new(
-            customer.target.x,
-            customer_float_y(&anchor),
-            anchor.door_z(),
-        );
+        // Out through the entrance, level with where they were standing.
+        let local = anchor.to_local(customer.target);
+        customer.target = anchor.above_floor(anchor.door_local(local.x), CUSTOMER_FLOAT);
         customer.state = CustomerState::Leaving;
         commands.entity(entity).remove::<ServedTimer>();
     }
@@ -373,13 +370,21 @@ pub fn manage_ready_drinks(
         if !ready_machines.contains(&machine) || already_has_cube.contains(&machine) {
             continue;
         }
-        let pos = gt.translation();
+        // Over the machine, at the machine's own height above the floor —
+        // both scale with the shell, so the cube keeps sitting on top of it.
+        let over_machine = anchor.to_local(gt.translation());
         commands.spawn_owned((
             ReadyDrink { machine },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(assets.material.clone()),
-            Transform::from_xyz(pos.x, anchor.floor_y() + MACHINE_DRINK_Y_OFFSET, pos.z)
+            anchor.place(
+                Transform::from_translation(Vec3::new(
+                    over_machine.x,
+                    anchor.center_local().y + MACHINE_DRINK_Y_OFFSET,
+                    over_machine.z,
+                ))
                 .with_scale(Vec3::splat(COUNTER_DRINK_SCALE)),
+            ),
         ));
     }
 }

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use crate::cafe::CafeOpen;
 use crate::drinks::DRINKS;
-use crate::grid::{CAFE_DEPTH, CAFE_WIDTH, CafeAnchor, cell_center};
+use crate::grid::{CafeAnchor, step_along_floor};
 use crate::pause_menu::GamePaused;
 use crate::placement::{CoffeeMachine, Countertop, GridOccupancy, PlacedCell};
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
@@ -23,12 +23,9 @@ const MAX_CUSTOMERS: usize = 3;
 const SPAWN_COOLDOWN_SECS: f32 = 3.0;
 const WALK_SPEED: f32 = 1.5;
 const ARRIVE_DISTANCE: f32 = 0.1;
-/// How high a customer's body floats above the cafe floor.
+/// How high a customer's body floats above the cafe floor, in world metres —
+/// a customer is the player's size whatever the shell's scale.
 pub const CUSTOMER_FLOAT: f32 = 0.6;
-
-pub fn customer_float_y(anchor: &CafeAnchor) -> f32 {
-    anchor.floor_y() + CUSTOMER_FLOAT
-}
 const CUSTOMER_SIZE: f32 = 0.4;
 const POPUP_OFFSET_Y: f32 = 0.9;
 const POPUP_FONT_SIZE: f32 = 16.0;
@@ -86,15 +83,12 @@ pub struct Customer {
     pub order: &'static str,
 }
 
-fn cell_in_bounds(cell: (i32, i32)) -> bool {
-    (0..CAFE_WIDTH).contains(&cell.0) && (0..CAFE_DEPTH).contains(&cell.1)
-}
-
 /// Pick a free cell adjacent to `counter` for the customer to stand in.
 /// Preference order: front (+Z, the entrance side), then sides, then back.
 /// Returns `None` if all four neighbors are out-of-bounds, occupied by another
 /// placed piece, or already reserved by another customer.
 fn pick_queue_cell(
+    anchor: &CafeAnchor,
     counter: (i32, i32),
     occupancy: &GridOccupancy,
     reserved: &HashSet<(i32, i32)>,
@@ -107,7 +101,7 @@ fn pick_queue_cell(
     ];
     candidates
         .into_iter()
-        .find(|c| cell_in_bounds(*c) && !occupancy.0.contains_key(c) && !reserved.contains(c))
+        .find(|c| anchor.contains(*c) && !occupancy.0.contains_key(c) && !reserved.contains(c))
 }
 
 /// Screen-space UI label that follows a specific customer's head.
@@ -208,7 +202,7 @@ pub fn spawn_customers(
         .filter(|c| !reserved_counters.contains(&(c.0, c.1)))
         .filter_map(|c| {
             let counter = (c.0, c.1);
-            pick_queue_cell(counter, &occupancy, &reserved_queues).map(|q| (counter, q))
+            pick_queue_cell(&anchor, counter, &occupancy, &reserved_queues).map(|q| (counter, q))
         })
         .collect();
     if candidates.is_empty() {
@@ -217,13 +211,14 @@ pub fn spawn_customers(
 
     let mut rng = rand::thread_rng();
     let (counter_cell, queue_cell) = *candidates.choose(&mut rng).expect("candidates non-empty");
-    let queue_world = cell_center(&anchor, queue_cell.0, queue_cell.1);
-    let target = Vec3::new(queue_world.x, customer_float_y(&anchor), queue_world.z);
+    let queue_local = anchor.cell_local(queue_cell.0, queue_cell.1);
+    let target = anchor.above_floor(queue_local, CUSTOMER_FLOAT);
     let order = DRINKS.choose(&mut rng).map(|d| d.name).unwrap_or("Coffee");
 
-    // Spawn just outside the front edge, X-aligned with the queue cell so the
-    // straight-line walk is least likely to clip other furniture.
-    let spawn_pos = Vec3::new(target.x, customer_float_y(&anchor), anchor.door_z());
+    // Spawn just outside the front edge, aligned with the queue cell across
+    // the shell's own width so the straight-line walk is least likely to clip
+    // other furniture.
+    let spawn_pos = anchor.above_floor(anchor.door_local(queue_local.x), CUSTOMER_FLOAT);
 
     commands.spawn_owned((
         Customer {
@@ -245,6 +240,7 @@ pub fn walk_customers(
     mut commands: Commands,
     time: Res<Time>,
     paused: Res<GamePaused>,
+    anchor: Res<CafeAnchor>,
     mut q: Query<(Entity, &mut Customer, &mut Transform)>,
 ) {
     if paused.0 {
@@ -258,10 +254,15 @@ pub fn walk_customers(
         ) {
             continue;
         }
-        let to_target = customer.target - transform.translation;
-        let flat = Vec3::new(to_target.x, 0.0, to_target.z);
-        let dist = flat.length();
-        if dist <= ARRIVE_DISTANCE {
+        let arrived = step_along_floor(
+            &anchor,
+            &mut transform.translation,
+            customer.target,
+            WALK_SPEED,
+            dt,
+            ARRIVE_DISTANCE,
+        );
+        if arrived {
             match customer.state {
                 CustomerState::Walking => customer.state = CustomerState::Waiting,
                 CustomerState::Leaving => {
@@ -269,11 +270,7 @@ pub fn walk_customers(
                 }
                 _ => {}
             }
-            continue;
         }
-        let step = (flat / dist) * WALK_SPEED * dt;
-        transform.translation.x += step.x;
-        transform.translation.z += step.z;
     }
 }
 

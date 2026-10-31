@@ -3,7 +3,7 @@ use engine_api::{AutoCollider, PlayerCamera};
 use std::collections::HashMap;
 
 use crate::catalog::{PieceDef, PieceKind};
-use crate::grid::{CafeAnchor, PIECE_SCALE, camera_floor_hit, cell_center, world_to_cell};
+use crate::grid::{CafeAnchor, PIECE_SCALE};
 use crate::menus::ActiveMenu;
 use crate::spawn::SpawnOwnedCommands;
 
@@ -102,7 +102,7 @@ pub fn sync_preview(
         let mut preview = commands.spawn_owned((
             PlacementPreview,
             WorldAssetRoot(scene),
-            Transform::from_translation(anchor.origin).with_scale(Vec3::splat(PIECE_SCALE)),
+            anchor.place(Transform::from_scale(Vec3::splat(PIECE_SCALE))),
             Visibility::Hidden,
         ));
         if piece.tint {
@@ -190,11 +190,11 @@ pub fn update_preview_transform(
         return;
     };
 
-    let Some(hit) = camera_floor_hit(&anchor, cam) else {
+    let Some(hit) = anchor.camera_floor_hit(cam) else {
         *vis = Visibility::Hidden;
         return;
     };
-    let Some((i, j)) = world_to_cell(&anchor, hit) else {
+    let Some((i, j)) = anchor.world_to_cell(hit) else {
         *vis = Visibility::Hidden;
         return;
     };
@@ -203,7 +203,11 @@ pub fn update_preview_transform(
         return;
     }
 
-    t.translation = cell_center(&anchor, i, j);
+    // Rewritten in full rather than translated: the shell can be turned or
+    // scaled while the preview is up.
+    *t = anchor.place(
+        Transform::from_translation(anchor.cell_local(i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
+    );
     *vis = Visibility::Visible;
 }
 
@@ -226,10 +230,10 @@ pub fn handle_place_click(
     let Ok(cam) = cam_q.single() else {
         return;
     };
-    let Some(hit) = camera_floor_hit(&anchor, cam) else {
+    let Some(hit) = anchor.camera_floor_hit(cam) else {
         return;
     };
-    let Some((i, j)) = world_to_cell(&anchor, hit) else {
+    let Some((i, j)) = anchor.world_to_cell(hit) else {
         return;
     };
     if occupancy.0.contains_key(&(i, j)) {
@@ -264,7 +268,10 @@ pub fn spawn_piece(
     let scene: Handle<WorldAsset> = asset_server.load(piece.asset_path);
     let mut placed = commands.spawn_owned((
         WorldAssetRoot(scene),
-        Transform::from_translation(cell_center(anchor, i, j)).with_scale(Vec3::splat(PIECE_SCALE)),
+        anchor.place(
+            Transform::from_translation(anchor.cell_local(i, j))
+                .with_scale(Vec3::splat(PIECE_SCALE)),
+        ),
         AutoCollider,
         PlacedCell(i, j),
         CafePiece {

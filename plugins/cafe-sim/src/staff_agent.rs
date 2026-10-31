@@ -24,7 +24,7 @@ use crate::coffee_menu::Brewing;
 use crate::customer::{Customer, CustomerState, HappyFace, ServedTimer};
 use crate::delivery::{DeliveredDrink, DeliveryAssets};
 use crate::drinks::{brew_secs_for, price_for};
-use crate::grid::{CAFE_DEPTH, CAFE_WIDTH, CafeAnchor, cell_center};
+use crate::grid::{CafeAnchor, step_along_floor};
 use crate::pause_menu::GamePaused;
 use crate::placement::CoffeeMachine;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
@@ -42,6 +42,9 @@ const WANDER_REPATH_SECS: f32 = 2.5;
 const TIP_FRACTION: f32 = 0.5;
 const SERVED_HOLD_SECS: f32 = 5.0;
 const CARRY_SCALE: f32 = 0.15;
+/// Height of a counter top above the floor, in shell-local units: a drink set
+/// down on one rises with the counter when the shell is scaled.
+const COUNTER_DRINK_HEIGHT: f32 = 1.0;
 const CARRY_OFFSET: Vec3 = Vec3::new(0.0, 0.5, 0.0);
 const NOTICE_LIFETIME_SECS: f32 = 6.0;
 
@@ -181,11 +184,7 @@ pub fn staff_day_lifecycle(
         }
         for (_, transform, mut agent) in agents_q.iter_mut() {
             agent.state = AgentState::Leaving;
-            agent.target = Vec3::new(
-                transform.translation.x,
-                staff_float_y(&anchor),
-                anchor.door_z(),
-            );
+            agent.target = door_target(&anchor, transform.translation);
         }
     } else if open {
         // Steady state: cover mid-day hires that have no agent yet.
@@ -217,10 +216,9 @@ fn spawn_agent(
     total: usize,
 ) {
     let spread = (index as f32 - (total as f32 - 1.0) * 0.5) * SPREAD_X;
-    let pos = Vec3::new(
-        anchor.origin.x + spread,
-        staff_float_y(anchor),
-        anchor.door_z(),
+    let pos = anchor.above_floor(
+        anchor.door_local(anchor.center_local().x + spread),
+        STAFF_FLOAT,
     );
     let speed = WALK_SPEED * (1.0 + move_speed_mod).max(0.2);
     commands.spawn_owned((
@@ -326,12 +324,12 @@ pub fn tick_staff(
                         machine,
                         drink,
                     };
-                    agent.target = Vec3::new(mpos.x, staff_float_y(&anchor), mpos.z);
+                    agent.target = anchor.above_floor(anchor.to_local(mpos), STAFF_FLOAT);
                     continue;
                 }
 
                 agent.wander_cooldown -= dt;
-                let arrived = step_toward(&mut transform, agent.target, speed, dt);
+                let arrived = step_toward(&anchor, &mut transform, agent.target, speed, dt);
                 if arrived || agent.wander_cooldown <= 0.0 {
                     agent.target = random_interior_target(&anchor);
                     agent.wander_cooldown = WANDER_REPATH_SECS;
@@ -348,7 +346,7 @@ pub fn tick_staff(
                     agent.state = AgentState::Wandering;
                     continue;
                 }
-                if step_toward(&mut transform, agent.target, speed, dt) {
+                if step_toward(&anchor, &mut transform, agent.target, speed, dt) {
                     if !idle_machine_set.contains(&machine) {
                         // Machine got taken before we arrived — try again later.
                         agent.state = AgentState::Wandering;
@@ -419,7 +417,7 @@ pub fn tick_staff(
                 counter,
                 drink,
             } => {
-                if step_toward(&mut transform, agent.target, speed, dt) {
+                if step_toward(&anchor, &mut transform, agent.target, speed, dt) {
                     serve(
                         &mut commands,
                         &delivery_assets,
@@ -440,7 +438,7 @@ pub fn tick_staff(
             }
 
             AgentState::Leaving => {
-                if step_toward(&mut transform, agent.target, speed, dt) {
+                if step_toward(&anchor, &mut transform, agent.target, speed, dt) {
                     commands.entity(agent_entity).despawn();
                 }
             }
@@ -481,13 +479,16 @@ fn serve(
         spawn_balance_popup(commands, price + tip);
     }
 
-    let center = cell_center(anchor, counter.0, counter.1);
     commands.spawn_owned((
         DeliveredDrink { customer },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
-        Transform::from_xyz(center.x, anchor.floor_y() + 1.0, center.z)
+        anchor.place(
+            Transform::from_translation(
+                anchor.cell_local(counter.0, counter.1) + Vec3::Y * COUNTER_DRINK_HEIGHT,
+            )
             .with_scale(Vec3::splat(0.15)),
+        ),
     ));
 
     cust.state = CustomerState::Served;
@@ -575,34 +576,38 @@ pub fn tick_notice_toast(
 // Helpers
 // ----------------------------------------------------------------------------
 
-fn step_toward(transform: &mut Transform, target: Vec3, speed: f32, dt: f32) -> bool {
-    let to_target = target - transform.translation;
-    let flat = Vec3::new(to_target.x, 0.0, to_target.z);
-    let dist = flat.length();
-    if dist <= ARRIVE_DISTANCE {
-        return true;
-    }
-    let step = (flat / dist) * speed * dt;
-    transform.translation.x += step.x;
-    transform.translation.z += step.z;
-    false
-}
-
-fn staff_float_y(anchor: &CafeAnchor) -> f32 {
-    anchor.floor_y() + STAFF_FLOAT
+fn step_toward(
+    anchor: &CafeAnchor,
+    transform: &mut Transform,
+    target: Vec3,
+    speed: f32,
+    dt: f32,
+) -> bool {
+    step_along_floor(
+        anchor,
+        &mut transform.translation,
+        target,
+        speed,
+        dt,
+        ARRIVE_DISTANCE,
+    )
 }
 
 fn random_interior_target(anchor: &CafeAnchor) -> Vec3 {
     let mut rng = rand::thread_rng();
-    let i = rng.gen_range(0..CAFE_WIDTH);
-    let j = rng.gen_range(0..CAFE_DEPTH);
-    let c = cell_center(anchor, i, j);
-    Vec3::new(c.x, staff_float_y(anchor), c.z)
+    let i = rng.gen_range(0..anchor.width());
+    let j = rng.gen_range(0..anchor.depth());
+    anchor.above_floor(anchor.cell_local(i, j), STAFF_FLOAT)
 }
 
 fn carry_target(anchor: &CafeAnchor, counter: (i32, i32)) -> Vec3 {
-    let c = cell_center(anchor, counter.0, counter.1);
-    Vec3::new(c.x, staff_float_y(anchor), c.z)
+    anchor.above_floor(anchor.cell_local(counter.0, counter.1), STAFF_FLOAT)
+}
+
+/// The point on the entrance line level with `from`, where an agent heads to
+/// walk out.
+fn door_target(anchor: &CafeAnchor, from: Vec3) -> Vec3 {
+    anchor.above_floor(anchor.door_local(anchor.to_local(from).x), STAFF_FLOAT)
 }
 
 fn customer_waiting(customers_q: &Query<(Entity, &mut Customer)>, customer: Entity) -> bool {

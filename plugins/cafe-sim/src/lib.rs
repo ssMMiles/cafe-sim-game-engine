@@ -8,7 +8,9 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use bevy::prelude::*;
-use engine_api::{DynamicPlugin, Player, ScriptBinding, ScriptRegistry, ScriptSchema, add};
+use engine_api::{
+    DynamicPlugin, Player, PlayerCamera, ScriptBinding, ScriptRegistry, ScriptSchema, add,
+};
 
 mod balance;
 mod cafe;
@@ -39,7 +41,7 @@ use balance::{
     Balance, DayStartBalance, spawn_balance_hud, tick_balance_popups, update_balance_text,
 };
 use cafe::{CafeOpen, enforce_closing_time};
-use cafe_scene::{CafeShell, sync_cafe_anchor};
+use cafe_scene::{CafeShell, CafeSpawnPoint, player_start, sync_cafe_anchor};
 use coffee_menu::{
     ActiveCoffeeMachine, handle_drink_click, handle_machine_click, manage_brew_popups,
     position_brew_popups, sync_active_coffee_machine, sync_coffee_menu_ui, tick_brewing,
@@ -58,7 +60,7 @@ use delivery::{
 use grid::{CafeAnchor, draw_floor_grid};
 use main_menu::{
     CafePhase, MainMenuRoot, build_main_menu, handle_main_menu_buttons, in_main_menu, in_playing,
-    in_slot_picker,
+    in_slot_picker, sync_shell_status,
 };
 use menus::{ActiveMenu, close_menus_when_paused};
 use pause_menu::{GamePaused, handle_pause_buttons, sync_pause_menu_ui, toggle_pause_on_escape};
@@ -96,7 +98,8 @@ const CAFE_SHELL_MESH: &str = "cafe-sim/Cafe.gltf#Scene0";
 impl DynamicPlugin for CafeSimPlugin {
     /// Registration only — runs in editor mode too, which is what puts
     /// `cafe-sim/cafe-shell` in the placement catalog while the plugin's
-    /// gameplay systems are stopped.
+    /// gameplay systems are stopped. Both scripts are what the `cafe-shell`
+    /// prefab's members carry (see [`cafe_scene`]).
     fn register(&self, _world: &mut World, registry: &mut ScriptRegistry) {
         registry.register_script(
             PLUGIN_NAME,
@@ -104,6 +107,13 @@ impl DynamicPlugin for CafeSimPlugin {
                 .with_display_name("Cafe Shell")
                 .with_default_mesh(CAFE_SHELL_MESH),
             hydrate_cafe_shell,
+        );
+        // No default mesh: attach it to an Empty, so it never reaches a bake
+        // or a collider.
+        registry.register_script(
+            PLUGIN_NAME,
+            ScriptSchema::new("spawn-point").with_display_name("Player Spawn"),
+            hydrate_spawn_point,
         );
     }
 
@@ -149,10 +159,16 @@ impl DynamicPlugin for CafeSimPlugin {
         // Cafe scene + HUDs are no longer spawned here; the transition
         // system spawns them when entering `CafePhase::Playing`.
 
-        // Phase enter/exit hooks. Must run before any phase-gated system
-        // so newly-spawned UI is queryable this frame and outgoing UI is
-        // gone before its handlers fire.
-        schedule.add_systems(apply_phase_transitions);
+        // The shell is a level entity, so it is there in every phase — keep
+        // the anchor tracking it regardless, and resolve it *before* the
+        // phase hooks so entering `Playing` seats the player against this
+        // frame's anchor. Its materials are the level's business, not ours:
+        // they ship inside `Cafe.gltf`.
+        //
+        // Phase enter/exit hooks must run before any phase-gated system so
+        // newly-spawned UI is queryable this frame and outgoing UI is gone
+        // before its handlers fire.
+        schedule.add_systems((sync_cafe_anchor, apply_phase_transitions).chain());
 
         // Always-on UI visuals (hover/press styling for any button in any
         // phase), cursor management (which needs to react to phase changes
@@ -161,11 +177,7 @@ impl DynamicPlugin for CafeSimPlugin {
         schedule.add_systems((
             update_interactive_visuals,
             manage_cursor,
-            // The shell is a level entity, so it is there in every phase —
-            // keep the anchor tracking it regardless. Its materials are the
-            // level's business, not ours: they ship inside `Cafe.gltf`.
-            sync_cafe_anchor,
-            handle_main_menu_buttons.run_if(in_main_menu),
+            (sync_shell_status, handle_main_menu_buttons).run_if(in_main_menu),
             handle_slot_picker_buttons.run_if(in_slot_picker),
         ));
 
@@ -277,7 +289,9 @@ fn apply_phase_transitions(
     anchor: Res<CafeAnchor>,
     main_menu_q: Query<Entity, With<MainMenuRoot>>,
     slot_picker_q: Query<Entity, With<SlotPickerRoot>>,
+    spawn_points: Query<&GlobalTransform, With<CafeSpawnPoint>>,
     mut player_q: Query<&mut Transform, With<Player>>,
+    mut camera_q: Query<(&mut Transform, &mut PlayerCamera), Without<Player>>,
 ) {
     let curr = *phase;
     if *last == Some(curr) {
@@ -304,7 +318,7 @@ fn apply_phase_transitions(
 
     match curr {
         CafePhase::MainMenu => {
-            build_main_menu(&mut commands, &theme);
+            build_main_menu(&mut commands, &theme, &anchor);
         }
         CafePhase::SlotPicker(mode) => {
             build_slot_picker(&mut commands, &theme, mode, &mut cache);
@@ -317,20 +331,34 @@ fn apply_phase_transitions(
             spawn_balance_hud(&mut commands, &balance);
             spawn_time_hud(&mut commands, &time);
 
-            // Move the engine-spawned player to the cafe entrance so they
-            // don't end up clipping into furniture that was loaded from a
-            // save (or placed by `apply_save` in the slot picker handler).
+            // Seat the engine-spawned player at the level's spawn point (a
+            // member of the shell prefab), or just outside the door when the
+            // level has none — never on furniture a save just restored.
+            let spawn_points: Vec<&GlobalTransform> = spawn_points.iter().collect();
+            let start = player_start(&anchor, &spawn_points);
             if let Ok(mut player_tf) = player_q.single_mut() {
-                player_tf.translation = anchor.player_spawn();
+                player_tf.translation = start.position;
+            }
+            // The look system only rewrites the camera rotation on mouse
+            // motion, so set both the yaw it integrates and the transform
+            // the next frame renders with.
+            if let Ok((mut cam_tf, mut cam)) = camera_q.single_mut() {
+                cam.yaw = start.yaw;
+                cam.pitch = 0.0;
+                cam_tf.rotation = Quat::from_euler(EulerRot::YXZ, start.yaw, 0.0, 0.0);
             }
         }
     }
 }
 
-/// Turn a `cafe-shell` binding into the marker the anchor and dressing
-/// systems look for.
+/// Turn a `cafe-shell` binding into the marker the anchor looks for.
 fn hydrate_cafe_shell(entity: &mut bevy::ecs::world::EntityWorldMut, _binding: &ScriptBinding) {
     entity.insert(CafeShell);
+}
+
+/// Turn a `spawn-point` binding into the marker [`player_start`] looks for.
+fn hydrate_spawn_point(entity: &mut bevy::ecs::world::EntityWorldMut, _binding: &ScriptBinding) {
+    entity.insert(CafeSpawnPoint);
 }
 
 add!(CafeSimPlugin, "cafe-sim");
