@@ -141,17 +141,25 @@ impl Default for DockLayout {
     fn default() -> Self {
         let mut state = DockState::new(vec![EditorTab::Viewport]);
         let surface = state.main_surface_mut();
-        // `fraction` is the share the *old* node keeps.
+        // `split_*` stores `fraction` verbatim as the *left/top* child's
+        // share of the parent rect. For `split_left` the new tabs become the
+        // left child, so the number is the new strip's share; for
+        // `split_right`/`split_below` the old node is the one that keeps it.
+        // (The old 0.82 here assumed old-keeps semantics and gave the
+        // outliner 82% of the window.) Fractions transcribed from a
+        // hand-arranged layout; `the_default_layout_matches_the_curated_one`
+        // pins them.
         let [viewport, _outliner] = surface.split_left(
             NodeIndex::root(),
-            0.82,
+            0.178,
             vec![EditorTab::Outliner, EditorTab::History],
         );
-        let [viewport, inspector] = surface.split_right(viewport, 0.75, vec![EditorTab::Inspector]);
+        let [viewport, inspector] =
+            surface.split_right(viewport, 0.811, vec![EditorTab::Inspector]);
         // Tool settings under the inspector; the asset browser gets the wide
         // strip under the viewport, where a thumbnail grid has room.
-        surface.split_below(inspector, 0.6, vec![EditorTab::Tool]);
-        surface.split_below(viewport, 0.72, vec![EditorTab::Assets]);
+        surface.split_below(inspector, 0.528, vec![EditorTab::Tool]);
+        surface.split_below(viewport, 0.725, vec![EditorTab::Assets]);
         Self(state)
     }
 }

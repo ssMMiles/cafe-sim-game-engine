@@ -137,6 +137,47 @@ pub fn load_layout(mut state: ResMut<LayoutPersist>) {
     });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default layout is transcribed from a hand-arranged
+    /// `editor_settings.json`. The stored `fraction` of a split node is the
+    /// *left/top* child's share (egui_dock renders `midpoint = min + size *
+    /// fraction`), which `split_left` et al. store verbatim — this test pins
+    /// both the semantics and the curated numbers, so a regression back to
+    /// "old node keeps the fraction" thinking (which once gave the outliner
+    /// 82% of the window) fails loudly.
+    #[test]
+    fn the_default_layout_matches_the_curated_one() {
+        let json = serde_json::to_value(&EditorSettingsFile {
+            dock: DockLayout::default().0,
+        })
+        .unwrap();
+        let nodes = &json["dock"]["surfaces"][0]["Main"]["nodes"];
+
+        let fraction = |i: usize, kind: &str| {
+            nodes[i][kind]["fraction"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("node {i} is not a {kind} split"))
+        };
+        let tabs = |i: usize| nodes[i]["Leaf"]["tabs"].clone();
+
+        // Left strip: Outliner over History at 17.8% of the window.
+        assert!((fraction(0, "Horizontal") - 0.178).abs() < 1e-6);
+        assert_eq!(tabs(1), serde_json::json!(["Outliner", "History"]));
+        // The viewport column keeps 81.1% against the inspector column.
+        assert!((fraction(2, "Horizontal") - 0.811).abs() < 1e-6);
+        // Viewport over Assets; Inspector over Tool.
+        assert!((fraction(5, "Vertical") - 0.725).abs() < 1e-6);
+        assert!((fraction(6, "Vertical") - 0.528).abs() < 1e-6);
+        assert_eq!(tabs(11), serde_json::json!(["Viewport"]));
+        assert_eq!(tabs(12), serde_json::json!(["Assets"]));
+        assert_eq!(tabs(13), serde_json::json!(["Inspector"]));
+        assert_eq!(tabs(14), serde_json::json!(["Tool"]));
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn poll_layout(mut layout: ResMut<DockLayout>, mut state: ResMut<LayoutPersist>) {
     let Some(slot) = state.pending.as_ref() else {

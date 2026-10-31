@@ -714,6 +714,21 @@ single `Lighting: Dynamic/Baked` line for meshes — no explanation, no bake
 button in the inspector (bake lives in the menu / Shift+B; stale state in
 the status bar).
 
+### Gotcha: egui_dock split fractions are the left/top child's share
+
+`split_left/right/below(parent, fraction, tabs)` store `fraction`
+verbatim into the split node, and rendering gives the **left/top child**
+`fraction` of the rect (`midpoint = min + size * fraction`,
+dock_area/show/mod.rs). egui_dock's own doc comment ("how much of the
+parent's area the old node will occupy") is only true for
+`split_right`/`split_below`, where the old node *is* the left/top child —
+for `split_left`/`split_above` the **new** tabs land there, so the number
+is the new strip's share. The original default passed 0.82 to
+`split_left` believing old-keeps, i.e. an 82%-wide outliner.
+`the_default_layout_matches_the_curated_one` (ui/layout.rs) pins the
+correct interpretation; the default fractions are transcribed from
+Miles's hand-arranged editor_settings.json (2026-10-30).
+
 ### Dock layout persistence — 2026-10-30
 
 `editor/ui/layout.rs`: the dock layout persists to a user-level
