@@ -17,7 +17,7 @@
 //! to irradiance in lightmap units, four RGB coefficients, plus one scalar:
 //!
 //! ```text
-//! E(n) = max(0, c0 + c1·n.x + c2·n.y + c3·n.z)        smooth terms
+//! E(n) = reconstruct(c0, c1..c3, n)                   smooth terms
 //!      + sun_rgb · sun_vis · max(n·sun_dir, 0)         direct sun, exact
 //! ```
 //!
@@ -31,12 +31,31 @@
 //! terminator, the exact peak, and no bleed into the other terms.
 //!
 //! Placed lights are written into the L1 part as peak-preserving lobes
-//! (`c0 += L/4, c_dir += 3L/4·d`, zero a third of the way round the back),
-//! which keeps the lit side of a character matching the lightmapped wall
-//! beside it; the price is that the side facing *away* from a bright lamp
-//! loses some ambient to the lobe's negative tail. The environment term —
-//! sky, sunlit and shaded terrain, scenery — varies smoothly and is fitted
-//! by least squares from a fixed set of sphere rays.
+//! (`c0 += L/4, c_dir += 3L/4·d`), and the environment — sky, sunlit and
+//! shaded terrain, scenery — is fitted by least squares from a fixed set of
+//! sphere rays. **The coefficients are not read back linearly.** A linear
+//! read of a lamp lobe is `¼L + ¾L cos θ`: negative over the third of the
+//! sphere facing away, which the shader's clamp turned into a hard, planar
+//! black edge across every object near a lamp (measured in the cafe: a
+//! 32x side-to-side ratio and a fifth of the sphere clamped). Instead
+//! [`ProbeSh::eval_l1`] recognises how the data was built. Per channel, with
+//! `a = |c_dir| / c0`:
+//!
+//! - `a ≤ ½`: the plain linear read. Broad light (sky, bounce) fits it
+//!   exactly and it cannot go negative here.
+//! - `a ≥ 1`: a split into an isotropic part and one clamped-cosine lobe —
+//!   `¼ + ¾cos` has DC equal to a third of its directional length, so
+//!   `iso = c0 − |c|/3` and the lobe has peak `4|c|/3` — drawn as `q³` with
+//!   `q = ½(1 + n·d)`, which has the same mean and peak as the clamped
+//!   cosine, is never negative, and reaches zero only directly opposite.
+//! - between: a smoothstep of the two. Both preserve the mean, so the blend
+//!   does.
+//!
+//! Against ground truth in a lamp-lit room this halves the error (rms 0.42
+//! to 0.22, dark side 0.43 to 0.14) and matches the linear read to the
+//! third decimal wherever the light is broad; `l1_fit_error_indoors` (an
+//! ignored test) is the measurement. The shader's `probe_radiance` mirrors
+//! it exactly — the two must agree or tests mean nothing.
 
 use bevy::prelude::*;
 use half::f16;
@@ -73,9 +92,16 @@ pub struct ProbeSh {
 
 impl ProbeSh {
     /// The smooth (L1) part of the irradiance for a surface normal, in
-    /// lightmap units: sky, bounce and placed lights.
+    /// lightmap units: sky, bounce and placed lights. See the module doc for
+    /// why this is not a linear read of the coefficients; `probe_radiance`
+    /// in `toon_lighting.wesl` is the same function.
     pub fn eval_l1(&self, n: Vec3) -> Vec3 {
-        (self.c[0] + self.c[1] * n.x + self.c[2] * n.y + self.c[3] * n.z).max(Vec3::ZERO)
+        let mut out = Vec3::ZERO;
+        for ch in 0..3 {
+            let dir = Vec3::new(self.c[1][ch], self.c[2][ch], self.c[3][ch]);
+            out[ch] = reconstruct_channel(self.c[0][ch], dir, n);
+        }
+        out
     }
 
     /// Full irradiance for a surface normal under a sun of `sun_rgb` shining
@@ -155,6 +181,34 @@ impl ProbeSh {
 /// Gaussian elimination with partial pivoting on a symmetric 4×4 system
 /// with a `Vec3` right-hand side. `None` if singular (fewer than four
 /// independent normals, which the bake never produces).
+/// Directionality below which a probe channel is read linearly, and above
+/// which it is read as an isotropic part plus one `q³` lobe; smoothstep
+/// between. Below `½` the linear read is exact for broad light and cannot be
+/// negative; at `1` the linear read reaches zero directly opposite and any
+/// higher it would ring negative, so the lobe takes over fully there.
+pub const PROBE_LOBE_BLEND: (f32, f32) = (0.5, 1.0);
+
+/// One channel of [`ProbeSh::eval_l1`]. Mirrored by `probe_channel` in
+/// `toon_lighting.wesl`.
+#[inline]
+pub fn reconstruct_channel(c0: f32, dir: Vec3, n: Vec3) -> f32 {
+    let c0 = c0.max(0.0);
+    let len = dir.length();
+    if len <= 1e-6 || c0 <= 0.0 {
+        return c0;
+    }
+    let a = len / c0;
+    let linear = (c0 + dir.dot(n)).max(0.0);
+    let iso = (c0 - len / 3.0).max(0.0);
+    let lobe_peak = (4.0 / 3.0) * len.min(3.0 * c0);
+    let q = 0.5 * (1.0 + n.dot(dir) / len);
+    let lobe = iso + lobe_peak * q * q * q;
+    let (a0, a1) = PROBE_LOBE_BLEND;
+    let t = ((a - a0) / (a1 - a0)).clamp(0.0, 1.0);
+    let w = t * t * (3.0 - 2.0 * t);
+    linear + (lobe - linear) * w
+}
+
 fn solve_4x4(mut a: [[f32; 4]; 4], mut b: [Vec3; 4]) -> Option<[Vec3; 4]> {
     for col in 0..4 {
         let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
@@ -676,7 +730,7 @@ mod tests {
     use super::*;
     use crate::game::world::terrain::{HeightmapData, storage::EnvironmentData};
 
-    fn flat_world() -> HeightmapData {
+    pub(super) fn flat_world() -> HeightmapData {
         let mut hm = HeightmapData::new((0.25, 0.25));
         for tx in -400..800 {
             for tz in -400..800 {
@@ -774,6 +828,8 @@ mod tests {
         assert!((31..=32).contains(&n), "{n}");
     }
 
+    /// A pure lamp lobe reads back with the peak and mean of the clamped
+    /// cosine it stands for, never negative, and zero only directly behind.
     #[test]
     fn lobe_peaks_at_its_direction_and_goes_dark_behind() {
         let l = Vec3::new(1.0, 0.8, 0.6);
@@ -784,10 +840,26 @@ mod tests {
             "peak {}",
             sh.eval_l1(d)
         );
-        assert_eq!(sh.eval_l1(-d), Vec3::ZERO);
-        // Linear in between.
+        assert!(
+            sh.eval_l1(-d).max_element() < 1e-6,
+            "behind {}",
+            sh.eval_l1(-d)
+        );
+        // Cubic in between: an eighth of the peak side-on, where the old
+        // linear read gave a quarter and went negative a third of the way
+        // round the back.
         let side = d.any_orthonormal_vector();
-        assert!((sh.eval_l1(side) - l * 0.25).abs().max_element() < 1e-5);
+        assert!((sh.eval_l1(side) - l * 0.125).abs().max_element() < 1e-5);
+        // Same energy as the clamped cosine: a quarter of the peak on average.
+        let dirs = fibonacci_sphere(2048);
+        let mean = dirs.iter().map(|&n| sh.eval_l1(n)).sum::<Vec3>() / dirs.len() as f32;
+        assert!(
+            (mean - l * 0.25).abs().max_element() < 0.01,
+            "mean {mean} should be {}",
+            l * 0.25
+        );
+        // And never negative anywhere.
+        assert!(dirs.iter().all(|&n| sh.eval_l1(n).min_element() >= 0.0));
     }
 
     /// A function that is already linear in `n` must be recovered exactly.
@@ -934,10 +1006,31 @@ mod tests {
             toward.x > toward.y && toward.y > toward.z,
             "and in the light's colour: {toward}"
         );
-        // The lobe's negative tail: the far side may lose some ambient, never gain.
+
+        // The side facing away. Two things can reach it: the lamp's light
+        // bounced off the ground (a real gain, since v11), and the lobe's
+        // negative tail (an artefact the reconstruction exists to remove).
+        // Bake once more with no bounce to separate them.
+        let no_bounce = BakeConfig {
+            terrain_albedo: 0.0,
+            scenery_albedo: 0.0,
+            ..config.clone()
+        };
+        let without_nb = bake_chunk_probes(&cache, 0, 0, &no_bounce, &dark, &bvh)
+            .get(5, 1, 5)
+            .unwrap();
+        let with_nb = bake_chunk_probes(&cache, 0, 0, &no_bounce, &lit, &bvh)
+            .get(5, 1, 5)
+            .unwrap();
+        let away_nb = with_nb.eval_l1(Vec3::NEG_X) - without_nb.eval_l1(Vec3::NEG_X);
+        println!("far side: with bounce {away}, without bounce {away_nb}");
         assert!(
-            away.x <= 0.0 && away.x > -1.0,
-            "facing away changed by {away}"
+            away_nb.abs().max_element() < 0.05,
+            "with no bounce the far side must be untouched by the lamp, changed by {away_nb}"
+        );
+        assert!(
+            away.min_element() > -0.05,
+            "with bounce the far side may gain from the lit ground but never darken: {away}"
         );
         // Sun visibility is untouched by placed lights.
         assert_eq!(with.sun_vis, without.sun_vis);
@@ -986,5 +1079,382 @@ mod tests {
         assert!(chunk_probes_path(Path::new("w"), 3, -4).ends_with(format!(
             "chunks/chunk_3_-4_probes.v{LIGHTMAP_FORMAT_VERSION}.bin"
         )));
+    }
+}
+
+#[cfg(test)]
+mod diag {
+    use super::*;
+    use crate::game::world::baking::lightmap::BakedLight;
+
+    /// A room lit through its doorway: four walls, a ceiling, a 3 m gap in
+    /// the +Z wall, and a low sun shining in through it.
+    fn doorway_room() -> TriangleBvh {
+        let (hx, hz, h) = (10.0f32, 6.0f32, 3.0f32);
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        let mut quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| {
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        };
+        quad(
+            Vec3::new(-hx, h, -hz),
+            Vec3::new(hx, h, -hz),
+            Vec3::new(hx, h, hz),
+            Vec3::new(-hx, h, hz),
+        );
+        for (a, b) in [
+            (Vec3::new(-hx, 0.0, -hz), Vec3::new(hx, 0.0, -hz)),
+            (Vec3::new(-hx, 0.0, -hz), Vec3::new(-hx, 0.0, hz)),
+            (Vec3::new(hx, 0.0, -hz), Vec3::new(hx, 0.0, hz)),
+            (Vec3::new(1.5, 0.0, hz), Vec3::new(hx, 0.0, hz)),
+            (Vec3::new(-hx, 0.0, hz), Vec3::new(-1.5, 0.0, hz)),
+        ] {
+            quad(a, b, b + Vec3::Y * h, a + Vec3::Y * h);
+        }
+        TriangleBvh::build(tris)
+    }
+
+    /// How well the stored L1 reproduces the true irradiance an object
+    /// would receive at an indoor probe, with and without limiting the
+    /// directional term. `cargo test l1_fit_error_indoors -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn l1_fit_error_indoors() {
+        let hm = super::tests::flat_world();
+        let cache = BakeHeightCache::extract(&hm, -60.0, -60.0, 60.0, 60.0);
+        let bvh = doorway_room();
+        let config = BakeConfig {
+            probe_rays: 256,
+            ao_steps: 32,
+            shadow_steps: 48,
+            ..Default::default()
+        };
+        // LAMP=intensity,range puts a point light a metre off the -X wall.
+        let lamp: Option<(f32, f32)> =
+            std::env::var("LAMP")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| {
+                    let p: Vec<f32> = v.split(',').map(|n| n.parse().unwrap()).collect();
+                    (p[0], p[1])
+                });
+        let lighting = BakeLighting {
+            sun_dir: Vec3::new(0.2, 0.35, 1.0).normalize(),
+            sun_rgb: Vec3::splat(3.0),
+            ambient_rgb: Vec3::splat(0.4),
+            lights: lamp
+                .map(|(i, r)| {
+                    vec![BakedLight::point(
+                        Vec3::new(-9.0, 2.0, 0.0),
+                        Vec3::ONE,
+                        i,
+                        r,
+                    )]
+                })
+                .unwrap_or_default(),
+        };
+        let ctx = ProbeContext {
+            cache: &cache,
+            bvh: &bvh,
+            lighting: &lighting,
+            config: &config,
+            env_dirs: fibonacci_sphere(256),
+            normals: fibonacci_sphere(FIT_NORMALS),
+        };
+        let lum = |v: Vec3| 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+        let eval_normals = fibonacci_sphere(512);
+
+        println!(
+            " probe          |  k   | rms err | max err | lit-side err | dark-side err | clamped  (true E range)"
+        );
+        for p in [
+            Vec3::new(-6.0, 1.0, 0.0),
+            Vec3::new(-3.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 2.0),
+        ] {
+            // Ground truth: the gathered environment integrated exactly for every eval normal.
+            let env: Vec<(Vec3, Vec3)> = ctx
+                .env_dirs
+                .iter()
+                .map(|&d| {
+                    let terrain_t = ctx.terrain_hit(p, d, config.ao_radius, config.ao_steps);
+                    let bound = terrain_t.unwrap_or(config.ao_radius);
+                    let r = match ctx.bvh.nearest_hit_normal(p, d, bound) {
+                        Some((t, n)) => ctx.scenery_radiance(p, d, t, n),
+                        None => match terrain_t {
+                            Some(t) => ctx.terrain_radiance(p, d, t),
+                            None => lighting.ambient_rgb,
+                        },
+                    };
+                    (d, r)
+                })
+                .collect();
+            let scale = 4.0 / env.len() as f32;
+            // Truth = environment integral + every lamp's exact clamped cosine.
+            let truth: Vec<f32> = eval_normals
+                .iter()
+                .map(|&n| {
+                    let mut e = Vec3::ZERO;
+                    for (d, l) in &env {
+                        e += *l * n.dot(*d).max(0.0);
+                    }
+                    e *= scale;
+                    for light in &lighting.lights {
+                        if let Some((rad, dir, dist)) = light.sample(p, n) {
+                            let vis = raycast::cast_shadow_ray_segment(
+                                p,
+                                p,
+                                dir,
+                                dist,
+                                &cache,
+                                &bvh,
+                                config.light_shadow_steps(dist),
+                            );
+                            e += rad * vis;
+                        }
+                    }
+                    lum(e)
+                })
+                .collect();
+            let (tmin, tmax) = truth
+                .iter()
+                .fold((f32::MAX, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            let brightest = eval_normals[truth
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0];
+
+            let sh = ctx.shade(p);
+            let a_lum = Vec3::new(lum(sh.c[1]), lum(sh.c[2]), lum(sh.c[3])).length()
+                / lum(sh.c[0]).max(1e-6);
+            println!("   a = |c_dir|/c0 = {a_lum:.2}");
+            let linear = |t: &ProbeSh, n: Vec3| {
+                (t.c[0] + t.c[1] * n.x + t.c[2] * n.y + t.c[3] * n.z).max(Vec3::ZERO)
+            };
+            for (label, read) in [("linear", true), ("eval_l1", false)] {
+                let mut se = 0.0;
+                let mut mx: f32 = 0.0;
+                let mut lit = 0.0;
+                let mut dark = 0.0;
+                let (mut nl, mut nd) = (0, 0);
+                let mut clamped = 0;
+                for (i, n) in eval_normals.iter().enumerate() {
+                    let raw = sh.c[0] + sh.c[1] * n.x + sh.c[2] * n.y + sh.c[3] * n.z;
+                    if read && lum(raw) < 0.0 {
+                        clamped += 1;
+                    }
+                    let got = if read {
+                        linear(&sh, *n)
+                    } else {
+                        sh.eval_l1(*n)
+                    };
+                    let e = (lum(got) - truth[i]).abs();
+                    se += e * e;
+                    mx = mx.max(e);
+                    if n.dot(brightest) > 0.5 {
+                        lit += e;
+                        nl += 1;
+                    } else if n.dot(brightest) < -0.5 {
+                        dark += e;
+                        nd += 1;
+                    }
+                }
+                println!(
+                    "({:5.1},{:3.1},{:5.1}) | {label:>8} | {:.4}  | {:.4}  |   {:.4}     |   {:.4}      |  {:3.0}%    ({tmin:.3}..{tmax:.3})",
+                    p.x,
+                    p.y,
+                    p.z,
+                    (se / eval_normals.len() as f32).sqrt(),
+                    mx,
+                    lit / nl.max(1) as f32,
+                    dark / nd.max(1) as f32,
+                    100.0 * clamped as f32 / eval_normals.len() as f32
+                );
+            }
+        }
+    }
+
+    /// A probe next to a lamp must not read as black on the side facing
+    /// away, and a probe under broad light must still read linearly.
+    ///
+    /// The linear read of a lamp lobe (`¼ + ¾cos`) is negative over a third
+    /// of the sphere; clamped, that drew a hard planar edge across every
+    /// object near a lamp.
+    #[test]
+    fn a_lamp_lit_probe_is_not_black_behind_and_a_sky_lit_one_stays_linear() {
+        let hm = super::tests::flat_world();
+        let cache = BakeHeightCache::extract(&hm, -60.0, -60.0, 60.0, 60.0);
+        let bvh = doorway_room();
+        let config = BakeConfig {
+            probe_rays: 128,
+            ao_steps: 16,
+            shadow_steps: 32,
+            ..Default::default()
+        };
+        let lighting = BakeLighting {
+            sun_dir: Vec3::new(0.2, 0.35, 1.0).normalize(),
+            sun_rgb: Vec3::splat(3.0),
+            ambient_rgb: Vec3::splat(0.4),
+            lights: vec![BakedLight::point(
+                Vec3::new(-9.0, 2.0, 0.0),
+                Vec3::ONE,
+                4.0,
+                8.0,
+            )],
+        };
+        let ctx = ProbeContext {
+            cache: &cache,
+            bvh: &bvh,
+            lighting: &lighting,
+            config: &config,
+            env_dirs: fibonacci_sphere(128),
+            normals: fibonacci_sphere(FIT_NORMALS),
+        };
+        let lum = |v: Vec3| 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+        let linear = |t: &ProbeSh, n: Vec3| {
+            (t.c[0] + t.c[1] * n.x + t.c[2] * n.y + t.c[3] * n.z).max(Vec3::ZERO)
+        };
+
+        // Near the lamp (which is at -X): the side facing away from it.
+        let near = ctx.shade(Vec3::new(-6.0, 1.0, 0.0));
+        let away = Vec3::X;
+        assert!(
+            lum(linear(&near, away)) < 0.02,
+            "precondition: the linear read is what used to be black here, got {:?}",
+            linear(&near, away)
+        );
+        // What the walls send back is at least ambient x albedo, spread over
+        // the half of the sphere they fill.
+        let fill_floor = lum(lighting.ambient_rgb) * config.scenery_albedo * 0.5;
+        assert!(
+            lum(near.eval_l1(away)) > fill_floor * 0.5,
+            "the side facing away from the lamp must keep its fill light: {:?} (floor {fill_floor:.3})",
+            near.eval_l1(away)
+        );
+        assert!(
+            (lum(near.eval_l1(-away)) - lum(linear(&near, -away))).abs() < 0.5,
+            "the lit side should not move far: {:?} vs linear {:?}",
+            near.eval_l1(-away),
+            linear(&near, -away)
+        );
+
+        // Far from the lamp, under broad light: identical to the linear read.
+        let far = ctx.shade(Vec3::new(6.0, 1.0, 4.0));
+        for n in fibonacci_sphere(64) {
+            let (a, b) = (far.eval_l1(n), linear(&far, n));
+            assert!(
+                (a - b).length() < 1e-5,
+                "broad light must read linearly: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// Read a baked probe grid and report, per column at a given height,
+    /// how the L1 part behaves on an object: how directional it is and how
+    /// much of the sphere the `max(0, …)` clamp cuts off. Diagnostic only:
+    /// `PROBES=path [Y=metres] cargo test dump_probes -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_probes() {
+        let path = std::env::var("PROBES").expect("set PROBES=<chunk_X_Y_probes.vN.bin>");
+        let y_m: f32 = std::env::var("Y")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        let grid = parse_probes(&std::fs::read(&path).unwrap()).unwrap();
+        let lum = |v: Vec3| 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+        let dirs = fibonacci_sphere(256);
+        println!(
+            "chunk ({}, {}) cells x0={} y0={} z0={} n=({}, {}, {})  y range {:?}",
+            grid.chunk_x,
+            grid.chunk_y,
+            grid.x0,
+            grid.y0,
+            grid.z0,
+            grid.nx,
+            grid.ny,
+            grid.nz,
+            grid.y_range()
+        );
+        let cy = probe_cell_index(y_m);
+        println!(
+            "row at y = {y_m} m (cell {cy}); per column: c0 lum | dir ratio | clamped % | sun_vis"
+        );
+        println!("legend map A: dir ratio |c_dir|/c0  (.<0.25 :<0.5 -<0.75 =<1 #>=1)");
+        println!("legend map B: clamped sphere fraction  (. 0  : <10%  - <25%  = <40%  # >=40%)");
+        let mut map_a = Vec::new();
+        let mut map_b = Vec::new();
+        let mut map_s = Vec::new();
+        let mut worst: Vec<(f32, i32, i32, ProbeSh)> = Vec::new();
+        for z in 0..grid.nz as i32 {
+            let (mut a, mut b, mut s) = (String::new(), String::new(), String::new());
+            for x in 0..grid.nx as i32 {
+                let Some(p) = grid.get_clamped_y(grid.x0 + x, cy, grid.z0 + z) else {
+                    a.push('?');
+                    b.push('?');
+                    s.push('?');
+                    continue;
+                };
+                let c0 = lum(p.c[0]).max(1e-6);
+                let cd = Vec3::new(lum(p.c[1]), lum(p.c[2]), lum(p.c[3])).length();
+                let ratio = cd / c0;
+                let clamped = dirs
+                    .iter()
+                    .filter(|n| lum(p.c[0] + p.c[1] * n.x + p.c[2] * n.y + p.c[3] * n.z) < 0.0)
+                    .count() as f32
+                    / dirs.len() as f32;
+                a.push(match ratio {
+                    r if r < 0.25 => '.',
+                    r if r < 0.5 => ':',
+                    r if r < 0.75 => '-',
+                    r if r < 1.0 => '=',
+                    _ => '#',
+                });
+                b.push(match clamped {
+                    0.0 => '.',
+                    c if c < 0.10 => ':',
+                    c if c < 0.25 => '-',
+                    c if c < 0.40 => '=',
+                    _ => '#',
+                });
+                s.push(if p.sun_vis > 0.5 { '1' } else { '0' });
+                worst.push((clamped, grid.x0 + x, grid.z0 + z, p));
+            }
+            map_a.push(a);
+            map_b.push(b);
+            map_s.push(s);
+        }
+        println!("--- A: directionality ---");
+        for l in &map_a {
+            println!("{l}");
+        }
+        println!("--- B: clamped fraction ---");
+        for l in &map_b {
+            println!("{l}");
+        }
+        println!("--- S: sun_vis ---");
+        for l in &map_s {
+            println!("{l}");
+        }
+        worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+        println!("--- most clamped probes ---");
+        for (c, x, z, p) in worst.iter().take(6) {
+            let world = (probe_cell_centre(*x), probe_cell_centre(*z));
+            println!(
+                "cell ({x},{z}) world ({:.1},{:.1}) clamped {:.0}%  c0={:.3} |cdir|={:.3} sun_vis={}  E(+X)={:.3} E(-X)={:.3} E(+Y)={:.3} E(-Y)={:.3}",
+                world.0,
+                world.1,
+                c * 100.0,
+                lum(p.c[0]),
+                Vec3::new(lum(p.c[1]), lum(p.c[2]), lum(p.c[3])).length(),
+                p.sun_vis,
+                lum(p.eval_l1(Vec3::X)),
+                lum(p.eval_l1(Vec3::NEG_X)),
+                lum(p.eval_l1(Vec3::Y)),
+                lum(p.eval_l1(Vec3::NEG_Y)),
+            );
+        }
     }
 }

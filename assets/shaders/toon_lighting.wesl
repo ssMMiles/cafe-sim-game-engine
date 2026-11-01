@@ -62,19 +62,54 @@ var probe_c2: texture_3d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(107)
 var probe_c3: texture_3d<f32>;
 
+// Directionality below which a probe channel is read linearly and above
+// which as an isotropic part plus one q^3 lobe, smoothstep between. Mirrors
+// `PROBE_LOBE_BLEND` / `reconstruct_channel` in baking/probes.rs — the two
+// must agree; the Rust side is what the tests measure.
+const PROBE_LOBE_A0: f32 = 0.5;
+const PROBE_LOBE_A1: f32 = 1.0;
+
+// One colour channel of the smooth (L1) irradiance. A linear read of the
+// coefficients is exact for broad light, but a lamp's lobe (1/4 + 3/4 cos)
+// goes negative over a third of the sphere, and clamping that drew a hard
+// planar black edge across every object near a lamp. Above a = |c|/c0 = 1
+// the channel is instead split into an isotropic part and one lobe drawn as
+// q^3 (same mean and peak as the clamped cosine, never negative, zero only
+// directly opposite); below 1/2 it is the linear read; between, a blend.
+fn probe_channel(c0_in: f32, dir: vec3<f32>, n: vec3<f32>) -> f32 {
+    let c0 = max(c0_in, 0.0);
+    let len = length(dir);
+    if (len <= 1e-6 || c0 <= 0.0) {
+        return c0;
+    }
+    let a = len / c0;
+    let linear = max(c0 + dot(dir, n), 0.0);
+    let iso = max(c0 - len / 3.0, 0.0);
+    let lobe_peak = (4.0 / 3.0) * min(len, 3.0 * c0);
+    let q = 0.5 * (1.0 + dot(n, dir) / len);
+    let lobe = iso + lobe_peak * q * q * q;
+    let w = smoothstep(PROBE_LOBE_A0, PROBE_LOBE_A1, a);
+    return mix(linear, lobe, w);
+}
+
 // Radiance a surface with normal `n` at `world_pos` receives, from the probe
-// volume: the clamped L1 part plus the sun evaluated exactly against the
-// probe's stored visibility (a hard terminator, which four coefficients
-// could not hold — see the plan). Cell i's probe sits at (i + 0.5) · cell, and
-// texel i's centre at (i + 0.5) / dims, so the two line up with a plain
-// divide; trilinear filtering interpolates between probes.
+// volume: the L1 part read per channel through `probe_channel`, plus the sun
+// evaluated exactly against the probe's stored visibility (a hard
+// terminator, which four coefficients could not hold — see the plan). Cell
+// i's probe sits at (i + 0.5) · cell, and texel i's centre at (i + 0.5) /
+// dims, so the two line up with a plain divide; trilinear filtering
+// interpolates between probes.
 fn probe_radiance(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let uvw = world_pos / (toon.probe_cell_size * toon.probe_dims.xyz);
     let s0 = textureSampleLevel(probe_c0, probe_sampler, uvw, 0.0);
     let s1 = textureSampleLevel(probe_c1, probe_sampler, uvw, 0.0);
     let s2 = textureSampleLevel(probe_c2, probe_sampler, uvw, 0.0);
     let s3 = textureSampleLevel(probe_c3, probe_sampler, uvw, 0.0);
-    let l1 = max(s0.rgb + s1.rgb * n.x + s2.rgb * n.y + s3.rgb * n.z, vec3<f32>(0.0));
+    let l1 = vec3<f32>(
+        probe_channel(s0.r, vec3<f32>(s1.r, s2.r, s3.r), n),
+        probe_channel(s0.g, vec3<f32>(s1.g, s2.g, s3.g), n),
+        probe_channel(s0.b, vec3<f32>(s1.b, s2.b, s3.b), n),
+    );
     let sun = toon.sun_rgb.rgb * (s0.a * max(dot(n, toon.sun_dir.xyz), 0.0));
     return l1 + sun;
 }

@@ -639,6 +639,44 @@ reverse — the defects above were making baked edges *wrong*, not merely
 sharp. If the two still read as mismatched once they are correct, the lever
 is `PROBE_CELL_SIZE`, at cubic cost in probe count and memory.
 
+### 7.15 Probe L1 was read back linearly, so lamps cut a hard black edge across dynamic objects
+
+**Fixed 2026-10-31** — a shader change only, no re-bake.
+
+The smooth part of a probe is L1 in the linear basis, and the shader read it
+as `max(0, c0 + c·n)`. Placed lights are stored as peak-preserving lobes
+(`¼L + ¾L cos θ`), which is negative over the third of the sphere facing
+away. Read linearly and clamped, an object near a lamp was bright on one side
+and *black* on the other, with a planar edge at `cos θ = −⅓` — a straight
+hard line across the object at an angle set by the lamp, not by any shadow.
+That is what "probe-lit objects look sharp and oddly shaped" was.
+
+Measured on the cafe's own v11 probes (`dump_probes`, an ignored test): inside
+the shell `|c_dir| / c0 ≥ 1` almost everywhere, 10–25 % of the sphere clamped,
+and the worst probe read `E(+X) = 0.017` against `E(−X) = 0.551`. The same
+signature sits around the campfire lamp outside. Everywhere else the ratio is
+under 0.25 and nothing clamps — only lamp-lit probes ring, because a lamp is
+the one thing four coefficients cannot hold.
+
+Shrinking the lobe (classic deringing) was measured and rejected: it fixes the
+dark side by dimming the lit side and the total error gets *worse* (rms 0.42 →
+0.48). The fix instead reads the data the way it was built. Per channel, with
+`a = |c| / c0`:
+
+| `a` | read | why |
+|---|---|---|
+| ≤ ½ | linear, `c0 + c·n` | exact for broad light; cannot be negative |
+| ≥ 1 | `(c0 − |c|/3) + (4|c|/3)·q³`, `q = ½(1 + n·ĉ)` | a `¼+¾cos` lobe's DC is a third of its length, so this recovers the isotropic part exactly and draws the lobe as a cubic with the clamped cosine's mean and peak, zero only directly behind |
+| between | smoothstep | both preserve the mean, so the blend does |
+
+Against ground truth in a lamp-lit room (`l1_fit_error_indoors`): rms 0.42 →
+0.22, dark side 0.43 → 0.14 at a 4-unit lamp; 1.35 → 0.72 at 12. Under broad
+light it matches the linear read to the third decimal. `reconstruct_channel`
+(Rust) and `probe_channel` (WESL) are the same function and must stay so.
+
+Still true, and now the remaining gap for dynamic objects: no AO, no
+self-shadowing, and a 2 m lattice (§7.14).
+
 ---
 
 ## 8. Suggested order of work
@@ -651,8 +689,9 @@ is `PROBE_CELL_SIZE`, at cubic cost in probe count and memory.
 2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
 3. §7.5 object ray origin — needs a repro case first.
 3b. ~~§7.9 AO sample rotation~~ (v9), ~~§7.10/§7.11 scenery re-emits bounce~~
-   (v10), ~~§7.12 lights bounce + §7.13 object bake margin~~ (v11) — **done.**
-   §7.14 records why probe shadows look smoother than baked ones.
+   (v10), ~~§7.12 lights bounce + §7.13 object bake margin~~ (v11),
+   ~~§7.15 probe lobe read~~ (shader only) — **done.** §7.14 records why
+   probe shadows are smoother than baked ones.
 4. ~~§7.3 AO weighting~~ — **done** (v7). ~~§7.4 object bounce~~ — **done**
    (v8). Re-bake (Shift+B) to see either.
 5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`

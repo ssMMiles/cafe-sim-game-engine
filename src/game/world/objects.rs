@@ -1440,3 +1440,28 @@ mod tests {
         assert!(back.scale.abs_diff_eq(t.scale, 1e-6));
     }
 }
+
+#[cfg(test)]
+mod diag {
+    /// Print the records in a chunk's `.objects` file. Diagnostic only:
+    /// `OBJECTS=path cargo test dump_objects -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_objects() {
+        let path = std::env::var("OBJECTS").expect("set OBJECTS=<chunk_X_Y.objects>");
+        let file = super::parse_chunk_objects_from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        for r in &file.entities {
+            println!(
+                "id {:>3} {:<14} pos ({:7.2},{:6.2},{:7.2}) scale {:?} parent {:?} kind {:?}",
+                r.id,
+                r.name,
+                r.position[0],
+                r.position[1],
+                r.position[2],
+                r.scale,
+                r.parent,
+                r.kind
+            );
+        }
+    }
+}

@@ -923,3 +923,30 @@ Process notes worth keeping:
 - Cost barely moved: interior per texel 3893 ns (v10) -> 4175 ns. Note the
   benchmark has **no placed lights**, so it does not price the new segment
   ray per light per bounce hit.
+
+
+## Why probe-lit objects looked sharp and oddly shaped — 31 October 2026
+
+I first misread this as "baked edges too irregular" and fixed a real but
+different bug (7.13). The user meant the *probe-lit* objects. Lesson: when
+the complaint compares two systems, confirm which side is wrong before
+diagnosing.
+
+- Cause: the shader read the L1 part linearly, `max(0, c0 + c·n)`. Lamp
+  lobes are stored peak-preserving (`¼+¾cos`), negative over a third of the
+  sphere → hard planar black edge on objects near a lamp. Measured on the
+  user's v11 probes with the new `dump_probes` ignored test: inside the
+  cafe `|c_dir|/c0 ≥ 1`, 10–25 % of the sphere clamped, worst probe
+  E(+X)=0.017 vs E(−X)=0.551. Outdoors ratio < 0.25, no clamp — only lamps
+  ring. The two `#` blobs in the directionality map were lamp 79 (in the
+  cafe, 1.28/16.8 m at 2.5 m) and lamp 39 (the campfire, 3.36, orange).
+- **Deringing by shrinking the lobe is worse** — measured rms 0.42→0.48:
+  it dims the lit side more than it fixes the dark. Don't reach for it.
+- Fix (shader + `ProbeSh::eval_l1`, no re-bake): per channel, `a=|c|/c0`;
+  linear below ½, `(c0−|c|/3) + (4|c|/3)q³` above 1, smoothstep between.
+  Works because `¼+¾cos` has DC = ⅓ of its directional length, so the
+  isotropic part is recoverable exactly. Measured rms 0.42→0.22, dark side
+  0.43→0.14; broad light unchanged to 1e-3. `l1_fit_error_indoors` is the
+  harness (LAMP=intensity,range env var).
+- `dump_objects` (ignored test in objects.rs) prints a chunk's placed
+  records — the fastest way to find where a placed light or the shell is.
