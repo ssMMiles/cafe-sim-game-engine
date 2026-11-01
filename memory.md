@@ -893,3 +893,33 @@ Process notes worth keeping:
   *between* cells and false *within* one, and each cell is a single triangle
   mapped linearly (the cafe floor's is 256x256 texels over 20x12 m). A
   per-cell coarse lattice is ~10x for a few lines. See GPU_OBJECT_BAKE_PLAN.md.
+
+## Lights bounce; the object atlas got a bake margin — 31 October 2026 (v11)
+
+- **Placed lights now re-emit** at every bounce hit (`compute_indirect_bounce`,
+  `ProbeContext::direct_at`, WGSL `compute_bounce`). The knock-on worth
+  remembering: indirect light had to become a **`Vec3`**, because it used to
+  be an `f32` the caller multiplied by `sun_rgb` and a lamp's colour is its
+  own. `sun_and_ambient` adds `bounce` directly now, and terrain's
+  low-frequency grid interpolates `(f32, Vec3)`.
+- **Object atlases had no bake margin.** `blur_cells` clamps to the
+  triangle's cell *and* to shaded texels, so every triangle edge got a
+  one-sided kernel — a linear field came back shifted by gradient x ~r/2, in
+  opposite directions across a shared edge. Measured on a unit quad: worst
+  edge error 0.0488 (4.9% of the range) without, 0.0095 with. Across a shared
+  edge those oppose, so the step was ~10% of the range — about half a toon
+  band, drawn as band contours jumping along triangle seams. **This is the
+  same bug `ChunkBakeGrid` fixed for terrain chunks, one level down**, and
+  the same fix: `rasterize_geometry` shades a `blur_radius` band of
+  extrapolated surface around each triangle (the UV-to-world map is affine,
+  so extrapolation is just barycentrics outside [0,1]; for two triangles of a
+  flat quad it reproduces the neighbour exactly).
+- **Probe shadows are smooth because they are coarse, not blurred.** One
+  *binary* `sun_vis` sample per 2 m probe, trilinearly interpolated by the
+  sampler. There is no blur to tune and no knob; the only lever is
+  `PROBE_CELL_SIZE` at cubic cost. Asking baked shadows to match them means
+  discarding detail — the right reading of "baked borders look irregular" was
+  that they were *wrong* (the margin bug), not that they were too sharp.
+- Cost barely moved: interior per texel 3893 ns (v10) -> 4175 ns. Note the
+  benchmark has **no placed lights**, so it does not price the new segment
+  ray per light per bounce hit.

@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 
 use super::bvh::TriangleBvh;
+use super::lightmap::BakeLighting;
 use crate::game::world::terrain::HeightmapData;
 
 // ============================================================================
@@ -371,18 +372,20 @@ pub fn compute_indirect_bounce(
     normal: Vec3,
     cache: &BakeHeightCache,
     bvh: &TriangleBvh,
-    sun_dir: Vec3,
+    lighting: &BakeLighting,
     shadow_max_dist: f32,
     n_rays: u32,
     steps: u32,
     terrain_albedo: f32,
     scenery_albedo: f32,
     bounce_count: u32,
+    light_shadow_steps: impl Fn(f32) -> u32,
     seed_offset: u32,
-) -> f32 {
+) -> Vec3 {
     if n_rays == 0 || bounce_count == 0 {
-        return 0.0;
+        return Vec3::ZERO;
     }
+    let sun_dir = lighting.sun_dir;
 
     // Rotate the entire hemisphere sample set by a per-texel azimuth so adjacent
     // texels don't share the same 8 directions (prevents correlated stripe patterns).
@@ -391,7 +394,7 @@ pub fn compute_indirect_bounce(
     // Bounce marching uses the full shadow reach, not the (shorter) AO radius:
     // back-of-hill surfaces need to see sunlit terrain up to 4× further away.
     let step_size = shadow_max_dist / steps as f32;
-    let mut accum = 0.0_f32;
+    let mut accum = Vec3::ZERO;
 
     // Loop-invariant: the frame depends only on the surface normal.
     let (tangent, bitangent) = build_tangent_frame(normal);
@@ -470,9 +473,24 @@ pub fn compute_indirect_bounce(
                 shadow_max_dist,
                 steps,
             );
+            // Direct light at the hit: the sun, plus every placed light that
+            // reaches it. A lamp pointed at a wall lights the room through
+            // this term and nothing else.
+            let direct = lighting.sun_rgb * (ndotl_q * vis_q)
+                + lighting.local_lights(hit_mesh_pos, hit_normal, |dir, dist| {
+                    cast_shadow_ray_segment(
+                        hit_pos,
+                        hit_mesh_pos,
+                        dir,
+                        dist,
+                        cache,
+                        bvh,
+                        light_shadow_steps(dist),
+                    )
+                });
             // No cur_cos_w here — it cancels with the PDF for cosine-weighted
             // hemisphere sampling.
-            accum += throughput * ndotl_q * vis_q * albedo;
+            accum += direct * (throughput * albedo);
             throughput *= albedo;
 
             // Resample direction at the hit point using a proper per-bounce
@@ -574,7 +592,18 @@ fn hemisphere_dir_for_seed(
 #[cfg(test)]
 mod indoor {
     use super::*;
+    use crate::game::world::baking::lightmap::BakedLight;
     use crate::game::world::terrain::HeightmapData;
+
+    /// Sun only, no sky and no placed lights, so a test reads off one term.
+    fn sun_only(dir: Vec3) -> BakeLighting {
+        BakeLighting {
+            sun_dir: dir,
+            sun_rgb: Vec3::ONE,
+            ambient_rgb: Vec3::ZERO,
+            lights: Vec::new(),
+        }
+    }
 
     /// A room with a doorway: the case where AO carries all the shading,
     /// because the sun is blocked and only terrain re-emits bounce.
@@ -652,6 +681,80 @@ mod indoor {
         out
     }
 
+    /// How much Monte-Carlo noise survives the bake's blur, per term, for
+    /// the *object* bake — which evaluates AO and bounce per texel, where
+    /// the terrain bake evaluates them on a grid `cpu_lowfreq_downsample`
+    /// times coarser and interpolates.
+    ///
+    /// `cargo test --release object_bake_residual_noise -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn object_bake_residual_noise() {
+        let bvh = room();
+        let cache = ground();
+        let n = 64usize;
+        let d = 1.0 / 11.0;
+        let (x0, z0) = (-5.0f32, -2.0f32);
+        let sun = Vec3::new(0.3, 0.6, 0.74).normalize();
+
+        let at = |i: usize, j: usize| Vec3::new(x0 + i as f32 * d, 0.02, z0 + j as f32 * d);
+
+        let mut ao16 = vec![0.0; n * n];
+        let mut ao_ref = vec![0.0; n * n];
+        let mut bo8 = vec![0.0; n * n];
+        let mut bo_ref = vec![0.0; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                let o = at(i, j);
+                let seed = (j * n + i) as u32;
+                ao16[j * n + i] = compute_ao(o, o, Vec3::Y, &cache, &bvh, 20.0, 16, 32, seed);
+                ao_ref[j * n + i] = compute_ao(o, o, Vec3::Y, &cache, &bvh, 20.0, 512, 32, seed);
+                let lighting = sun_only(sun);
+                let bounce = |rays: u32| {
+                    compute_indirect_bounce(
+                        o,
+                        o,
+                        Vec3::Y,
+                        &cache,
+                        &bvh,
+                        &lighting,
+                        80.0,
+                        rays,
+                        64,
+                        0.5,
+                        0.5,
+                        1,
+                        |_| 48,
+                        seed,
+                    )
+                    .x
+                };
+                bo8[j * n + i] = bounce(8);
+                bo_ref[j * n + i] = bounce(256);
+            }
+        }
+
+        let report = |label: &str, got: &[f32], reference: &[f32]| {
+            let b = blur(got, n, 4);
+            let r = blur(reference, n, 4);
+            let mean = b.iter().zip(&r).map(|(a, c)| (a - c).abs()).sum::<f32>() / b.len() as f32;
+            let max = b
+                .iter()
+                .zip(&r)
+                .map(|(a, c)| (a - c).abs())
+                .fold(0.0f32, f32::max);
+            let signal = r.iter().cloned().fold(0.0f32, f32::max)
+                - r.iter().cloned().fold(f32::MAX, f32::min);
+            println!(
+                "{label:<8} after blur: mean err {mean:.4} max {max:.4} | signal range {signal:.4} \
+                 | max err is {:.0}% of a toon band (0.2)",
+                100.0 * max / 0.2
+            );
+        };
+        report("ao x16", &ao16, &ao_ref);
+        report("bounce x8", &bo8, &bo_ref);
+    }
+
     /// Scenery must re-emit bounce light, not just absorb it.
     ///
     /// A sunlit wall is the only indirect light an enclosed interior ever
@@ -679,6 +782,7 @@ mod indoor {
         let o = Vec3::new(0.0, 1.0, 0.0);
         let n = Vec3::X;
 
+        let lighting = sun_only(sun_dir);
         let bounce = |scenery_albedo: f32| {
             compute_indirect_bounce(
                 o,
@@ -686,15 +790,17 @@ mod indoor {
                 n,
                 &cache,
                 &wall,
-                sun_dir,
+                &lighting,
                 80.0,
                 16,
                 64,
                 0.0,
                 scenery_albedo,
                 1,
+                |_| 48,
                 7,
             )
+            .x
         };
         let absorbed = bounce(0.0);
         let reemitted = bounce(0.5);
@@ -702,6 +808,78 @@ mod indoor {
         assert!(
             reemitted > 0.01,
             "a sunlit wall should bounce light onto a surface facing it, got {reemitted}"
+        );
+    }
+
+    /// A placed lamp must light the room through the surfaces it falls on,
+    /// not only the ones it shines on directly.
+    ///
+    /// Re-emission used to carry the sun and sky and nothing else, so a
+    /// windowless interior lit by lamps had no indirect light at all. The
+    /// sun is zeroed here, so the only thing that can produce a non-zero
+    /// bounce is the lamp lighting the wall and the wall lighting us.
+    #[test]
+    fn a_lamp_lights_the_wall_it_faces_and_the_wall_lights_the_room() {
+        let wall = TriangleBvh::build(vec![
+            [
+                Vec3::new(5.0, 0.0, -6.0),
+                Vec3::new(5.0, 6.0, -6.0),
+                Vec3::new(5.0, 0.0, 6.0),
+            ],
+            [
+                Vec3::new(5.0, 6.0, -6.0),
+                Vec3::new(5.0, 6.0, 6.0),
+                Vec3::new(5.0, 0.0, 6.0),
+            ],
+        ]);
+        let cache = ground();
+        let o = Vec3::new(0.0, 1.0, 0.0);
+        let n = Vec3::X;
+
+        // No sun and no sky: the lamp is the only light in the world.
+        let dark = BakeLighting {
+            sun_dir: Vec3::Y,
+            sun_rgb: Vec3::ZERO,
+            ambient_rgb: Vec3::ZERO,
+            lights: Vec::new(),
+        };
+        let lamplit = BakeLighting {
+            lights: vec![BakedLight::point(
+                Vec3::new(3.5, 1.5, 0.0),
+                Vec3::ONE,
+                4.0,
+                8.0,
+            )],
+            ..dark.clone()
+        };
+
+        let bounce = |lighting: &BakeLighting| {
+            compute_indirect_bounce(
+                o,
+                o,
+                n,
+                &cache,
+                &wall,
+                lighting,
+                80.0,
+                16,
+                64,
+                0.5,
+                0.5,
+                1,
+                |_| 48,
+                11,
+            )
+        };
+        assert_eq!(
+            bounce(&dark),
+            Vec3::ZERO,
+            "with no light at all there is nothing to bounce"
+        );
+        assert!(
+            bounce(&lamplit).length() > 0.01,
+            "a lamp facing a wall should light the room off it, got {:?}",
+            bounce(&lamplit)
         );
     }
 
@@ -898,6 +1076,15 @@ mod cost {
     use crate::game::world::terrain::HeightmapData;
     use std::time::Instant;
 
+    fn bench_lighting(sun_dir: Vec3) -> BakeLighting {
+        BakeLighting {
+            sun_dir,
+            sun_rgb: Vec3::ONE,
+            ambient_rgb: Vec3::ZERO,
+            lights: Vec::new(),
+        }
+    }
+
     /// Rolling-hill terrain over the cache region, plus a few scenery
     /// triangles so BVH traversal is exercised rather than trivially empty.
     fn scene() -> (BakeHeightCache, TriangleBvh) {
@@ -1033,15 +1220,17 @@ mod cost {
                 Vec3::Y,
                 &cache,
                 &bvh,
-                sun_dir,
+                &bench_lighting(sun_dir),
                 reach,
                 bounce_rays,
                 shadow_steps,
                 0.5,
                 0.5,
                 1,
+                |_| 48,
                 i as u32,
-            );
+            )
+            .x;
         }
         let bounce = t.elapsed();
 
@@ -1102,15 +1291,17 @@ mod cost {
                 n,
                 &cache,
                 &bvh,
-                sun_dir,
+                &bench_lighting(sun_dir),
                 reach,
                 bounce_rays,
                 shadow_steps,
                 0.5,
                 0.5,
                 1,
+                |_| 48,
                 i as u32,
-            );
+            )
+            .x;
         }
         let bounce = t.elapsed();
 

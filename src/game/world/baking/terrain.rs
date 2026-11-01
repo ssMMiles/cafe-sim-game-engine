@@ -160,7 +160,7 @@ pub fn bake_chunk(
     // +2 so the bilinear tap at the last texel always has a right/bottom
     // neighbour to read.
     let cg = (padded - 1) / step + 2;
-    let low_freq: Vec<(f32, f32)> = (0..cg * cg)
+    let low_freq: Vec<(f32, Vec3)> = (0..cg * cg)
         .into_par_iter()
         .map(|i| {
             let gx = i % cg;
@@ -188,13 +188,14 @@ pub fn bake_chunk(
                 normal,
                 cache,
                 bvh,
-                sun_dir,
+                lighting,
                 config.ao_radius * 4.0,
                 config.bounce_rays,
                 config.shadow_steps,
                 config.terrain_albedo,
                 config.scenery_albedo,
                 config.bounce_count,
+                |dist| config.light_shadow_steps(dist),
                 seed_offset,
             );
             (ao, bounce)
@@ -258,12 +259,12 @@ pub fn bake_chunk(
 /// Bilinearly read the coarse AO/bounce grid at full-resolution texel
 /// `(tx, ty)`. `grid` is `cg × cg` samples taken every `step` texels.
 fn sample_low_freq(
-    grid: &[(f32, f32)],
+    grid: &[(f32, Vec3)],
     cg: usize,
     tx: usize,
     ty: usize,
     step: usize,
-) -> (f32, f32) {
+) -> (f32, Vec3) {
     let fx = tx as f32 / step as f32;
     let fy = ty as f32 / step as f32;
     let x0 = (fx.floor() as usize).min(cg - 1);
@@ -280,9 +281,10 @@ fn sample_low_freq(
     let (a11, b11) = at(x1, y1);
 
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let lerp3 = |a: Vec3, b: Vec3, t: f32| a + (b - a) * t;
     (
         lerp(lerp(a00, a10, dx), lerp(a01, a11, dx), dy),
-        lerp(lerp(b00, b10, dx), lerp(b01, b11, dx), dy),
+        lerp3(lerp3(b00, b10, dx), lerp3(b01, b11, dx), dy),
     )
 }
 
@@ -292,12 +294,12 @@ mod tests {
 
     /// Build a coarse grid whose AO channel is a known linear ramp in x and
     /// bounce a ramp in y, so interpolation is checkable in closed form.
-    fn ramp_grid(cg: usize, step: usize) -> Vec<(f32, f32)> {
+    fn ramp_grid(cg: usize, step: usize) -> Vec<(f32, Vec3)> {
         (0..cg * cg)
             .map(|i| {
                 let gx = (i % cg) * step;
                 let gy = (i / cg) * step;
-                (gx as f32, gy as f32)
+                (gx as f32, Vec3::splat(gy as f32))
             })
             .collect()
     }
@@ -381,7 +383,7 @@ mod tests {
             for tx in 0..res {
                 let (ao, bounce) = sample_low_freq(&grid, cg, tx, ty, step);
                 assert_eq!(ao, tx as f32, "ao at ({tx},{ty})");
-                assert_eq!(bounce, ty as f32, "bounce at ({tx},{ty})");
+                assert_eq!(bounce, Vec3::splat(ty as f32), "bounce at ({tx},{ty})");
             }
         }
     }
@@ -402,7 +404,7 @@ mod tests {
                         "step {step} ao at {tx}: {ao}"
                     );
                     assert!(
-                        (bounce - ty as f32).abs() < 1e-3,
+                        (bounce - Vec3::splat(ty as f32)).length() < 1e-3,
                         "step {step} bounce at {ty}: {bounce}"
                     );
                 }
@@ -417,11 +419,15 @@ mod tests {
         for res in [8usize, 16, 17, 100, 1024] {
             for step in [1usize, 2, 3, 4, 8] {
                 let cg = (res - 1) / step + 2;
-                let grid = vec![(0.5f32, 0.25f32); cg * cg];
+                let grid = vec![(0.5f32, Vec3::splat(0.25)); cg * cg];
                 // Corners and edges are where the indexing breaks.
                 for &(tx, ty) in &[(0, 0), (res - 1, 0), (0, res - 1), (res - 1, res - 1)] {
                     let (ao, b) = sample_low_freq(&grid, cg, tx, ty, step);
-                    assert_eq!((ao, b), (0.5, 0.25), "res {res} step {step} at ({tx},{ty})");
+                    assert_eq!(
+                        (ao, b),
+                        (0.5, Vec3::splat(0.25)),
+                        "res {res} step {step} at ({tx},{ty})"
+                    );
                 }
             }
         }

@@ -561,20 +561,83 @@ is one grey number and there is no colour bleed.
 Guarded by `scenery_re_emits_by_its_own_normal_not_a_constant` and
 `a_sunlit_wall_bounces_light_onto_a_shaded_surface`.
 
-### 7.12 Placed lights still do not bounce — **open**
+### 7.12 Placed lights did not bounce
 
-Re-emission carries **sun and sky, not local lights**, in every path
-(`terrain_radiance`, `scenery_radiance`, `compute_indirect_bounce` all
-evaluate `sun_rgb * ndotl * vis` and the ambient term, never
-`BakeLighting::local_lights`). So a sealed room the daylight never reaches
-still gathers `ambient x albedo` from every direction, and a lamp inside it
-lights the surfaces it can see directly but nothing those surfaces face.
+**Fixed 2026-10-31** (lightmap format v11). Re-emission carried sun and sky
+only, in every path, so a sealed room the daylight never reached gathered
+`ambient x albedo` from every direction and a lamp lit the surfaces it could
+see directly but nothing those surfaces faced — exactly the case of a shop
+interior.
 
-For a shop interior that is the remaining gap: the fix is to add
-`local_lights` to the re-emission in all three paths at once (they must agree
-— §5), costing one segment shadow ray per light per bounce hit on top of the
-sun ray already cast there. Worth doing if hand-placed lamps still read as
-isolated pools rather than lighting the room.
+`BakeLighting::local_lights` is now evaluated at every bounce hit
+(`compute_indirect_bounce`, `ProbeContext::direct_at`, and the WGSL
+`compute_bounce`), with the same segment shadow ray a direct light uses.
+
+That forced one model change worth knowing about: **indirect light is a
+colour now, not a scalar.** It used to be a single `f32` the caller
+multiplied by `sun_rgb`, which cannot carry a lamp's own colour, so
+`compute_indirect_bounce` returns `Vec3` and `sun_and_ambient` adds it
+directly:
+
+```
+sun_rgb * (ndotl * shadow) + bounce + ambient_rgb * ao
+```
+
+The terrain bake's low-frequency grid interpolates `(f32, Vec3)` accordingly.
+Guarded by `a_lamp_lights_the_wall_it_faces_and_the_wall_lights_the_room`.
+
+Cost: one extra segment ray per light in range per bounce hit, on top of the
+sun ray already cast there. The interior benchmark has no placed lights, so
+it does not show this — budget for it by light count.
+
+### 7.13 Object atlases had no bake margin, so the blur biased every triangle edge
+
+**Fixed 2026-10-31** (v11). `blur_cells` clamps its kernel to the triangle's
+own cell *and* to texels that were shaded, so at a triangle's edge the window
+was one-sided. A linear field came back shifted by the local gradient times
+about `r/2`, and in **opposite directions on either side of a shared edge** —
+so the two halves of a quad disagreed across their diagonal, and wherever a
+shadow crossed that edge the quantiser turned the step into a band contour
+that jumped. That is what made object shadow borders look ragged along
+triangle seams, against the probe volume's much smoother dynamic shading.
+
+This is precisely the chunk-seam bug `ChunkBakeGrid` already fixed for
+terrain (§2), one level down: the unit is a triangle's atlas cell rather than
+a chunk. `rasterize_geometry` now also shades a `blur_radius` band of
+*extrapolated* surface around each triangle — the UV-to-world map is affine,
+so the margin is the same barycentric interpolation evaluated outside [0,1],
+which for two triangles of one flat quad reproduces the neighbour exactly.
+Covered texels always win over another triangle's margin; the margin is
+blurred through but the dilation pass keeps it, since real extrapolated
+lighting is a better bilinear tap than a dilated copy.
+
+Measured on a unit quad with a linear ramp (a symmetric box blur reproduces
+one exactly, so all the error is the clamped window):
+
+| | worst edge error |
+|---|---|
+| no margin | 0.0488 — 4.9% of the quad's range |
+| `blur_radius` margin | 0.0095 |
+
+Across a shared edge those biases oppose, so the step was ~10% of the range:
+about half a toon band. `the_blur_margin_keeps_a_linear_field_linear_at_triangle_edges`
+guards it.
+
+### 7.14 Probe shadows are smooth because they are coarse, not because they are blurred — **by design**
+
+Worth recording, since it looks like a blur and is not. The probe volume
+stores **one binary sun-visibility sample per probe** (`ProbeSh::sun_vis`, one
+shadow ray), on a 2 m lattice, and the hardware trilinearly interpolates it.
+That is a very aggressive low-pass: a probe-lit object's shadow terminator is
+reconstructed from samples 2 m apart, so it is smooth and vague by
+construction and cannot resolve anything smaller than the lattice. Nothing
+blurs it, and there is no knob.
+
+So "make baked shadows look like probe shadows" means throwing away detail
+the lightmap has and the probe volume never had. The useful direction is the
+reverse — the defects above were making baked edges *wrong*, not merely
+sharp. If the two still read as mismatched once they are correct, the lever
+is `PROBE_CELL_SIZE`, at cubic cost in probe count and memory.
 
 ---
 
@@ -588,7 +651,8 @@ isolated pools rather than lighting the room.
 2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
 3. §7.5 object ray origin — needs a repro case first.
 3b. ~~§7.9 AO sample rotation~~ (v9), ~~§7.10/§7.11 scenery re-emits bounce~~
-   (v10) — **done.** §7.12 (local lights do not bounce) is the open one.
+   (v10), ~~§7.12 lights bounce + §7.13 object bake margin~~ (v11) — **done.**
+   §7.14 records why probe shadows look smoother than baked ones.
 4. ~~§7.3 AO weighting~~ — **done** (v7). ~~§7.4 object bounce~~ — **done**
    (v8). Re-bake (Shift+B) to see either.
 5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`

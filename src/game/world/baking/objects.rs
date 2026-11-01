@@ -252,13 +252,20 @@ pub fn run_object_bake_jobs(
 
         // Pass 1 — rasterise. Cheap: barycentric interpolation, no rays.
         let t_raster = Instant::now();
-        let geometry = rasterize_geometry(&job.mesh, &job.world_mat, res);
+        // Shade a margin of `blur_radius` extrapolated texels around each
+        // triangle so the blur below is never one-sided at a triangle edge.
+        let cell_px = cell_texels(res as u32, job.tri_count) as usize;
+        let blur_radius = config.blur_radius.min((cell_px / 4) as u32);
+        let raster = rasterize_geometry(&job.mesh, &job.world_mat, res, blur_radius as usize);
+        let Raster { geometry, covered } = raster;
         stats.rasterize += t_raster.elapsed();
 
-        // Texels a triangle actually covered. Dilation fills the rest and
-        // marks what it filled, so this has to be owned and mutable.
+        // Dilation fills the gutter and marks what it filled, so this has to
+        // be owned and mutable. It starts as everything that was *shaded*
+        // (covered plus margin): the margin holds real extrapolated lighting,
+        // which is a better bilinear tap than a dilated copy.
         let mut written: Vec<bool> = geometry.iter().map(Option::is_some).collect();
-        let covered = written.iter().filter(|w| **w).count();
+        let covered_count = covered.iter().filter(|c| **c).count();
 
         // Pass 2 — shade. This is the expensive one, and it parallelises.
         let t_shade = Instant::now();
@@ -267,14 +274,14 @@ pub fn run_object_bake_jobs(
 
         stats.sub_meshes += 1;
         stats.texels_total += res * res;
-        stats.texels_covered += covered;
+        stats.texels_covered += covered_count;
         stats.max_res = stats.max_res.max(res);
         debug!(
-            "  obj {} sub-mesh {}: {res}×{res} atlas, {} tris, {covered} texel(s) covered ({:.0}%)",
+            "  obj {} sub-mesh {}: {res}×{res} atlas, {} tris, {covered_count} texel(s) covered ({:.0}%)",
             job.object_id,
             job.sub_mesh,
             job.tri_count,
-            100.0 * covered as f32 / (res * res).max(1) as f32,
+            100.0 * covered_count as f32 / (res * res).max(1) as f32,
         );
 
         let t_post = Instant::now();
@@ -418,17 +425,42 @@ struct TexelGeom {
     face_normal: Vec3,
 }
 
-/// Rasterize a mesh's triangles in UV2 space into a per-texel surface buffer.
+/// What a rasterised atlas holds.
+struct Raster {
+    /// Surface data per texel. `None` means no triangle reached it: the
+    /// gutter beyond the margin. Dilation fills those in later.
+    geometry: Vec<Option<TexelGeom>>,
+    /// Texels a triangle actually *covers*. The margin band carries geometry
+    /// but is not covered, so it is shaded and blurred through but never
+    /// written out as the triangle's own lighting.
+    covered: Vec<bool>,
+}
+
+/// Rasterize a mesh's triangles in UV2 space into a per-texel surface buffer,
+/// plus a `margin`-texel band of extrapolated surface around each triangle.
 ///
-/// `None` means no triangle covered that texel: the atlas gutter, or the
-/// unused half of a triangle's cell. Dilation fills those in later.
+/// The margin is the object-atlas counterpart of `ChunkBakeGrid`'s, and it
+/// exists for the same reason: the blur that follows is confined to a
+/// triangle's own cell and to covered texels, so at a triangle's edge the
+/// kernel window is one-sided and biases the result toward that triangle's
+/// interior — by the local gradient times about `r/2`, in *opposite*
+/// directions on either side of a shared edge. Where a shadow crosses that
+/// edge, the toon quantiser turns the step into a band contour that jumps,
+/// which is what made object shadow borders look ragged along triangle
+/// seams. Shading a margin gives the kernel real values to read instead.
+///
+/// The UV-to-world map is affine per triangle, so the margin is just the
+/// same barycentric interpolation evaluated outside [0,1]: for two triangles
+/// of one flat quad it reproduces the neighbour exactly, and across a crease
+/// it is an extrapolation of the surface the texel belongs to, which still
+/// beats a clamped window.
 ///
 /// Serial by design, and cheap enough for that not to matter — it is pure
-/// interpolation, no rays. Triangles are visited in order and the first to
-/// claim a texel keeps it, which is what makes the output independent of how
-/// the triangles happen to overlap.
-fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize) -> Vec<Option<TexelGeom>> {
+/// interpolation, no rays. A texel genuinely covered by one triangle always
+/// wins over another triangle's margin.
+fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize, margin: usize) -> Raster {
     let mut geometry: Vec<Option<TexelGeom>> = vec![None; res * res];
+    let mut covered = vec![false; res * res];
 
     let (positions, normals, uv1s, indices) =
         (&mesh.positions, &mesh.normals, &mesh.uv1, &mesh.indices);
@@ -474,30 +506,42 @@ fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize) -> Vec<
             face_normal = -face_normal;
         }
 
-        // Pixel-space bounding box of the triangle.
-        let min_u = (uv0.x.min(uv1.x).min(uv2.x) * res_f).floor().max(0.0) as usize;
-        let max_u = (uv0.x.max(uv1.x).max(uv2.x) * res_f)
-            .ceil()
-            .min(res_f - 1.0) as usize;
-        let min_v = (uv0.y.min(uv1.y).min(uv2.y) * res_f).floor().max(0.0) as usize;
-        let max_v = (uv0.y.max(uv1.y).max(uv2.y) * res_f)
-            .ceil()
-            .min(res_f - 1.0) as usize;
+        // Pixel-space bounding box of the triangle, grown by the margin.
+        let grow = margin as f32;
+        let min_u = ((uv0.x.min(uv1.x).min(uv2.x) * res_f).floor() - grow).max(0.0) as usize;
+        let max_u = ((uv0.x.max(uv1.x).max(uv2.x) * res_f).ceil() + grow).min(res_f - 1.0) as usize;
+        let min_v = ((uv0.y.min(uv1.y).min(uv2.y) * res_f).floor() - grow).max(0.0) as usize;
+        let max_v = ((uv0.y.max(uv1.y).max(uv2.y) * res_f).ceil() + grow).min(res_f - 1.0) as usize;
 
         for py in min_v..=max_v {
             for px in min_u..=max_u {
                 let pixel_idx = py * res + px;
-                if geometry[pixel_idx].is_some() {
+                // A covered texel is final; a margin one may still be
+                // claimed by the triangle that really covers it.
+                if covered[pixel_idx] {
                     continue;
                 }
 
                 // UV of this texel centre.
                 let texel_uv = Vec2::new((px as f32 + 0.5) / res_f, (py as f32 + 0.5) / res_f);
 
-                // Compute barycentric coordinates in UV space.
-                let Some((b0, b1, b2)) = barycentric_uv(texel_uv, uv0, uv1, uv2) else {
+                // Barycentrics in UV space, extrapolated outside the triangle.
+                let Some((b0, b1, b2)) = barycentric_uv_unclipped(texel_uv, uv0, uv1, uv2) else {
                     continue;
                 };
+                let inside = b0 >= 0.0 && b1 >= 0.0 && b2 >= 0.0;
+                if !inside {
+                    // Only a thin band of extrapolation is useful, and only
+                    // where nothing has claimed the texel yet.
+                    if geometry[pixel_idx].is_some() {
+                        continue;
+                    }
+                    let uv_margin = grow / res_f;
+                    if !within_margin(texel_uv, uv0, uv1, uv2, uv_margin) {
+                        continue;
+                    }
+                }
+                covered[pixel_idx] = inside;
 
                 geometry[pixel_idx] = Some(TexelGeom {
                     world_pos: wp0 * b0 + wp1 * b1 + wp2 * b2,
@@ -508,7 +552,7 @@ fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize) -> Vec<
         }
     }
 
-    geometry
+    Raster { geometry, covered }
 }
 
 /// Shade every covered texel with the baked lighting model.
@@ -579,13 +623,14 @@ fn shade_geometry(
                 g.normal,
                 cache,
                 bvh,
-                sun_dir,
+                lighting,
                 config.ao_radius * 4.0,
                 config.bounce_rays,
                 config.shadow_steps,
                 config.terrain_albedo,
                 config.scenery_albedo,
                 config.bounce_count,
+                |dist| config.light_shadow_steps(dist),
                 idx as u32,
             );
             let ndotl = g.normal.dot(sun_dir).max(0.0);
@@ -610,37 +655,42 @@ fn shade_geometry(
     LightmapBuffer { res, texels }
 }
 
-/// Compute barycentric coordinates `(b0, b1, b2)` of point `p` in the triangle
-/// `(a, b, c)` in 2D UV space. Returns `None` if the point is outside the
-/// triangle or the triangle is degenerate.
-fn barycentric_uv(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> Option<(f32, f32, f32)> {
+/// Is `p` within `margin` (in UV units) of the triangle `(a, b, c)`?
+///
+/// Distance to the triangle as a whole, not to the infinite lines its edges
+/// lie on: past a corner the two edge half-planes overlap, and testing them
+/// separately would keep a wedge of texels far from any edge.
+fn within_margin(p: Vec2, a: Vec2, b: Vec2, c: Vec2, margin: f32) -> bool {
+    let m2 = margin * margin;
+    [(a, b), (b, c), (c, a)].iter().any(|&(e0, e1)| {
+        let edge = e1 - e0;
+        let len2 = edge.length_squared();
+        let t = if len2 > 1e-20 {
+            ((p - e0).dot(edge) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (p - (e0 + edge * t)).length_squared() <= m2
+    })
+}
+
+/// Barycentric coordinates of `p` in the triangle `(a, b, c)`, in 2D UV
+/// space, *without* rejecting points outside it — a negative coordinate
+/// means "beyond that edge", and interpolating with it extrapolates the
+/// triangle's plane. `None` only for a degenerate triangle.
+fn barycentric_uv_unclipped(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> Option<(f32, f32, f32)> {
     let v0 = c - a;
     let v1 = b - a;
     let v2 = p - a;
 
-    let dot00 = v0.dot(v0);
-    let dot01 = v0.dot(v1);
-    let dot02 = v0.dot(v2);
-    let dot11 = v1.dot(v1);
-    let dot12 = v1.dot(v2);
-
-    let denom = dot00 * dot11 - dot01 * dot01;
+    let denom = v0.dot(v0) * v1.dot(v1) - v0.dot(v1) * v0.dot(v1);
     if denom.abs() < 1e-10 {
-        return None; // Degenerate triangle
-    }
-
-    let inv_denom = 1.0 / denom;
-    let u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
-    let v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
-
-    if u < 0.0 || v < 0.0 || u + v > 1.0 {
         return None;
     }
-
-    let b2 = u;
-    let b1 = v;
-    let b0 = 1.0 - b1 - b2;
-    Some((b0, b1, b2))
+    let inv = 1.0 / denom;
+    let u = (v1.dot(v1) * v0.dot(v2) - v0.dot(v1) * v1.dot(v2)) * inv;
+    let v = (v0.dot(v0) * v1.dot(v2) - v0.dot(v1) * v0.dot(v2)) * inv;
+    Some((1.0 - u - v, v, u))
 }
 
 #[cfg(test)]
@@ -692,10 +742,12 @@ mod tests {
         );
 
         let res = 64;
-        let geometry = rasterize_geometry(&mesh, &world, res);
-        assert_eq!(geometry.len(), res * res);
+        // No margin: this checks the covered texels themselves, and the
+        // margin is extrapolation beyond the quad by design.
+        let raster = rasterize_geometry(&mesh, &world, res, 0);
+        assert_eq!(raster.geometry.len(), res * res);
 
-        let covered: Vec<&TexelGeom> = geometry.iter().flatten().collect();
+        let covered: Vec<&TexelGeom> = raster.geometry.iter().flatten().collect();
         assert!(!covered.is_empty(), "nothing was rasterized");
 
         for g in &covered {
@@ -723,6 +775,61 @@ mod tests {
         }
     }
 
+    /// The blur must not bias a triangle's edge texels.
+    ///
+    /// `blur_cells` clamps its window to the triangle's own cell and to
+    /// texels that were shaded, so without a margin an edge texel averages
+    /// only the interior side: a linear field comes back shifted by the
+    /// gradient times about `r/2`, and in *opposite* directions on either
+    /// side of a shared edge. Wherever a shadow crosses that edge the toon
+    /// quantiser turns the step into a band contour that jumps, which is
+    /// what made object shadow borders ragged along triangle seams.
+    ///
+    /// A linear ramp is the sharpest probe available: a symmetric box blur
+    /// reproduces one exactly, so any error is the clamped window.
+    #[test]
+    fn the_blur_margin_keeps_a_linear_field_linear_at_triangle_edges() {
+        let mesh = unwrapped_quad();
+        let res = 128usize;
+        let cell = cell_texels(res as u32, 2) as usize;
+        let radius = 4u32;
+
+        // Fill every shaded texel with its own world x, blur, and see how
+        // far the covered texels moved.
+        let worst_error = |margin: usize| {
+            let raster = rasterize_geometry(&mesh, &Mat4::IDENTITY, res, margin);
+            let mut buf = LightmapBuffer {
+                res,
+                texels: vec![Vec3::ZERO; res * res],
+            };
+            for (i, g) in raster.geometry.iter().enumerate() {
+                if let Some(g) = g {
+                    buf.texels[i] = Vec3::splat(g.world_pos.x);
+                }
+            }
+            let shaded: Vec<bool> = raster.geometry.iter().map(Option::is_some).collect();
+            let blurred = buf.blur_cells(radius, cell, &shaded);
+
+            let mut worst = 0.0f32;
+            for (i, g) in raster.geometry.iter().enumerate() {
+                if !raster.covered[i] {
+                    continue;
+                }
+                let g = g.expect("covered implies shaded");
+                worst = worst.max((blurred.texels[i].x - g.world_pos.x).abs());
+            }
+            worst
+        };
+
+        let clamped = worst_error(0);
+        let with_margin = worst_error(radius as usize);
+        assert!(
+            with_margin * 4.0 < clamped,
+            "the margin should largely remove the edge bias: {with_margin:.4} with \
+             vs {clamped:.4} without (quad is 1 unit across)"
+        );
+    }
+
     /// Two triangles land in two of a 2×2 cell grid, each filling about half
     /// its gutter-inset cell — so roughly a tenth of the atlas. Mostly a
     /// guard against a UV or bounding-box change silently collapsing
@@ -731,9 +838,9 @@ mod tests {
     fn coverage_matches_the_per_triangle_cell_layout() {
         let mesh = unwrapped_quad();
         let res = 128;
-        let geometry = rasterize_geometry(&mesh, &Mat4::IDENTITY, res);
+        let raster = rasterize_geometry(&mesh, &Mat4::IDENTITY, res, 0);
 
-        let covered = geometry.iter().filter(|g| g.is_some()).count();
+        let covered = raster.covered.iter().filter(|c| **c).count();
         let fraction = covered as f32 / (res * res) as f32;
         assert!(
             (0.05..0.20).contains(&fraction),

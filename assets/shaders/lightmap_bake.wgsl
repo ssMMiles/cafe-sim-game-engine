@@ -658,9 +658,9 @@ fn hemisphere_dir(seed: u32, n_total: u32, normal: vec3<f32>, tf: TangentFrame, 
 /// `texel_seed` is a per-texel hash used to rotate the hemisphere sample azimuth
 /// and decorrelate the structured golden-ratio pattern across texels, preventing
 /// correlated stripe artifacts when the toon quantizer bands the result.
-fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, texel_seed: u32) -> f32 {
+fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, texel_seed: u32) -> vec3<f32> {
     if u.bounce_rays == 0u || u.bounce_count == 0u {
-        return 0.0;
+        return vec3<f32>(0.0);
     }
     let sun_dir = vec3<f32>(u.sun_dir_x, u.sun_dir_y, u.sun_dir_z);
     // Use the full shadow reach for bounce marching — back-of-hill surfaces
@@ -671,7 +671,7 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
     // texels don't share the same ray directions → no correlated stripe patterns.
     let azimuth_offset = float01(hash_u32(texel_seed)) * TAU;
 
-    var accum = 0.0;
+    var accum = vec3<f32>(0.0);
     let tf0    = make_tangent_frame(normal);
     for (var i = 0u; i < u.bounce_rays; i = i + 1u) {
         // Primary ray direction (cosine-weighted sample with per-texel azimuth offset).
@@ -739,9 +739,15 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
 
             let ndotl_q = max(dot(hn, sun_dir), 0.0);
             let vis_q   = cast_shadow_ray(hit_pos, hit_mesh_pos, sun_dir);
+            // Direct light at the hit: the sun, plus every placed light that
+            // reaches it. A lamp pointed at a wall lights the room through
+            // this term and nothing else.
+            let sun_rgb = vec3<f32>(u.sun_r, u.sun_g, u.sun_b);
+            let direct  = sun_rgb * (ndotl_q * vis_q)
+                        + local_lights(hit_pos, hit_mesh_pos, hn);
             // No cur_cos_w — it cancels with the PDF for cosine-weighted
             // hemisphere sampling.
-            accum = accum + throughput * ndotl_q * vis_q * albedo;
+            accum = accum + direct * (throughput * albedo);
             throughput = throughput * albedo;
 
             // Resample direction at hit point using a proper per-bounce hash
@@ -812,7 +818,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // ambient term; direct sun is attenuated by the shadow ray alone.
     let sun_rgb     = vec3<f32>(u.sun_r, u.sun_g, u.sun_b);
     let ambient_rgb = vec3<f32>(u.ambient_r, u.ambient_g, u.ambient_b);
-    var radiance = sun_rgb * (ndotl * shadow + u.bounce_strength * bounce) + ambient_rgb * ao;
+    var radiance = sun_rgb * (ndotl * shadow) + u.bounce_strength * bounce + ambient_rgb * ao;
 
     // Placed point/spot lights, each occluded only by geometry between this
     // texel and the light itself.

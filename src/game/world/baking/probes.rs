@@ -282,24 +282,44 @@ struct ProbeContext<'a> {
 }
 
 impl ProbeContext<'_> {
-    /// Radiance a terrain hit at `t` along `dir` from `p` sends back: the
-    /// lightmap's own bounce model — albedo × (direct sun + sky).
-    fn terrain_radiance(&self, p: Vec3, dir: Vec3, t: f32) -> Vec3 {
-        let q = p + dir * t;
-        let h = self.cache.sample_height(q.x, q.z);
-        let ground = Vec3::new(q.x, h, q.z);
-        let (normal, _) = self.cache.sample_normal(q.x, q.z);
+    /// Direct light arriving at a surface the probe can see, plus sky:
+    /// the sun through a shadow ray, and every placed light through a
+    /// segment ray. `dda` is the origin for the terrain march, lifted off
+    /// the surface; `surface` is the point itself, for the BVH.
+    fn direct_at(&self, dda: Vec3, surface: Vec3, normal: Vec3) -> Vec3 {
         let ndotl = normal.dot(self.lighting.sun_dir).max(0.0);
         let vis = raycast::cast_shadow_ray(
-            ground + Vec3::Y * 0.5,
-            ground + normal * 0.02,
+            dda,
+            surface,
             self.lighting.sun_dir,
             self.cache,
             self.bvh,
             self.config.ao_radius * 4.0,
             self.config.shadow_steps,
         );
-        (self.lighting.sun_rgb * (ndotl * vis) + self.lighting.ambient_rgb)
+        self.lighting.sun_rgb * (ndotl * vis)
+            + self.lighting.local_lights(surface, normal, |dir, dist| {
+                raycast::cast_shadow_ray_segment(
+                    dda,
+                    surface,
+                    dir,
+                    dist,
+                    self.cache,
+                    self.bvh,
+                    self.config.light_shadow_steps(dist),
+                )
+            })
+            + self.lighting.ambient_rgb
+    }
+
+    /// Radiance a terrain hit at `t` along `dir` from `p` sends back: the
+    /// lightmap's own bounce model — albedo x whatever lights it.
+    fn terrain_radiance(&self, p: Vec3, dir: Vec3, t: f32) -> Vec3 {
+        let q = p + dir * t;
+        let h = self.cache.sample_height(q.x, q.z);
+        let ground = Vec3::new(q.x, h, q.z);
+        let (normal, _) = self.cache.sample_normal(q.x, q.z);
+        self.direct_at(ground + Vec3::Y * 0.5, ground + normal * 0.02, normal)
             * self.config.terrain_albedo
     }
 
@@ -316,21 +336,10 @@ impl ProbeContext<'_> {
     /// constant drifts across a toon band.
     fn scenery_radiance(&self, p: Vec3, dir: Vec3, t: f32, normal: Vec3) -> Vec3 {
         let q = p + dir * t + normal * 0.02;
-        let ndotl = normal.dot(self.lighting.sun_dir).max(0.0);
-        let vis = raycast::cast_shadow_ray(
-            // Lift the terrain march as a terrain hit does: a wall's base
-            // sits at ground level, where the bilinear heightmap can read as
-            // above it and kill the sun ray outright.
-            q + Vec3::Y * 0.5,
-            q,
-            self.lighting.sun_dir,
-            self.cache,
-            self.bvh,
-            self.config.ao_radius * 4.0,
-            self.config.shadow_steps,
-        );
-        (self.lighting.sun_rgb * (ndotl * vis) + self.lighting.ambient_rgb)
-            * self.config.scenery_albedo
+        // Lift the terrain march as a terrain hit does: a wall's base sits
+        // at ground level, where the bilinear heightmap can read as above it
+        // and kill the ray outright.
+        self.direct_at(q + Vec3::Y * 0.5, q, normal) * self.config.scenery_albedo
     }
 
     /// Nearest terrain hit along `dir` within `reach`, marching from `p`.

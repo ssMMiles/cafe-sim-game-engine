@@ -56,7 +56,14 @@ use crate::game::world::terrain::storage::EnvironmentData;
 ///   bounce ray from inside a building hit the building and the path ended
 ///   there — and probe gathering returned a flat constant for any scenery
 ///   hit, which left objects lit from an indoor probe completely unshaded.
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 10;
+/// - v11: placed lights re-emit too, so a lamp lights the room off the
+///   surfaces it falls on and not only the ones it shines on. Indirect
+///   light became a colour rather than a scalar times `sun_rgb`, since a
+///   lamp's colour is its own. Object atlases also gained a shaded margin
+///   around each triangle, so the blur is no longer one-sided at triangle
+///   edges (it was biasing them by ~5% of the lighting range, in opposite
+///   directions across a shared edge).
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 11;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -284,20 +291,24 @@ impl BakeLighting {
     /// Sun + ambient radiance for one texel.
     ///
     /// `shadow` is sun visibility (0 or 1), `ao` the unoccluded hemisphere
-    /// fraction, and `bounce` indirect sun irradiance already scaled by
+    /// fraction, and `bounce` indirect radiance already scaled by
     /// `BakeConfig::bounce_strength`. AO shapes only the ambient term: direct
     /// sunlight is already attenuated by real shadow rays, and darkening it
     /// again with AO double-counts occlusion.
+    ///
+    /// `bounce` is a colour, not a scalar times `sun_rgb`: indirect light
+    /// carries placed lights too, and a lamp's colour is its own.
     #[inline]
-    pub fn sun_and_ambient(&self, ndotl: f32, shadow: f32, ao: f32, bounce: f32) -> Vec3 {
-        self.sun_rgb * (ndotl * shadow + bounce) + self.ambient_rgb * ao
+    pub fn sun_and_ambient(&self, ndotl: f32, shadow: f32, ao: f32, bounce: Vec3) -> Vec3 {
+        self.sun_rgb * (ndotl * shadow) + bounce + self.ambient_rgb * ao
     }
 
     /// Summed contribution of every placed light at a point.
     ///
     /// `visibility(dir_to_light, distance)` casts the shadow ray and returns
     /// 0 (occluded) or 1 (clear); it is only called for lights that actually
-    /// reach the surface. Local lights do not contribute to indirect bounce.
+    /// reach the surface. Also used at bounce hits, so a lamp lights the
+    /// wall it faces *and* the room that wall faces.
     #[inline]
     pub fn local_lights(
         &self,
@@ -1216,7 +1227,7 @@ mod tests {
 
         let key = terrain_lightmap_key("my-world", -1, 2);
         let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
-        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v10.exr");
+        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v11.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1224,7 +1235,7 @@ mod tests {
 
         let key = object_lightmap_key("my-world", 7, 3);
         let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
-        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v10.exr");
+        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v11.exr");
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
