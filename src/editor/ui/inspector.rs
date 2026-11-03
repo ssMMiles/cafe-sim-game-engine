@@ -379,12 +379,13 @@ fn kind_fields(
             color,
             intensity,
             range,
+            falloff,
             ..
         } => {
             egui::Grid::new("point_light")
                 .num_columns(2)
                 .show(ui, |ui| {
-                    if light_common(ui, color, intensity, range) {
+                    if light_common(ui, color, intensity, range, falloff) {
                         change = KindChange::InPlace;
                     }
                 });
@@ -393,12 +394,13 @@ fn kind_fields(
             color,
             intensity,
             range,
+            falloff,
             inner_angle,
             outer_angle,
             ..
         } => {
             egui::Grid::new("spot_light").num_columns(2).show(ui, |ui| {
-                if light_common(ui, color, intensity, range) {
+                if light_common(ui, color, intensity, range, falloff) {
                     change = KindChange::InPlace;
                 }
                 ui.label("Inner angle");
@@ -448,13 +450,14 @@ fn kind_fields(
     change
 }
 
-/// Colour / intensity / range rows shared by both light kinds. Colours are
-/// linear RGB on both sides (egui's `Rgba` is linear).
+/// Colour / intensity / range / falloff rows shared by both light kinds.
+/// Colours are linear RGB on both sides (egui's `Rgba` is linear).
 fn light_common(
     ui: &mut egui::Ui,
     color: &mut [f32; 3],
     intensity: &mut f32,
     range: &mut f32,
+    falloff: &mut f32,
 ) -> bool {
     let mut changed = false;
     ui.label("Colour");
@@ -483,6 +486,19 @@ fn light_common(
                 .range(0.1..=500.0)
                 .suffix(" m"),
         )
+        .changed()
+    {
+        changed = true;
+    }
+    ui.end_row();
+    ui.label("Falloff").on_hover_text(
+        "How the light fades inside its range: attenuation = (1 − (d/r)²)^falloff. \
+         Lower spreads it out to the range, higher pulls it in around the lamp; \
+         2 is the original curve. The pool's radius at half brightness is roughly \
+         r·√(1 − 0.5^(1/falloff)).",
+    );
+    if ui
+        .add(egui::DragValue::new(falloff).speed(0.02).range(0.25..=8.0))
         .changed()
     {
         changed = true;
@@ -849,10 +865,111 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
         });
     });
 
+    ui.collapsing_header_default_open("Shading", |ui| {
+        ui.weak("How baked radiance becomes a displayed brightness. Costs no re-bake.");
+        let mut curve = env.toon_curve();
+        egui::Grid::new("toon").num_columns(2).show(ui, |ui| {
+            ui.label("Bands")
+                .on_hover_text("Number of discrete shading levels.");
+            // A whole band per pixel of drag. `ToonCurve::sanitized` rounds
+            // this, and the row is rebuilt from the sanitised value every
+            // frame, so a sub-unit speed would be snapped away mid-drag and
+            // the control would feel stuck.
+            ui.add(
+                egui::DragValue::new(&mut curve.bands)
+                    .speed(1.0)
+                    .fixed_decimals(0)
+                    .range(1.0..=16.0),
+            );
+            ui.end_row();
+
+            ui.label("Floor").on_hover_text(
+                "Darkest a surface can get, as a fraction of its base colour. \
+                 0 is pure black.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut curve.floor)
+                    .speed(0.002)
+                    .range(0.0..=1.0),
+            );
+            ui.end_row();
+
+            ui.label("White").on_hover_text(
+                "Exposure: the lightmap radiance that reads as fully lit. \
+                 Anything brighter pins at the top band.",
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut curve.white)
+                        .speed(0.01)
+                        .range(0.01..=20.0),
+                );
+                let suggestion = env.suggested_white();
+                if ui
+                    .small_button("Auto")
+                    .on_hover_text(format!(
+                        "Set to sun + ambient ({suggestion:.3}), which is what an \
+                         unshadowed surface facing the sun receives."
+                    ))
+                    .clicked()
+                {
+                    curve.white = suggestion;
+                }
+            });
+            ui.end_row();
+
+            ui.label("Gamma").on_hover_text(
+                "How the bands are spread. 1 quantises radiance directly, which \
+                 spends four of five bands on the brightest octave; higher values \
+                 space them by perceived brightness so shade gets real bands.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut curve.gamma)
+                    .speed(0.02)
+                    .range(0.1..=8.0),
+            );
+            ui.end_row();
+        });
+
+        // The ramp is hard to judge from four numbers, and the boundaries
+        // are where a world is actually won or lost: these are the lightmap
+        // values each displayed level starts at.
+        let curve = curve.sanitized();
+        let bands = curve.bands as u32;
+        ui.weak(format!(
+            "levels {}",
+            curve
+                .levels()
+                .iter()
+                .map(|l| format!("{l:.2}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        ui.weak(format!(
+            "at radiance {}",
+            (1..=bands)
+                .map(|k| format!("{:.2}", curve.threshold(k)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        env.set_toon_curve(curve);
+    });
+
     if env != before {
+        // The curve is a display setting — the shaders read it straight from
+        // the material uniform — so only a change to what the *bakers* read
+        // invalidates the lightmaps. Compare against `before` with the curve
+        // masked out rather than listing the bake inputs, so a field added
+        // later is treated as bake-relevant until someone says otherwise.
+        let bake_inputs_changed = EnvironmentData {
+            toon_curve: before.toon_curve,
+            ..env.clone()
+        } != before;
+        if bake_inputs_changed {
+            panels.lighting.stale = true;
+        }
         // Writing through `ResMut` is what `apply_environment` listens for.
         tw.metadata.environment = env.clone();
-        panels.lighting.stale = true;
         panels.history.merge_or_push(
             MergeKey::Environment,
             "Edit environment",

@@ -11,6 +11,7 @@
 //! ```
 
 use bevy::prelude::*;
+use engine_api::toon_curve::{ToonCurve, luminance};
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
@@ -29,10 +30,13 @@ const CHUNK_FORMAT_VERSION: u32 = 2;
 /// `required_plugins`, and `plugin_data`; version 4 added `next_entity_id`;
 /// version 5 switched [`EnvironmentData`] from Bevy's physical light units to
 /// lightmap units (`sun_intensity` / `ambient_intensity`) for the fully baked
-/// lighting pipeline. Versions 2 and 4 are still readable and are upgraded in
-/// memory (see [`legacy`]). Version 3 was never in a release and is **not**
-/// readable — the few v3 test worlds are expected to be deleted.
-const WORLD_FORMAT_VERSION: u32 = 5;
+/// lighting pipeline; version 6 added the [`ToonCurve`] — the runtime ramp
+/// the baked radiance is quantised through — so exposure and contrast are
+/// per-world settings instead of constants compiled into the shaders.
+/// Versions 2, 4 and 5 are still readable and are upgraded in memory (see
+/// [`legacy`]). Version 3 was never in a release and is **not** readable —
+/// the few v3 test worlds are expected to be deleted.
+const WORLD_FORMAT_VERSION: u32 = 6;
 
 // ============================================================================
 // Serializable Data Structures
@@ -96,6 +100,16 @@ pub struct EnvironmentData {
     /// Radiance a fully unoccluded surface receives from the sky, lightmap
     /// units. Scaled by baked ambient occlusion per texel.
     pub ambient_intensity: f32,
+    /// The runtime toon ramp this world's baked radiance is quantised
+    /// through: `(bands, floor, white, gamma)`, see
+    /// [`engine_api::toon_curve::ToonCurve`].
+    ///
+    /// Stored here rather than in the shaders because it is the other half
+    /// of the exposure decision the intensities above make: the lights set
+    /// what a surface receives, the curve sets which of the five displayed
+    /// levels that lands on. Changing it needs no re-bake — nothing upstream
+    /// of the fragment shader reads it.
+    pub toon_curve: [f32; 4],
 }
 
 /// The sun placement `game::world::setup` has always used: high and to one
@@ -114,6 +128,7 @@ impl Default for EnvironmentData {
             sun_intensity: 1.0,
             ambient_color: [0.9, 0.9, 1.0],
             ambient_intensity: 0.25,
+            toon_curve: ToonCurve::default().to_vec4().to_array(),
         }
     }
 }
@@ -153,6 +168,35 @@ impl EnvironmentData {
     /// before per-texel ambient occlusion.
     pub fn ambient_radiance(&self) -> Vec3 {
         Vec3::from(self.ambient_color) * self.ambient_intensity
+    }
+
+    /// The runtime toon ramp, sanitised. Values come from an inspector drag
+    /// and from disk, so neither is trusted to be in range.
+    pub fn toon_curve(&self) -> ToonCurve {
+        let [bands, floor, white, gamma] = self.toon_curve;
+        ToonCurve {
+            bands,
+            floor,
+            white,
+            gamma,
+        }
+        .sanitized()
+    }
+
+    pub fn set_toon_curve(&mut self, curve: ToonCurve) {
+        self.toon_curve = curve.to_vec4().to_array();
+    }
+
+    /// An exposure that puts this world's brightest *expected* surface at
+    /// the top of the ramp: an unshadowed one facing the sun with the whole
+    /// sky visible receives `sun + ambient`, and nothing short of standing
+    /// in a placed light beats it.
+    ///
+    /// Only a starting point — indirect bounce adds a little on top, which
+    /// clips into the top band harmlessly, and a world that wants its open
+    /// sun to read as *not quite* full brightness wants a higher number.
+    pub fn suggested_white(&self) -> f32 {
+        (luminance(self.sun_radiance()) + luminance(self.ambient_radiance())).max(1e-3)
     }
 }
 
@@ -366,6 +410,71 @@ pub mod legacy {
                 sun_intensity: defaults.sun_intensity,
                 ambient_color: old.environment.ambient_color,
                 ambient_intensity: defaults.ambient_intensity,
+                toon_curve: defaults.toon_curve,
+            },
+            required_plugins: old.required_plugins,
+            plugin_data: old.plugin_data,
+            next_entity_id: old.next_entity_id,
+        }
+    }
+
+    /// The v5 `EnvironmentData`: lightmap units, but no toon curve — the
+    /// ramp was still a pair of constants compiled into the two shaders.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct EnvironmentDataV5 {
+        pub sun_rotation: [f32; 4],
+        pub sun_position: [f32; 3],
+        pub sun_color: [f32; 3],
+        pub sun_intensity: f32,
+        pub ambient_color: [f32; 3],
+        pub ambient_intensity: f32,
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct WorldMetadataV5 {
+        pub version: u32,
+        pub world_id: String,
+        pub terrain_config: TerrainConfigData,
+        pub chunks_x: u32,
+        pub chunks_y: u32,
+        pub chunk_index: Vec<ChunkIndexEntry>,
+        pub last_saved: u64,
+        pub environment: EnvironmentDataV5,
+        pub required_plugins: Vec<String>,
+        pub plugin_data: Vec<PluginLevelData>,
+        pub next_entity_id: u64,
+    }
+
+    /// v5 → v6: keep the lighting exactly as authored and adopt the default
+    /// toon curve.
+    ///
+    /// The curve is a *display* setting — nothing baked depends on it — so
+    /// an upgraded world's lightmaps stay valid and no re-bake is needed.
+    /// The defaults are not the constants v5 shipped with, though: v5 banded
+    /// radiance linearly from a 0.18 floor, and v6 bands perceived
+    /// brightness from a much lower one, so a v5 world will look different
+    /// (and its mid-tones better separated) the first time it loads. Worlds
+    /// authored against the old ramp were usually exposed *down* to stop
+    /// everything clipping to the top band; those want their intensities
+    /// raised and `white` dialled to taste, which is exactly what the knobs
+    /// are now for.
+    pub fn upgrade_v5(old: WorldMetadataV5) -> WorldMetadata {
+        WorldMetadata {
+            version: super::WORLD_FORMAT_VERSION,
+            world_id: old.world_id,
+            terrain_config: old.terrain_config,
+            chunks_x: old.chunks_x,
+            chunks_y: old.chunks_y,
+            chunk_index: old.chunk_index,
+            last_saved: old.last_saved,
+            environment: EnvironmentData {
+                sun_rotation: old.environment.sun_rotation,
+                sun_position: old.environment.sun_position,
+                sun_color: old.environment.sun_color,
+                sun_intensity: old.environment.sun_intensity,
+                ambient_color: old.environment.ambient_color,
+                ambient_intensity: old.environment.ambient_intensity,
+                toon_curve: EnvironmentData::default().toon_curve,
             },
             required_plugins: old.required_plugins,
             plugin_data: old.plugin_data,
@@ -586,7 +695,7 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != 2 && version != 4 && version != WORLD_FORMAT_VERSION {
+    if version != 2 && version != 4 && version != 5 && version != WORLD_FORMAT_VERSION {
         return Err(StorageError::VersionMismatch {
             expected: WORLD_FORMAT_VERSION,
             found: version,
@@ -623,6 +732,15 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
             rkyv::deserialize::<legacy::WorldMetadataV4, RkyvError>(archived)
                 .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         return Ok(legacy::upgrade_v4(old));
+    }
+
+    if version == 5 {
+        let archived = rkyv::access::<legacy::ArchivedWorldMetadataV5, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::WorldMetadataV5 =
+            rkyv::deserialize::<legacy::WorldMetadataV5, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v5(old));
     }
 
     let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
@@ -713,6 +831,39 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Print a world's saved lighting environment. Diagnostic only — the
+    /// numbers a bake was produced with explain its lightmaps far faster than
+    /// re-reading the baker does.
+    ///
+    /// `WORLD=worlds/cafe cargo test dump_world_meta -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_world_meta() {
+        let world = std::env::var("WORLD").unwrap_or_else(|_| "worlds/cafe".into());
+        let bytes = std::fs::read(std::path::Path::new(&world).join("world.meta")).unwrap();
+        let meta = parse_world_meta_from_bytes(&bytes).unwrap();
+        let env = &meta.environment;
+        let sun_dir = -env.sun_transform().forward().as_vec3();
+        println!(
+            "world={} version={} chunks={}\n  \
+             sun   dir={sun_dir:?} elevation={:.1}deg colour={:?} intensity={}\n  \
+             ambient colour={:?} intensity={}\n  \
+             sun_radiance={:?} (lum {:.3})  ambient_radiance={:?} (lum {:.3})",
+            meta.world_id,
+            meta.version,
+            meta.chunk_index.len(),
+            sun_dir.y.asin().to_degrees(),
+            env.sun_color,
+            env.sun_intensity,
+            env.ambient_color,
+            env.ambient_intensity,
+            env.sun_radiance(),
+            engine_api::toon_curve::luminance(env.sun_radiance()),
+            env.ambient_radiance(),
+            engine_api::toon_curve::luminance(env.ambient_radiance()),
+        );
+    }
+
     #[test]
     fn test_world_save_load_roundtrip() {
         let dir = tempdir().unwrap();
@@ -730,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn test_world_v5_environment_plugin_data_and_id_counter_roundtrip() {
+    fn test_world_v6_environment_plugin_data_and_id_counter_roundtrip() {
         let mut metadata = create_world_metadata("env".to_string(), 128, 128, 64, (1.0, 1.0), 10.0);
         metadata.next_entity_id = 77;
         metadata.environment = EnvironmentData {
@@ -740,6 +891,7 @@ mod tests {
             sun_intensity: 1.5,
             ambient_color: [0.1, 0.2, 0.3],
             ambient_intensity: 0.4,
+            toon_curve: [4.0, 0.02, 1.4, 1.8],
         };
         metadata.required_plugins = vec!["cafe-sim".to_string()];
         metadata.plugin_data = vec![PluginLevelData {
@@ -763,6 +915,8 @@ mod tests {
         assert_eq!(loaded.plugin_data[0].plugin, "cafe-sim");
         assert_eq!(loaded.plugin_data[0].data, vec![1, 2, 3, 4]);
         assert_eq!(loaded.next_entity_id, 77);
+        assert_eq!(loaded.environment.toon_curve, [4.0, 0.02, 1.4, 1.8]);
+        assert_eq!(loaded.environment.toon_curve().bands, 4.0);
     }
 
     /// A v2 `world.meta` must still load, keeping its chunk index and picking
@@ -879,6 +1033,67 @@ mod tests {
         assert_eq!(loaded.required_plugins, vec!["cafe-sim".to_string()]);
         assert_eq!(loaded.plugin_data[0].data, vec![9]);
         assert_eq!(loaded.next_entity_id, 31);
+    }
+
+    /// A v5 `world.meta` — the format every world on disk was saved in
+    /// before the toon curve became a per-world setting — keeps its authored
+    /// lighting exactly and adopts the default curve. Nothing baked depends
+    /// on the curve, so its lightmaps stay valid.
+    #[test]
+    fn test_world_v5_upgrades_to_current() {
+        let old = legacy::WorldMetadataV5 {
+            version: 5,
+            world_id: "v5".to_string(),
+            terrain_config: TerrainConfigData {
+                grid_width: 256,
+                grid_height: 256,
+                tile_size_x: 1.0,
+                tile_size_y: 1.0,
+                height_scale: 10.0,
+            },
+            chunks_x: 4,
+            chunks_y: 4,
+            chunk_index: vec![ChunkIndexEntry {
+                chunk_x: 0,
+                chunk_y: 0,
+                state: ChunkState::Modified,
+            }],
+            last_saved: 99,
+            environment: legacy::EnvironmentDataV5 {
+                sun_rotation: [0.1, 0.2, 0.3, 0.9],
+                sun_position: [1.0, 50.0, -2.0],
+                sun_color: [0.23, 0.27, 0.49],
+                sun_intensity: 0.46,
+                ambient_color: [1.0, 1.0, 1.0],
+                ambient_intensity: 0.13,
+            },
+            required_plugins: vec!["cafe-sim".to_string()],
+            plugin_data: vec![PluginLevelData {
+                plugin: "cafe-sim".to_string(),
+                data: vec![7],
+            }],
+            next_entity_id: 42,
+        };
+
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(WORLD_MAGIC);
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
+
+        assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
+        assert_eq!(loaded.world_id, "v5");
+        assert_eq!(loaded.environment.sun_intensity, 0.46);
+        assert_eq!(loaded.environment.ambient_intensity, 0.13);
+        assert_eq!(loaded.environment.sun_color, [0.23, 0.27, 0.49]);
+        assert_eq!(loaded.environment.toon_curve(), ToonCurve::default());
+        assert_eq!(loaded.plugin_data[0].data, vec![7]);
+        assert_eq!(loaded.next_entity_id, 42);
     }
 
     /// The chunk payload did not change in v3; `.terrain` files stay at

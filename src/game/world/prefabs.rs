@@ -33,7 +33,10 @@ use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use super::objects::{PlacedEntityRecord, PlacedKind, quat_to_array};
 use super::terrain::storage::StorageError;
 
-pub const PREFAB_FORMAT_VERSION: u32 = 1;
+/// Version 2: `PlacedKind` lights gained `falloff`, which changes the
+/// archived shape of every record. v1 files read through
+/// [`legacy::PrefabFileV1`].
+pub const PREFAB_FORMAT_VERSION: u32 = 2;
 const PREFAB_MAGIC: &[u8; 4] = b"PFAB";
 
 /// Where prefab definitions live. Native: a real directory; web: the OPFS
@@ -535,7 +538,7 @@ pub fn parse_prefab(bytes: &[u8]) -> Result<PrefabFile, StorageError> {
     let mut word = [0u8; 4];
     cursor.read_exact(&mut word)?;
     let version = u32::from_le_bytes(word);
-    if version != PREFAB_FORMAT_VERSION {
+    if !(1..=PREFAB_FORMAT_VERSION).contains(&version) {
         return Err(StorageError::VersionMismatch {
             expected: PREFAB_FORMAT_VERSION,
             found: version,
@@ -549,10 +552,44 @@ pub fn parse_prefab(bytes: &[u8]) -> Result<PrefabFile, StorageError> {
     if u32::from_le_bytes(word) != crc32fast::hash(&data) {
         return Err(StorageError::ChecksumMismatch);
     }
+    if version == 1 {
+        let archived = rkyv::access::<legacy::ArchivedPrefabFileV1, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old = rkyv::deserialize::<legacy::PrefabFileV1, RkyvError>(archived)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v1(old));
+    }
     let archived = rkyv::access::<ArchivedPrefabFile, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     rkyv::deserialize::<PrefabFile, RkyvError>(archived)
         .map_err(|e| StorageError::SerializationError(e.to_string()))
+}
+
+/// Older prefab file shapes, read and upgraded in memory, never written.
+pub mod legacy {
+    use super::{PREFAB_FORMAT_VERSION, PrefabFile};
+    use crate::game::world::objects::legacy::PlacedEntityRecordV6;
+    use rkyv::{Archive, Deserialize, Serialize};
+
+    /// v1: records with a v6 `PlacedKind` (lights without `falloff`).
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct PrefabFileV1 {
+        pub version: u32,
+        pub name: String,
+        pub entities: Vec<PlacedEntityRecordV6>,
+    }
+
+    pub fn upgrade_v1(old: PrefabFileV1) -> PrefabFile {
+        PrefabFile {
+            version: PREFAB_FORMAT_VERSION,
+            name: old.name,
+            entities: old
+                .entities
+                .into_iter()
+                .map(PlacedEntityRecordV6::upgrade)
+                .collect(),
+        }
+    }
 }
 
 // ============================================================================
@@ -697,6 +734,50 @@ impl Plugin for PrefabsPlugin {
             app.add_systems(Update, poll_prefab_library);
         }
         app.add_systems(Startup, load_prefab_library);
+    }
+}
+
+#[cfg(test)]
+mod diag {
+    use super::*;
+
+    /// Parse every prefab in `assets/prefabs` and print it, so the legacy
+    /// readers can be checked against the files that actually exist rather
+    /// than only against synthetic ones.
+    ///
+    /// `cargo test dump_prefabs -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_prefabs() {
+        let dir = std::env::var("PREFABS").unwrap_or_else(|_| PREFAB_DIR.to_string());
+        let mut found = 0;
+        for entry in std::fs::read_dir(&dir).expect("prefab dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("prefab") {
+                continue;
+            }
+            found += 1;
+            let bytes = std::fs::read(&path).unwrap();
+            let stored = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+            match parse_prefab(&bytes) {
+                Ok(file) => {
+                    println!(
+                        "{} (on disk v{stored} -> v{}) {} entities",
+                        path.display(),
+                        file.version,
+                        file.entities.len()
+                    );
+                    for e in &file.entities {
+                        println!(
+                            "  local {:>2} {:<16} parent {:?} kind {:?}",
+                            e.id, e.name, e.parent, e.kind
+                        );
+                    }
+                }
+                Err(e) => panic!("{} (v{stored}) failed to parse: {e}", path.display()),
+            }
+        }
+        assert!(found > 0, "no .prefab files under {dir}");
     }
 }
 
@@ -858,6 +939,57 @@ mod tests {
         let (def, _) = define_from_records("x", &record(1, Vec3::ZERO), &[record(2, Vec3::X)]);
         let mut bytes = serialize_prefab(&def).unwrap();
         assert_eq!(parse_prefab(&bytes).unwrap(), def);
+
+        // A v1 file — every prefab on disk before lights had a falloff —
+        // reads through the v6 record and comes out current.
+        let old = legacy::PrefabFileV1 {
+            version: 1,
+            name: "lamp-post".into(),
+            entities: vec![
+                crate::game::world::objects::legacy::PlacedEntityRecordV6 {
+                    id: 0,
+                    name: "lamp-post".into(),
+                    position: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                    kind: crate::game::world::objects::legacy::PlacedKindV6::Group,
+                    scripts: Vec::new(),
+                    parent: None,
+                    prefab: None,
+                },
+                crate::game::world::objects::legacy::PlacedEntityRecordV6 {
+                    id: 1,
+                    name: "bulb".into(),
+                    position: [0.0, 3.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                    kind: crate::game::world::objects::legacy::PlacedKindV6::PointLight {
+                        color: [1.0; 3],
+                        intensity: 2.0,
+                        range: 8.0,
+                        shadows: false,
+                    },
+                    scripts: Vec::new(),
+                    parent: Some(0),
+                    prefab: None,
+                },
+            ],
+        };
+        let payload = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(PREFAB_MAGIC);
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        v1.extend_from_slice(&payload);
+        v1.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+        let upgraded = parse_prefab(&v1).unwrap();
+        assert_eq!(upgraded.version, PREFAB_FORMAT_VERSION);
+        assert_eq!(upgraded.entities.len(), 2);
+        assert!(matches!(
+            upgraded.entities[1].kind,
+            PlacedKind::PointLight { falloff, range, .. }
+                if falloff == PlacedKind::DEFAULT_FALLOFF && range == 8.0
+        ));
         let last = bytes.len() - 6;
         bytes[last] ^= 0xFF;
         assert!(parse_prefab(&bytes).is_err());

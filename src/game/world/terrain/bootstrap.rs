@@ -8,7 +8,7 @@ use bevy::{
 
 use super::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE,
-    material::TerrainMaterial,
+    material::{TerrainMaterial, TerrainShading},
     mesh::{LOD_LEVELS, generate_lod_mesh},
     storage::{self, ChunkData, HeightData, TerrainChunkRegistry, dequantize_heights},
 };
@@ -509,7 +509,7 @@ fn finalize_terrain_setup(
         extension: TerrainMaterial {
             stone_texture,
             lightmap: default_lightmap,
-            use_lightmap: 1,
+            shading: TerrainShading::default(),
         },
     });
 

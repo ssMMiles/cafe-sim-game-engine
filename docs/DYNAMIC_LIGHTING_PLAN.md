@@ -330,9 +330,9 @@ alpha-blended, so it is absent from the depth prepass and the edge detector
 never outlines it.
 
 ### Sun uniform
-Probe-lit materials need the live sun. `ToonSun` (host, `gfx/toon_material.rs`)
+Probe-lit materials need the live sun. `ToonLook` (host, `gfx/toon_material.rs`)
 is derived from `EnvironmentData` whenever `TerrainWorld` changes;
-`sync_toon_sun` writes it into every toon material then, and into any material
+`sync_toon_look` writes it into every toon material then, and into any material
 `Added` since (so a plugin's own material gets it a frame late — only `Added`
 is watched, never `Modified`, which our own writes would raise). The host's
 glTF conversion applies it at creation so the player never shows a sunless

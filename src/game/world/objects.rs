@@ -46,8 +46,11 @@ const CHUNK_OBJECTS_MAGIC: &[u8; 4] = b"COBJ";
 /// `PlacedEntityRecord` (kind + scripts). Version 4: light `intensity`
 /// reinterpreted from bevy photometric units into lightmap units for the
 /// baked lighting pipeline. Version 5: `parent` (editor grouping) and the
-/// `Group` kind. Versions 2–4 are still readable.
-pub const CHUNK_OBJECTS_VERSION: u32 = 6;
+/// `Group` kind. Version 6: `prefab` on instance roots. Version 7: lights
+/// gained `falloff` — a field *inside* a `PlacedKind` variant, which changes
+/// the archived enum, so every older reader goes through
+/// [`legacy::PlacedKindV6`]. Versions 2–6 are still readable.
+pub const CHUNK_OBJECTS_VERSION: u32 = 7;
 
 // Chunk world size in units: (CHUNK_SIZE - 1) * TILE_SIZE.
 pub const CHUNK_WORLD_SIZE: f32 = (CHUNK_SIZE - 1) as f32 * TILE_SIZE.0;
@@ -137,6 +140,11 @@ pub enum PlacedKind {
         /// World units at which the light falls off to nothing. The falloff
         /// is smooth and bounded, not physical inverse-square.
         range: f32,
+        /// Shape of the falloff within `range`: attenuation is
+        /// `(1 − (d/r)²)^falloff`. 2 is the historical curve; lower spreads
+        /// the light out towards its range, higher pulls it in around the
+        /// lamp. See [`PlacedKind::DEFAULT_FALLOFF`].
+        falloff: f32,
         /// Unused: baked lights always cast baked shadows. Retained so the
         /// record shape is stable for a future dynamic-light option.
         shadows: bool,
@@ -149,6 +157,8 @@ pub enum PlacedKind {
         intensity: f32,
         /// World units at which the light falls off to nothing.
         range: f32,
+        /// As for `PointLight`.
+        falloff: f32,
         /// Half-angles in radians; the cone fades between the two.
         inner_angle: f32,
         outer_angle: f32,
@@ -163,6 +173,11 @@ pub enum PlacedKind {
 }
 
 impl PlacedKind {
+    /// The falloff exponent every light had before it became a field: the
+    /// `(1 − (d/r)²)²` curve. Also what upgraded records get, so an old
+    /// world bakes identically.
+    pub const DEFAULT_FALLOFF: f32 = 2.0;
+
     pub fn mesh(asset_path: impl Into<String>) -> Self {
         PlacedKind::Mesh {
             asset_path: asset_path.into(),
@@ -177,6 +192,7 @@ impl PlacedKind {
             color: [1.0, 0.85, 0.6],
             intensity: 1.0,
             range: 14.0,
+            falloff: Self::DEFAULT_FALLOFF,
             shadows: false,
         }
     }
@@ -186,6 +202,7 @@ impl PlacedKind {
             color: [1.0, 0.95, 0.85],
             intensity: 1.5,
             range: 20.0,
+            falloff: Self::DEFAULT_FALLOFF,
             inner_angle: 0.4,
             outer_angle: 0.7,
             shadows: false,
@@ -250,8 +267,183 @@ pub struct ChunkObjectsFile {
 /// [`parse_chunk_objects_from_bytes`] and upgraded in memory; never written.
 pub mod legacy {
     use super::{ChunkObjectsFile, ColliderMode, PlacedEntityRecord, PlacedKind};
+    use crate::game::world::prefabs::{PrefabInstanceData, PrefabOverride};
     use engine_api::ScriptBinding;
     use rkyv::{Archive, Deserialize, Serialize};
+
+    /// `PlacedKind` as archived through v6: lights without `falloff`. rkyv
+    /// lays a variant's fields out positionally, so adding one changed the
+    /// archived shape of *every* record holding a kind — chunk objects of
+    /// every version, and prefab files — and all of them read through this
+    /// and [`PlacedKindV6::upgrade`].
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug, PartialEq)]
+    pub enum PlacedKindV6 {
+        Mesh {
+            asset_path: String,
+            collider: ColliderMode,
+        },
+        PointLight {
+            color: [f32; 3],
+            intensity: f32,
+            range: f32,
+            shadows: bool,
+        },
+        SpotLight {
+            color: [f32; 3],
+            intensity: f32,
+            range: f32,
+            inner_angle: f32,
+            outer_angle: f32,
+            shadows: bool,
+        },
+        Empty,
+        Group,
+    }
+
+    impl PlacedKindV6 {
+        /// Lights take the exponent they always implicitly had, so the
+        /// upgraded world bakes to the same texels.
+        pub fn upgrade(self) -> PlacedKind {
+            match self {
+                PlacedKindV6::Mesh {
+                    asset_path,
+                    collider,
+                } => PlacedKind::Mesh {
+                    asset_path,
+                    collider,
+                },
+                PlacedKindV6::PointLight {
+                    color,
+                    intensity,
+                    range,
+                    shadows,
+                } => PlacedKind::PointLight {
+                    color,
+                    intensity,
+                    range,
+                    falloff: PlacedKind::DEFAULT_FALLOFF,
+                    shadows,
+                },
+                PlacedKindV6::SpotLight {
+                    color,
+                    intensity,
+                    range,
+                    inner_angle,
+                    outer_angle,
+                    shadows,
+                } => PlacedKind::SpotLight {
+                    color,
+                    intensity,
+                    range,
+                    falloff: PlacedKind::DEFAULT_FALLOFF,
+                    inner_angle,
+                    outer_angle,
+                    shadows,
+                },
+                PlacedKindV6::Empty => PlacedKind::Empty,
+                PlacedKindV6::Group => PlacedKind::Group,
+            }
+        }
+    }
+
+    /// `PrefabOverride` with a v6 kind.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct PrefabOverrideV6 {
+        pub local: u32,
+        pub removed: bool,
+        pub transform: Option<([f32; 3], [f32; 4], [f32; 3])>,
+        pub name: Option<String>,
+        pub kind: Option<PlacedKindV6>,
+        pub scripts: Option<Vec<ScriptBinding>>,
+    }
+
+    impl PrefabOverrideV6 {
+        pub fn upgrade(self) -> PrefabOverride {
+            PrefabOverride {
+                local: self.local,
+                removed: self.removed,
+                transform: self.transform,
+                name: self.name,
+                kind: self.kind.map(PlacedKindV6::upgrade),
+                scripts: self.scripts,
+            }
+        }
+    }
+
+    /// `PrefabInstanceData` with v6 overrides.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct PrefabInstanceDataV6 {
+        pub name: String,
+        pub member_ids: Vec<(u64, u64)>,
+        pub overrides: Vec<PrefabOverrideV6>,
+    }
+
+    impl PrefabInstanceDataV6 {
+        pub fn upgrade(self) -> PrefabInstanceData {
+            PrefabInstanceData {
+                name: self.name,
+                member_ids: self.member_ids,
+                overrides: self
+                    .overrides
+                    .into_iter()
+                    .map(PrefabOverrideV6::upgrade)
+                    .collect(),
+            }
+        }
+    }
+
+    /// v6 record: the current shape with a v6 kind. Also what a v1 prefab
+    /// file holds.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct PlacedEntityRecordV6 {
+        pub id: u64,
+        pub name: String,
+        pub position: [f32; 3],
+        pub rotation: [f32; 4],
+        pub scale: [f32; 3],
+        pub kind: PlacedKindV6,
+        pub scripts: Vec<ScriptBinding>,
+        pub parent: Option<u64>,
+        pub prefab: Option<PrefabInstanceDataV6>,
+    }
+
+    impl PlacedEntityRecordV6 {
+        pub fn upgrade(self) -> PlacedEntityRecord {
+            PlacedEntityRecord {
+                id: self.id,
+                name: self.name,
+                position: self.position,
+                rotation: self.rotation,
+                scale: self.scale,
+                kind: self.kind.upgrade(),
+                scripts: self.scripts,
+                parent: self.parent,
+                prefab: self.prefab.map(PrefabInstanceDataV6::upgrade),
+            }
+        }
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct ChunkObjectsFileV6 {
+        pub version: u32,
+        pub chunk_x: i32,
+        pub chunk_y: i32,
+        pub entities: Vec<PlacedEntityRecordV6>,
+    }
+
+    /// v6 → v7: only the kind changed.
+    pub fn upgrade_v6(old: ChunkObjectsFileV6) -> ChunkObjectsFile {
+        ChunkObjectsFile {
+            version: super::CHUNK_OBJECTS_VERSION,
+            chunk_x: old.chunk_x,
+            chunk_y: old.chunk_y,
+            entities: old
+                .entities
+                .into_iter()
+                .map(PlacedEntityRecordV6::upgrade)
+                .collect(),
+        }
+    }
 
     /// v5 record: no `prefab`.
     #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
@@ -261,7 +453,7 @@ pub mod legacy {
         pub position: [f32; 3],
         pub rotation: [f32; 4],
         pub scale: [f32; 3],
-        pub kind: PlacedKind,
+        pub kind: PlacedKindV6,
         pub scripts: Vec<ScriptBinding>,
         pub parent: Option<u64>,
     }
@@ -289,7 +481,7 @@ pub mod legacy {
                     position: e.position,
                     rotation: e.rotation,
                     scale: e.scale,
-                    kind: e.kind,
+                    kind: e.kind.upgrade(),
                     scripts: e.scripts,
                     parent: e.parent,
                     prefab: None,
@@ -307,7 +499,7 @@ pub mod legacy {
         pub position: [f32; 3],
         pub rotation: [f32; 4],
         pub scale: [f32; 3],
-        pub kind: PlacedKind,
+        pub kind: PlacedKindV6,
         pub scripts: Vec<ScriptBinding>,
     }
 
@@ -334,7 +526,7 @@ pub mod legacy {
                     position: e.position,
                     rotation: e.rotation,
                     scale: e.scale,
-                    kind: e.kind,
+                    kind: e.kind.upgrade(),
                     scripts: e.scripts,
                     parent: None,
                     prefab: None,
@@ -1064,6 +1256,15 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
         return Ok(legacy::upgrade_v5(old));
     }
 
+    if version == 6 {
+        let archived = rkyv::access::<legacy::ArchivedChunkObjectsFileV6, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::ChunkObjectsFileV6 =
+            rkyv::deserialize::<legacy::ChunkObjectsFileV6, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v6(old));
+    }
+
     let archived = rkyv::access::<ArchivedChunkObjectsFile, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let mut file: ChunkObjectsFile = rkyv::deserialize::<ChunkObjectsFile, RkyvError>(archived)
@@ -1121,6 +1322,7 @@ mod tests {
                         color: [1.0, 0.85, 0.6],
                         intensity: 100_000.0,
                         range: 14.0,
+                        falloff: 3.5,
                         shadows: false,
                     },
                     scripts: Vec::new(),
@@ -1169,7 +1371,7 @@ mod tests {
         bytes
     }
 
-    fn v4_light(id: u64, kind: PlacedKind) -> legacy::PlacedEntityRecordV4 {
+    fn v4_light(id: u64, kind: legacy::PlacedKindV6) -> legacy::PlacedEntityRecordV4 {
         legacy::PlacedEntityRecordV4 {
             id,
             name: "lamp".into(),
@@ -1291,7 +1493,7 @@ mod tests {
             entities: vec![
                 v4_light(
                     50,
-                    PlacedKind::PointLight {
+                    legacy::PlacedKindV6::PointLight {
                         color: [1.0, 0.5, 0.25],
                         intensity: 100_000.0,
                         range: 9.0,
@@ -1300,7 +1502,7 @@ mod tests {
                 ),
                 v4_light(
                     51,
-                    PlacedKind::SpotLight {
+                    legacy::PlacedKindV6::SpotLight {
                         color: [0.2, 0.4, 0.6],
                         intensity: 250_000.0,
                         range: 11.0,
@@ -1359,7 +1561,7 @@ mod tests {
             chunk_y: 3,
             entities: vec![v4_light(
                 50,
-                PlacedKind::PointLight {
+                legacy::PlacedKindV6::PointLight {
                     color: [1.0, 0.5, 0.25],
                     intensity: 1.5,
                     range: 9.0,
@@ -1373,9 +1575,90 @@ mod tests {
         assert_eq!(lamp.parent, None);
         assert_eq!(lamp.name, "lamp");
         match &lamp.kind {
-            PlacedKind::PointLight { intensity, .. } => assert_eq!(*intensity, 1.5),
+            PlacedKind::PointLight {
+                intensity, falloff, ..
+            } => {
+                assert_eq!(*intensity, 1.5);
+                // Upgraded lights keep the curve they always had.
+                assert_eq!(*falloff, PlacedKind::DEFAULT_FALLOFF);
+            }
             other => panic!("expected a point light, got {other:?}"),
         }
+    }
+
+    /// v6 is what every world on disk was saved as before lights had a
+    /// falloff. Its kinds live inside an enum whose archived shape changed,
+    /// so this is the reader everything older than v7 funnels through.
+    #[test]
+    fn v6_file_upgrades_lights_with_the_default_falloff() {
+        let old = legacy::ChunkObjectsFileV6 {
+            version: 6,
+            chunk_x: 0,
+            chunk_y: 0,
+            entities: vec![
+                legacy::PlacedEntityRecordV6 {
+                    id: 79,
+                    name: "lamp".into(),
+                    position: [-21.19, 2.5, 25.25],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0],
+                    kind: legacy::PlacedKindV6::SpotLight {
+                        color: [1.0, 0.9, 0.8],
+                        intensity: 1.28,
+                        range: 16.8,
+                        inner_angle: 0.4,
+                        outer_angle: 0.7,
+                        shadows: false,
+                    },
+                    scripts: Vec::new(),
+                    parent: None,
+                    prefab: None,
+                },
+                legacy::PlacedEntityRecordV6 {
+                    id: 80,
+                    name: "shell".into(),
+                    position: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                    kind: legacy::PlacedKindV6::Mesh {
+                        asset_path: "meshes/cafe/Cafe.gltf#Scene0".into(),
+                        collider: ColliderMode::Trimesh,
+                    },
+                    scripts: Vec::new(),
+                    parent: None,
+                    prefab: Some(legacy::PrefabInstanceDataV6 {
+                        name: "cafe-shell".into(),
+                        member_ids: vec![(1, 81)],
+                        overrides: vec![legacy::PrefabOverrideV6 {
+                            local: 1,
+                            removed: false,
+                            transform: None,
+                            name: None,
+                            kind: Some(legacy::PlacedKindV6::Empty),
+                            scripts: None,
+                        }],
+                    }),
+                },
+            ],
+        };
+        let loaded = parse_chunk_objects_from_bytes(&frame(&old, 6, (0, 0))).unwrap();
+        assert_eq!(loaded.version, CHUNK_OBJECTS_VERSION);
+        match &loaded.entities[0].kind {
+            PlacedKind::SpotLight {
+                falloff,
+                inner_angle,
+                range,
+                ..
+            } => {
+                assert_eq!(*falloff, PlacedKind::DEFAULT_FALLOFF);
+                assert_eq!(*inner_angle, 0.4);
+                assert_eq!(*range, 16.8);
+            }
+            other => panic!("expected a spot light, got {other:?}"),
+        }
+        let inst = loaded.entities[1].prefab.as_ref().unwrap();
+        assert_eq!(inst.member_ids, vec![(1, 81)]);
+        assert_eq!(inst.overrides[0].kind, Some(PlacedKind::Empty));
     }
 
     /// v5 is what grouped worlds were saved as before prefabs existed: it
@@ -1392,7 +1675,10 @@ mod tests {
                 position: [1.0, 0.0, 0.0],
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [1.0, 1.0, 1.0],
-                kind: PlacedKind::mesh("meshes/rock/bigrock.gltf#Scene0"),
+                kind: legacy::PlacedKindV6::Mesh {
+                    asset_path: "meshes/rock/bigrock.gltf#Scene0".into(),
+                    collider: ColliderMode::Trimesh,
+                },
                 scripts: Vec::new(),
                 parent: Some(9),
             }],

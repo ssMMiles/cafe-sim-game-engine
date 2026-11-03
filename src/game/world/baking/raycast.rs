@@ -350,21 +350,19 @@ pub fn compute_ao(
 // ============================================================================
 
 /// Multi-bounce indirect lighting: cast `n_rays` hemisphere rays from `origin`,
-/// following each ray through up to `bounce_count` terrain reflections.
+/// following each ray through up to `bounce_count` reflections.
 ///
-/// Both terrain and scenery re-emit, each with its own albedo. Each bounce
-/// accumulates the direct-lit contribution at the hit point
-/// attenuated by the current path throughput, then multiplies throughput by
-/// `terrain_albedo` so successive bounces contribute diminishing amounts.
-/// Scenery triangles absorb bounce rays (no light leaks through walls) but
-/// are not themselves reflectors — only terrain bounces light. Both terrain
-/// and object texels *receive* it.
+/// Both terrain and scenery re-emit, each with its own albedo, through the
+/// shared [`BakeLighting::reemitted`]. Each bounce accumulates that hit's
+/// re-emission attenuated by the current path throughput, then multiplies
+/// throughput by the hit's albedo so successive bounces contribute
+/// diminishing amounts. Terrain and object texels both *receive* it.
 ///
 /// `seed_offset` is a per-texel hash used to rotate the azimuth of the primary
 /// rays and decorrelate the structured golden-ratio pattern across texels,
 /// eliminating stripe artifacts when the result is quantized by the toon shader.
 ///
-/// Returns the average bounce irradiance ∈ [0, ∞). Division by `n_rays` is
+/// Returns the average bounce radiance ∈ [0, ∞). Division by `n_rays` is
 /// already applied — the caller multiplies by `bounce_strength`.
 pub fn compute_indirect_bounce(
     origin: Vec3,
@@ -463,7 +461,6 @@ pub fn compute_indirect_bounce(
                 (None, None) => break,
             };
 
-            let ndotl_q = hit_normal.dot(sun_dir).max(0.0);
             let vis_q = cast_shadow_ray(
                 hit_pos,
                 hit_mesh_pos,
@@ -473,24 +470,24 @@ pub fn compute_indirect_bounce(
                 shadow_max_dist,
                 steps,
             );
-            // Direct light at the hit: the sun, plus every placed light that
-            // reaches it. A lamp pointed at a wall lights the room through
-            // this term and nothing else.
-            let direct = lighting.sun_rgb * (ndotl_q * vis_q)
-                + lighting.local_lights(hit_mesh_pos, hit_normal, |dir, dist| {
-                    cast_shadow_ray_segment(
-                        hit_pos,
-                        hit_mesh_pos,
-                        dir,
-                        dist,
-                        cache,
-                        bvh,
-                        light_shadow_steps(dist),
-                    )
-                });
+            // What the hit surface sends back: sun, placed lights and sky,
+            // times its albedo. `BakeLighting::reemitted` is shared with the
+            // probe gather so the static and dynamic halves of the world
+            // agree about how bright a lit wall is.
+            //
             // No cur_cos_w here — it cancels with the PDF for cosine-weighted
             // hemisphere sampling.
-            accum += direct * (throughput * albedo);
+            accum += lighting.reemitted(hit_mesh_pos, hit_normal, albedo, vis_q, |dir, dist| {
+                cast_shadow_ray_segment(
+                    hit_pos,
+                    hit_mesh_pos,
+                    dir,
+                    dist,
+                    cache,
+                    bvh,
+                    light_shadow_steps(dist),
+                )
+            }) * throughput;
             throughput *= albedo;
 
             // Resample direction at the hit point using a proper per-bounce
@@ -881,6 +878,66 @@ mod indoor {
             "a lamp facing a wall should light the room off it, got {:?}",
             bounce(&lamplit)
         );
+    }
+
+    /// A wall lit by nothing but the sky still re-emits, and the lightmap
+    /// bounce picks it up.
+    ///
+    /// Through v11 `compute_indirect_bounce` re-emitted only the sun and the
+    /// placed lights, while the probe gather beside it re-emitted the sky as
+    /// well. In overcast or shaded conditions — the whole of an interior,
+    /// and every north face outdoors — the sky *is* the light, so the two
+    /// halves of the world disagreed about how bright a wall is: a dynamic
+    /// object picked up fill the static floor underneath it never got. Both
+    /// now go through `BakeLighting::reemitted`.
+    #[test]
+    fn a_wall_bounces_sky_onto_a_surface_the_sun_never_reaches() {
+        let wall = TriangleBvh::build(vec![
+            [
+                Vec3::new(5.0, 0.0, -6.0),
+                Vec3::new(5.0, 6.0, -6.0),
+                Vec3::new(5.0, 0.0, 6.0),
+            ],
+            [
+                Vec3::new(5.0, 6.0, -6.0),
+                Vec3::new(5.0, 6.0, 6.0),
+                Vec3::new(5.0, 0.0, 6.0),
+            ],
+        ]);
+        let cache = ground();
+        let o = Vec3::new(0.0, 1.0, 0.0);
+
+        // Sky only: no sun, no lamps. Everything that arrives did so by
+        // bouncing off something the sky lit.
+        let overcast = BakeLighting {
+            sun_dir: Vec3::Y,
+            sun_rgb: Vec3::ZERO,
+            ambient_rgb: Vec3::splat(0.3),
+            lights: Vec::new(),
+        };
+        let bounce = compute_indirect_bounce(
+            o,
+            o,
+            Vec3::X,
+            &cache,
+            &wall,
+            &overcast,
+            80.0,
+            16,
+            64,
+            0.5,
+            0.5,
+            1,
+            |_| 48,
+            11,
+        );
+        assert!(
+            bounce.min_element() > 0.01,
+            "a sky-lit wall should fill the surface facing it, got {bounce:?}"
+        );
+        // Bounded above by the wall's own outgoing radiance, `ambient x
+        // albedo`: a one-bounce gather cannot exceed what it gathers from.
+        assert!(bounce.max_element() <= 0.3 * 0.5 + 1e-4, "{bounce:?}");
     }
 
     /// AO must rotate its sample set per texel, or the blur cannot clean up

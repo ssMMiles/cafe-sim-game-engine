@@ -1,7 +1,7 @@
 use crate::game::{
     GameEntity,
     gfx::toon_material::{
-        DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonSource, ToonSun,
+        DefaultToonLightmap, ProbeVolumeImages, ToonLook, ToonMat, ToonMaterial, ToonSource,
     },
 };
 pub use engine_api::{ConvertToToon, DynamicLit};
@@ -99,7 +99,7 @@ pub fn on_scene_ready(
     mut shared: ResMut<ProbeToonMaterials>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
     probes: Res<ProbeVolumeImages>,
-    sun: Res<ToonSun>,
+    look: Res<ToonLook>,
 ) {
     let entity = trigger.entity;
 
@@ -174,7 +174,7 @@ pub fn on_scene_ready(
         };
         let template = {
             let mut m = ToonMaterial::new(source, lightmap_handle, &probes);
-            sun.apply(&mut m.shading);
+            look.apply(&mut m.shading);
             m
         };
 

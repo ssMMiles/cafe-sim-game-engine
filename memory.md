@@ -950,3 +950,173 @@ diagnosing.
   harness (LAMP=intensity,range env var).
 - `dump_objects` (ignored test in objects.rs) prints a chunk's placed
   records — the fastest way to find where a placed light or the shell is.
+
+## The toon curve became a per-world setting — 2 November 2026 (v12, world v6, ABI 11)
+
+The user's complaint: "the lighting floor is way too high at 0.18, but with
+that lowered down to 0 we get very weird behaviour around ambient/sun light."
+Both halves were real and had different causes.
+
+- **Floor 0 returned NaN.** The hue fade was
+  `smoothstep(0.0, TOON_FLOOR, band)`, and `smoothstep(low, high, x)` with
+  `low == high` is *undefined* in WGSL — naga lowers it to a divide. Not
+  just dark pixels: every fragment. The fade is a distance in **band**
+  units, not in floor units; they only ever shared the number by accident.
+  It is `smoothstep(0, 1/bands, band)` now and the floor is free.
+- **Linear bands had nowhere to put a dark value.** At gamma 1 the
+  boundaries are 0.2/0.4/0.6/0.8; sunlit is ~1.0 and shaded ~0.1, so
+  *everything in shade* was band 0. The floor wasn't the darkest corner's
+  colour, it was every shadow's colour, which is why it had to be 0.18.
+  Quantising `(lum/white)^(1/gamma)` moves the boundaries to
+  `white·(k/bands)^gamma`. Measured over 2.87 M object texels in the cafe:
+  band occupancy 67/21/8/4/0/0 at gamma 1 → 14/35/35/12/4/0 at gamma 2.2.
+- **The user had been fighting the curve with the light intensities.**
+  `dump_world_meta` on the cafe: sun radiance luminance 0.128 against
+  ambient 0.130 — a sun *dimmer than the sky*, dialled down ~5× to stop
+  everything clipping at the top band. Its terrain lightmap has
+  p25 = p50 = p75 = 0.219: half the world is one value, 9 % of it on the
+  wrong side of a band boundary. That is the whole of "weird behaviour
+  around ambient/sun light". **Exposure is `white`; intensities are
+  physical bake inputs.** The cafe world needs its sun put back up.
+- `ToonCurve { bands, floor, white, gamma }` now lives in the material
+  uniform and in `EnvironmentData`, tunable live in the inspector — there
+  is no shader hot-reload in this build (no `file_watcher` feature), so a
+  compiled-in constant meant a full rebuild per iteration. `white` only
+  ever touches the *input*; `level` runs floor→1.0 whatever it is (I got
+  that wrong first and `levels()` went overbright).
+- Two measurement tools, both ignored tests: `band_occupancy`
+  (`WORLD=`, `V=` for an older bake) and `dump_world_meta`.
+
+### Audit findings fixed alongside (v12, needs a re-bake)
+
+- **Re-emission disagreed between the two halves of the world.**
+  `ProbeContext::direct_at` added `ambient_rgb` at a bounce hit and
+  `compute_indirect_bounce` did not, so a sky-lit wall filled a passing
+  character but not the ground under them. One `BakeLighting::reemitted`
+  now, called by both and mirrored in the WGSL.
+- **The object bake marched the heightmap from the surface**, not 0.5 up
+  (the open §7.5). Object texels at ground level — the cafe's floor quad —
+  had `terrain_h > sample.y` fire on the DDA's first step, killing the sun
+  *and* every local light. The terrain and probe bakes always lifted; the
+  bounce walk inside `compute_indirect_bounce` already lifted at each hit.
+
+### Still open, recorded in docs/LIGHTING.md §6
+
+- **The sky dome is hardcoded** and reads nothing from `EnvironmentData` —
+  not the ambient colour, not the sun's direction. Probably the biggest
+  remaining "lighting looks odd" factor outdoors: the brain reads the dome
+  as the light source and the shading disagrees with it.
+- `bounce_strength` is applied to lightmaps but not to probes (latent at
+  the default 1.0).
+- Dynamic objects still have no AO and no self-shadowing.
+
+## Why a lamp's pool on probe-lit furniture was a diamond — 2 November 2026
+
+Reported as "the pattern of the spot light in the cafe almost turns into a
+diamond on the tops of furniture leaving sharp points in each direction".
+(It is a *point* light, id 79, warm, 1.28/16.8 m at y = 2.5 — `dump_objects`;
+the cafe has no spot lights.)
+
+- **Cause: trilinear filtering is C0 but not C1.** Its gradient jumps at
+  every probe plane, so an iso-contour of the reconstructed field kinks
+  there. A smooth gradient hides it; the toon quantiser draws a hard contour
+  per band boundary, and with a pool only 2-3 cells across those kinks are
+  four visible corners. Confirmed by profiling the real baked field along
+  +X from the lamp: the falloff is **piecewise linear with slope breaks at
+  d = 0.19, 2.19, 4.19 m**, which is exactly where the probe columns are
+  (lamp x = -21.19, probes at odd x).
+- Dead ends, all measured before being dropped — each looked right on paper:
+  - *Lattice phase.* Guessed the lamp sitting on a probe column was the
+    trigger; it is slightly **better** than sitting between columns.
+  - *Interpolating coefficients then reconstructing* (`probe_channel` is
+    non-linear in `c_dir`, so interpolated lobes partially cancel). Real
+    effect, but only ±3% — reconstructing per corner and interpolating the
+    results has the same kinks.
+  - *Smoothstep-warping the sample coordinate* (free C1 via the hardware's
+    own lerp). Trades the kink for a **plateau** at every probe plane — a
+    staircase. kink% barely moved.
+  - *Catmull-Rom.* Interpolating so it keeps the peak, but C1 only and its
+    negative lobes overshoot: one band got measurably worse.
+- **Fix: cubic B-spline (C2), 8 hardware trilinear taps** via Sigg &
+  Hadwiger pairing. Shader only — no re-bake, no format bump, and it works
+  across chunk boundaries for free because the volume is already assembled
+  and toroidal. Measured on the user's own v12 probes: contour kink
+  1.34→0.09, 4.04→1.10, 1.64→0.03; axis/diagonal anisotropy 0.896→0.989.
+  Costs ~25% of a narrow pool's peak (it is a low-pass) — that is the price
+  of smoothing a 2 m lattice, and it also softens the stored sun visibility.
+- **Why it surfaced now:** the new perceptual toon curve put the pool across
+  bands 1-4 where the old linear ramp had it in 0-1, so four contours are
+  drawn where one used to be. Shape errors that were hidden inside a flat
+  band became visible. Worth remembering generally — widening the ramp
+  exposes every upstream defect.
+- Tooling: `dump_probe_plane` (ignored) reconstructs a world's baked probes
+  over a horizontal plane and prints the band map plus per-contour
+  anisotropy and "kink%" (rms second difference of r(theta) / mean). That
+  metric is what separated the four candidates; contour *radius* along two
+  directions did not — it said band 4 was circular when the map clearly
+  showed a polygon.
+
+## Probe lattice 1 m; the sky dome follows the lights — 2 November 2026
+
+- **Halving `PROBE_CELL_SIZE` is not just a slower bake.** Every per-cell
+  quantity is 8×: probes baked (a small share of a bake), bytes per chunk
+  file (0.36 → 2.9 MB measured), `ProbeStore` memory for a full 81-chunk
+  ring (29 → ~230 MB), and the volume textures *for the same coverage*. I kept the
+  vertical 48 m and trimmed horizontal coverage to ±96 m
+  (`PROBE_VOLUME_DIMS` 192×48×192) — 56.6 MB per copy and there are three
+  (volume buffers, `Image` data, GPU) — rather than 100 MB per copy for the
+  old ±128 m. A window re-centre now rewrites ~57 MB. If this hitches, the
+  `image.data = Some(buffer.clone())` in `update_probe_volume` is the first
+  thing to remove (write into the image's buffer directly).
+- Gave probes their own `PROBE_FORMAT_VERSION` (13). They shared the lightmap
+  version while every change was a lighting-model change; a lattice change
+  alters what a stored cell index means and nothing about a lightmap, and
+  forcing the (slow, CPU) object-atlas re-bake to retire probe files was
+  waste. `is_stale_lightmap_name` checks each family against its own
+  version. Lighting-model changes still bump both.
+- Tests that silently encoded the 2 m cell: `chunk_cell_range` expected
+  31–32 cells (now derived from `CHUNK_WORLD_SIZE / PROBE_CELL_SIZE`), and
+  `open_air_probe_matches_the_lightmap_model` took "the probe at 1.0 m" as
+  the lowest open one (now cell 0 by index). Grep for literal cell counts
+  before changing the lattice again.
+- **Sky dome**: `SkyColors::from_environment` in `world/sky.rs` — zenith
+  0.9×ambient, horizon 1.6×ambient + 0.12×sun while the sun is up
+  (`smoothstep(-0.1, 0.25, sun_dir.y)`), hard sun disc (~2°) + halo, ground
+  0.45×ambient, all × 1/`white`. Direction is `normalize(world_normal)`: a
+  bevy UV sphere's normals are radial (checked in bevy_mesh sphere.rs), so
+  that is the view direction from the dome's centre — the old
+  `world_position.y / 900` tilted the horizon with camera height. The five
+  gains are unviewed guesses; the physical anchor is "sky radiance ≈ the
+  ambient it delivers", several times dimmer than sunlit white. Sky hue is
+  the ambient's — a blue sky needs a bluer `ambient_color`.
+- WGSL trap again: `smoothstep(low, high, x)` needs `low < high`; a fade
+  "downward" is written as `smoothstep(0.0, 0.08, -dir.y)`, not
+  `smoothstep(0.0, -0.08, dir.y)`.
+
+## Light falloff exponent — 2 November 2026 (.objects v7, prefabs v2)
+
+- `PlacedKind::{PointLight,SpotLight}` gained `falloff: f32`;
+  attenuation is `(1 − (d/r)²)^falloff`, default 2 (= the old curve, so
+  upgraded worlds bake identically). `BakedLight.falloff` took one of the
+  three pad floats (still 64 bytes; WGSL `_pad0` → `falloff`). The probe
+  bake goes through the same `sample`, so dynamic and static agree.
+  `BakedLight::with_falloff` is a builder so the dozen test call sites of
+  `point()/spot()` didn't change.
+- **Adding a field inside a `PlacedKind` variant is a format change for
+  every record that holds a kind**: rkyv lays variant fields out
+  positionally. That meant `.objects` v7 *and* prefabs v2, with a
+  `legacy::PlacedKindV6` that the V4/V5/V6 object records and the V1
+  prefab record all use (plus V6 copies of `PrefabOverride` /
+  `PrefabInstanceData`, because `prefab: Option<PrefabInstanceData>` on the
+  record carries overrides carrying kinds). Worth remembering before the
+  next "small" field on a light — `shadows: bool` is still there unused.
+- Inspector: a Falloff row in `light_common` (0.25..=8). Half-brightness
+  radius is `r·√(1 − 0.5^(1/k))`: 0.54 r at 2, 0.71 r at 1, 0.41 r at 4.
+- **A full window rebuild is 1.77 M cells.** At the 1 m lattice that measured
+  17.8 ms single-threaded, inline in `Update`, on every re-centre (~32 m of
+  movement) — a guaranteed dropped frame. `ProbeVolume::rebuild` is now
+  parallel over the texture's **z layers**, which is only sound because the
+  mapping is toroidal (cell z → layer z mod dims.z, so one layer has exactly
+  one writer): 3.0 ms. `rebuild_cost` (ignored) is the measurement. The real
+  fix, if it ever matters again, is to fill only the slab a move exposes
+  rather than the whole window.

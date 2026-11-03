@@ -35,6 +35,6 @@ pub fn sync_lightmap_mode(
     }
 
     for (_id, mat) in terrain_materials.iter_mut() {
-        mat.extension.use_lightmap = use_lm;
+        mat.extension.shading.use_lightmap = use_lm;
     }
 }

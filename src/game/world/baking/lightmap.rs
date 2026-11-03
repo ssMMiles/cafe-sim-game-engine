@@ -63,7 +63,17 @@ use crate::game::world::terrain::storage::EnvironmentData;
 ///   around each triangle, so the blur is no longer one-sided at triangle
 ///   edges (it was biasing them by ~5% of the lighting range, in opposite
 ///   directions across a shared edge).
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 11;
+/// - v12: two fixes that both move radiance around in shade.
+///   * Re-emission includes the **sky**, through the single shared
+///     [`BakeLighting::reemitted`]. The probe gather already did and the
+///     lightmap bounce did not, so a sunlit-but-shaded wall lit a passing
+///     character and not the ground it stood on, and static scenery read
+///     consistently darker in shade than the dynamic objects on top of it.
+///   * The object bake marches the heightmap from an origin lifted 0.5 up,
+///     as the terrain and probe bakes already did. Object texels sitting at
+///     ground level — a building floor, a prop on a slope — were having the
+///     sun and every local light killed on the DDA's first step.
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 12;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -155,7 +165,9 @@ pub struct BakedLight {
     /// A point light stores `scale = 0, offset = 1`, i.e. "always lit".
     pub spot_scale: f32,
     pub spot_offset: f32,
-    pub _pad: [f32; 3],
+    /// Exponent on the range window: `atten = (1 − d²/r²)^falloff`.
+    pub falloff: f32,
+    pub _pad: [f32; 2],
 }
 
 impl BakedLight {
@@ -168,8 +180,15 @@ impl BakedLight {
             direction: [0.0, -1.0, 0.0],
             spot_scale: 0.0,
             spot_offset: 1.0,
-            _pad: [0.0; 3],
+            falloff: PlacedKind::DEFAULT_FALLOFF,
+            _pad: [0.0; 2],
         }
+    }
+
+    /// The falloff exponent — see `PlacedKind::PointLight::falloff`.
+    pub fn with_falloff(mut self, falloff: f32) -> Self {
+        self.falloff = falloff.max(0.05);
+        self
     }
 
     pub fn spot(
@@ -199,29 +218,37 @@ impl BakedLight {
                 color,
                 intensity,
                 range,
+                falloff,
                 ..
-            } => Some(Self::point(
-                transform.translation(),
-                Vec3::from(*color),
-                *intensity,
-                *range,
-            )),
+            } => Some(
+                Self::point(
+                    transform.translation(),
+                    Vec3::from(*color),
+                    *intensity,
+                    *range,
+                )
+                .with_falloff(*falloff),
+            ),
             PlacedKind::SpotLight {
                 color,
                 intensity,
                 range,
+                falloff,
                 inner_angle,
                 outer_angle,
                 ..
-            } => Some(Self::spot(
-                transform.translation(),
-                transform.forward().as_vec3(),
-                Vec3::from(*color),
-                *intensity,
-                *range,
-                *inner_angle,
-                *outer_angle,
-            )),
+            } => Some(
+                Self::spot(
+                    transform.translation(),
+                    transform.forward().as_vec3(),
+                    Vec3::from(*color),
+                    *intensity,
+                    *range,
+                    *inner_angle,
+                    *outer_angle,
+                )
+                .with_falloff(*falloff),
+            ),
             _ => None,
         }
     }
@@ -246,10 +273,11 @@ impl BakedLight {
             return None;
         }
 
-        // Smooth range falloff in [0, 1] rather than physical inverse-square,
-        // matching the bounded, art-directable look the toon shading wants.
-        let falloff = (1.0 - dist_sq * self.inv_range_sq).max(0.0);
-        let attenuation = falloff * falloff;
+        // Smooth range window in [0, 1] rather than physical inverse-square,
+        // matching the bounded, art-directable look the toon shading wants;
+        // `falloff` shapes it (2 is the original squared curve).
+        let window = (1.0 - dist_sq * self.inv_range_sq).max(0.0);
+        let attenuation = window.powf(self.falloff);
 
         let cos_angle = (-dir).dot(Vec3::from(self.direction));
         let spot = (cos_angle * self.spot_scale + self.spot_offset).clamp(0.0, 1.0);
@@ -323,6 +351,39 @@ impl BakeLighting {
             }
         }
         total
+    }
+
+    /// Radiance a surface sends back when somebody else's ray lands on it:
+    /// what it receives, times its albedo.
+    ///
+    /// **The one definition of re-emission**, shared by the lightmap bounce
+    /// (`raycast::compute_indirect_bounce`), the probe environment gather
+    /// (`probes::ProbeContext`) and — by hand — the WGSL `compute_bounce`.
+    /// They used to differ: the probe path added the sky here and the
+    /// lightmap path did not, so a wall lit a passing character but not the
+    /// ground it stood on, and a dynamic object was noticeably brighter in
+    /// shade than the static scenery around it.
+    ///
+    /// The sky term is unoccluded, which is a deliberate approximation: the
+    /// honest answer needs this surface's own AO, and that is a second
+    /// hemisphere of rays at every hit of every bounce ray of every texel.
+    /// It makes an enclosed room brighter than it physically should be, in
+    /// the same direction and for the same reason the receiving texel's own
+    /// `ambient × ao` already does.
+    #[inline]
+    pub fn reemitted(
+        &self,
+        world_pos: Vec3,
+        normal: Vec3,
+        albedo: f32,
+        sun_visibility: f32,
+        light_visibility: impl FnMut(Vec3, f32) -> f32,
+    ) -> Vec3 {
+        let ndotl = normal.dot(self.sun_dir).max(0.0);
+        (self.sun_rgb * (ndotl * sun_visibility)
+            + self.local_lights(world_pos, normal, light_visibility)
+            + self.ambient_rgb)
+            * albedo
     }
 }
 
@@ -792,8 +853,14 @@ pub fn try_load_lightmap_image(
 
 /// True for a file name that is a lightmap from some *older* bake format.
 fn is_stale_lightmap_name(name: &str) -> bool {
-    let current = format!(".v{LIGHTMAP_FORMAT_VERSION}.");
-    (name.contains("_lightmap") || name.contains("_probes")) && !name.contains(&current)
+    let current = |v: u32| format!(".v{v}.");
+    if name.contains("_lightmap") {
+        !name.contains(&current(LIGHTMAP_FORMAT_VERSION))
+    } else if name.contains("_probes") {
+        !name.contains(&current(super::probes::PROBE_FORMAT_VERSION))
+    } else {
+        false
+    }
 }
 
 fn warn_stale_count(stale: usize, world: &str) {
@@ -1110,6 +1177,36 @@ mod tests {
         assert_eq!(offset(l.direction.as_ptr()), 32);
         assert_eq!(offset(&l.spot_scale), 44);
         assert_eq!(offset(&l.spot_offset), 48);
+        assert_eq!(offset(&l.falloff), 52);
+    }
+
+    /// `falloff` reshapes the curve between the fixed endpoints: full at the
+    /// lamp, nothing at the range. Lower spreads the light out, higher pulls
+    /// it in, and 2 is exactly what every light did before it was a knob.
+    #[test]
+    fn falloff_reshapes_the_curve_without_moving_its_ends() {
+        let at = |k: f32, d: f32| {
+            BakedLight::point(Vec3::ZERO, Vec3::ONE, 1.0, 10.0)
+                .with_falloff(k)
+                .sample(Vec3::new(0.0, -d, 0.0), Vec3::Y)
+                .map(|(r, _, _)| r.x)
+                .unwrap_or(0.0)
+        };
+        for k in [0.5, 1.0, 2.0, 4.0] {
+            assert!((at(k, 0.01) - 1.0).abs() < 1e-3, "k={k} at the lamp");
+            assert_eq!(at(k, 10.0), 0.0, "k={k} at the range");
+        }
+        let mid = 5.0;
+        assert!(
+            at(0.5, mid) > at(1.0, mid)
+                && at(1.0, mid) > at(2.0, mid)
+                && at(2.0, mid) > at(4.0, mid)
+        );
+        let window: f32 = 1.0 - 0.25;
+        assert!(
+            (at(2.0, mid) - window * window).abs() < 1e-5,
+            "2 is the old curve"
+        );
     }
 
     #[test]
@@ -1227,7 +1324,13 @@ mod tests {
 
         let key = terrain_lightmap_key("my-world", -1, 2);
         let path = terrain_lightmap_path(Path::new("/worlds/my-world"), -1, 2);
-        assert_eq!(key, "worlds/my-world/chunks/chunk_-1_2_lightmap.v11.exr");
+        // Only the version is interpolated: the rest of the layout is what
+        // this test is for, and spelling it out is the point.
+        let v = LIGHTMAP_FORMAT_VERSION;
+        assert_eq!(
+            key,
+            format!("worlds/my-world/chunks/chunk_-1_2_lightmap.v{v}.exr")
+        );
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1235,7 +1338,10 @@ mod tests {
 
         let key = object_lightmap_key("my-world", 7, 3);
         let path = object_lightmap_path(Path::new("/worlds/my-world"), 7, 3);
-        assert_eq!(key, "worlds/my-world/objects/obj_7_3_lightmap.v11.exr");
+        assert_eq!(
+            key,
+            format!("worlds/my-world/objects/obj_7_3_lightmap.v{v}.exr")
+        );
         assert_eq!(
             key.rsplit('/').next(),
             path.file_name().and_then(|n| n.to_str())
@@ -1276,6 +1382,146 @@ mod tests {
 #[cfg(test)]
 mod diag {
     use super::*;
+    use engine_api::toon_curve::{ToonCurve, luminance};
+
+    /// How a whole world's baked lightmaps are distributed across the toon
+    /// ramp, for each of several candidate curves.
+    ///
+    /// This is the measurement behind the defaults in [`ToonCurve`]: the
+    /// quantiser is the entire runtime lighting model, so the only question
+    /// that matters is whether the radiance a bake actually produces lands
+    /// spread across the levels or pinned at one end. Terrain and object
+    /// lightmaps are reported separately — they occupy very different ranges,
+    /// and a curve that suits one can crush the other.
+    ///
+    /// `WORLD=worlds/cafe cargo test band_occupancy -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn band_occupancy() {
+        let world = std::env::var("WORLD").unwrap_or_else(|_| "worlds/cafe".into());
+        let root = std::path::Path::new(&world);
+        // `V=` reads an older bake, which is the only way to compare what a
+        // change to the lighting model did to the distribution — the new
+        // files don't exist until someone re-bakes.
+        let version = std::env::var("V")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(LIGHTMAP_FORMAT_VERSION);
+        let suffix = format!("_lightmap.v{version}.exr");
+
+        let collect = |dir: &str| -> Vec<f32> {
+            let mut out = Vec::new();
+            let Ok(entries) = std::fs::read_dir(root.join(dir)) else {
+                return out;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if !path.to_string_lossy().ends_with(&suffix) {
+                    continue;
+                }
+                let Ok(buf) = LightmapBuffer::load_exr(&path) else {
+                    continue;
+                };
+                // Uncovered atlas texels are exactly zero and are never
+                // sampled by a fragment; counting them would drown the
+                // histogram in black.
+                out.extend(
+                    buf.texels
+                        .iter()
+                        .map(|&t| luminance(t))
+                        .filter(|&l| l > 0.0),
+                );
+            }
+            out
+        };
+
+        for (label, mut lums) in [
+            ("terrain", collect("chunks")),
+            ("objects", collect("objects")),
+        ] {
+            if lums.is_empty() {
+                println!("\n== {label}: no v{version} lightmaps under {world}");
+                continue;
+            }
+            lums.sort_by(f32::total_cmp);
+            let pct = |p: f32| lums[((lums.len() as f32 - 1.0) * p) as usize];
+            println!(
+                "\n== {label}: {} texels  p01={:.3} p05={:.3} p25={:.3} p50={:.3} \
+                 p75={:.3} p95={:.3} p99={:.3} max={:.3}",
+                lums.len(),
+                pct(0.01),
+                pct(0.05),
+                pct(0.25),
+                pct(0.50),
+                pct(0.75),
+                pct(0.95),
+                pct(0.99),
+                lums[lums.len() - 1],
+            );
+
+            let candidates = [
+                (
+                    "linear (shipped)",
+                    ToonCurve {
+                        gamma: 1.0,
+                        ..default()
+                    },
+                ),
+                (
+                    "gamma 1.6",
+                    ToonCurve {
+                        gamma: 1.6,
+                        ..default()
+                    },
+                ),
+                (
+                    "gamma 2.0",
+                    ToonCurve {
+                        gamma: 2.0,
+                        ..default()
+                    },
+                ),
+                ("gamma 2.2 (default)", ToonCurve::default()),
+                (
+                    "gamma 2.2, white 1.3",
+                    ToonCurve {
+                        gamma: 2.2,
+                        white: 1.3,
+                        ..default()
+                    },
+                ),
+                (
+                    "gamma 2.6",
+                    ToonCurve {
+                        gamma: 2.6,
+                        ..default()
+                    },
+                ),
+            ];
+            for (name, curve) in candidates {
+                let n = curve.bands as usize;
+                let mut hist = vec![0usize; n + 1];
+                for &l in &lums {
+                    hist[(curve.band(l) * curve.bands).round() as usize] += 1;
+                }
+                let share: Vec<String> = hist
+                    .iter()
+                    .map(|&c| format!("{:4.0}%", 100.0 * c as f32 / lums.len() as f32))
+                    .collect();
+                let thresholds: Vec<String> = (1..=n as u32)
+                    .map(|k| format!("{:.3}", curve.threshold(k)))
+                    .collect();
+                let levels: Vec<String> =
+                    curve.levels().iter().map(|l| format!("{l:.3}")).collect();
+                println!(
+                    "  {name:<22} occupancy [{}]  boundaries [{}]  levels [{}]",
+                    share.join(" "),
+                    thresholds.join(" "),
+                    levels.join(" "),
+                );
+            }
+        }
+    }
 
     /// Dump a baked lightmap as an ASCII luminance map. Diagnostic only:
     /// `LIGHTMAP=path cargo test dump_lightmap -- --ignored --nocapture`.

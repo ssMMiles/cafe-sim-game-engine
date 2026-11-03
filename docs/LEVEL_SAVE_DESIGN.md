@@ -493,8 +493,10 @@ Deviations from §5, all deliberate:
   the real mesh was occluded in every direction and baked pure black.
   Lightmap format is v6 so the bad v5 bakes are skipped. A unit test pins
   the per-sub-mesh transform.
-- Toon shaders lift the bottom band to a neutral `TOON_FLOOR` (0.18 × base
-  colour) so fully shadowed surfaces read as a dark tint, never pure black.
+- Toon shaders lift the bottom band to a neutral floor so fully shadowed
+  surfaces read as a dark tint rather than pure black. Since 2026-11-02 the
+  floor is one of four per-world `ToonCurve` parameters saved in `world.meta`
+  v6, not a shader constant, and it may be 0 — see `docs/LIGHTING.md` §3.
 
 ## 7. Decisions (settled 2026-10-21)
 

@@ -591,14 +591,25 @@ fn shade_geometry(
                 return Vec3::ZERO;
             };
 
-            // Both ray origins are the same point, unlike the terrain bake,
-            // which lifts its DDA origin 0.5 up so the coarse march can't
-            // re-hit the ground it left. An object texel is not on the
-            // ground, so there is nothing to step off.
+            // Two origins, as the terrain and probe bakes use. `origin` is
+            // the real surface point, for the BVH; `dda` is lifted 0.5 up
+            // for the coarse heightmap march, whose steps are ~1.25 m.
+            //
+            // Marching from the surface looked safe — "an object texel is
+            // not on the ground, so there is nothing to step off" — but the
+            // ray still crosses *terrain*, and plenty of object texels sit
+            // at or just below the bilinearly sampled heightmap: a building
+            // floor, anything resting on a slope, a half-buried prop. For
+            // those, `terrain_h > sample.y` fired on the very first step and
+            // killed the sun *and* every local light, baking the texel to
+            // the floor value. The cafe's own floor quad is exactly this
+            // case. The bounce walk inside `compute_indirect_bounce` already
+            // applies the same lift at each of its hits, for the same reason.
             let origin = g.world_pos + g.face_normal * 0.02;
+            let dda = origin + Vec3::Y * 0.5;
 
             let shadow = raycast::cast_shadow_ray(
-                origin,
+                dda,
                 origin,
                 sun_dir,
                 cache,
@@ -607,7 +618,7 @@ fn shade_geometry(
                 config.shadow_steps,
             );
             let ao = raycast::compute_ao(
-                origin,
+                dda,
                 origin,
                 g.normal,
                 cache,
@@ -618,7 +629,7 @@ fn shade_geometry(
                 idx as u32,
             );
             let bounce = raycast::compute_indirect_bounce(
-                origin,
+                dda,
                 origin,
                 g.normal,
                 cache,
@@ -639,7 +650,7 @@ fn shade_geometry(
                 lighting.sun_and_ambient(ndotl, shadow, ao, config.bounce_strength * bounce);
             radiance += lighting.local_lights(origin, g.normal, |dir, dist| {
                 raycast::cast_shadow_ray_segment(
-                    origin,
+                    dda,
                     origin,
                     dir,
                     dist,

@@ -7,6 +7,8 @@ use bevy::{
     shader::ShaderRef,
 };
 
+use crate::toon_curve::ToonCurve;
+
 /// A 1×1 white `Rgba16Float` image used as the default (unbaked) lightmap for
 /// every toon-shaded surface — placed meshes and terrain alike.
 ///
@@ -65,6 +67,11 @@ pub struct ToonShading {
     pub sun_dir: Vec4,
     /// Sun colour × intensity in lightmap units (w unused).
     pub sun_rgb: Vec4,
+    /// The toon ramp, as `(bands, floor, white, gamma)` — see [`ToonCurve`].
+    /// It lives in the uniform rather than in the shader so a world can be
+    /// exposed and graded from the inspector without a recompile; the host
+    /// keeps it in step with the level's environment for every material.
+    pub curve: Vec4,
 }
 
 impl ToonShading {
@@ -78,6 +85,7 @@ impl ToonShading {
             probe_dims: Vec4::new(d[0] as f32, d[1] as f32, d[2] as f32, 0.0),
             sun_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
             sun_rgb: Vec4::ZERO,
+            curve: ToonCurve::default().to_vec4(),
         }
     }
 
@@ -226,14 +234,29 @@ impl MaterialExtension for ToonMaterial {
 /// lattice is world-aligned: cell `i` spans `[i·c, (i+1)·c)` and its probe
 /// sits at the centre. Bakes place probes on it and the runtime volume
 /// texture is indexed by it, so this is the one number both must agree on.
-pub const PROBE_CELL_SIZE: f32 = 2.0;
+///
+/// Was 2 m until 2026-11-02. A lamp 2.5 m over a 1.1 m tabletop lights a pool
+/// only a couple of metres across — one cell — and no reconstruction can put
+/// back detail that was never sampled (`docs/LIGHTING.md` §2.3). Halving the
+/// cell costs 8× in every per-cell quantity: probes baked, bytes per chunk
+/// file, the `ProbeStore`'s memory, and the volume textures for the same
+/// coverage. [`PROBE_VOLUME_DIMS`] was *not* scaled by the full 8× — see it.
+/// Changing this changes what a stored cell index means, so it bumps
+/// `PROBE_FORMAT_VERSION`.
+pub const PROBE_CELL_SIZE: f32 = 1.0;
 
 /// Cells per axis `[x, y, z]` of the runtime probe volume textures. Addressed
 /// toroidally — cell `i` lives in texel `i mod dims` — so the window follows
-/// the player without any origin uniform or material rebind. At
-/// [`PROBE_CELL_SIZE`] 2 this is 256 m × 48 m × 256 m; four `Rgba16Float`
-/// textures of this size are ~12.6 MB.
-pub const PROBE_VOLUME_DIMS: [u32; 3] = [128, 24, 128];
+/// the player without any origin uniform or material rebind.
+///
+/// At [`PROBE_CELL_SIZE`] 1 this is 192 m × 48 m × 192 m: ±96 m around the
+/// focus horizontally (it was ±128 m at the 2 m cell) and the same 48 m
+/// vertically. Four `Rgba16Float` textures of this size are 56.6 MB, and the
+/// CPU keeps two more copies (the volume's own buffers and the `Image`
+/// data), so ~170 MB in all; keeping the old ±128 m would have been 100 MB
+/// per copy. Anything probe-lit outside the window samples wrapped texels
+/// from the far side, so this is the radius dynamic objects stay correct to.
+pub const PROBE_VOLUME_DIMS: [u32; 3] = [192, 48, 192];
 
 /// Lattice index of the cell containing world coordinate `w` on one axis.
 #[inline]

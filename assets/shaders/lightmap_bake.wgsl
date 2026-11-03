@@ -116,11 +116,12 @@ struct BakedLight {
     direction: vec3<f32>,
     spot_scale: f32,
     spot_offset: f32,
-    // Three scalars, NOT a vec3: a trailing vec3 would be aligned to 16 and
-    // push the struct to 80 bytes, while the Rust side is 64.
+    // Exponent on the range window.
+    falloff: f32,
+    // Two scalars, NOT a vec2/vec3: a trailing vector would be aligned to
+    // 8 or 16 and push the struct past the Rust side's 64 bytes.
     _pad0: f32,
     _pad1: f32,
-    _pad2: f32,
 }
 
 // ----------------------------------------------------------------------------
@@ -437,9 +438,10 @@ fn local_lights(origin: vec3<f32>, world_pos: vec3<f32>, normal: vec3<f32>) -> v
             continue;
         }
 
-        // Smooth bounded falloff, not physical inverse-square.
-        let falloff = max(1.0 - dist_sq * light.inv_range_sq, 0.0);
-        let attenuation = falloff * falloff;
+        // Smooth bounded window shaped by the light's falloff exponent,
+        // not physical inverse-square. Mirrors `BakedLight::sample`.
+        let window = max(1.0 - dist_sq * light.inv_range_sq, 0.0);
+        let attenuation = pow(window, light.falloff);
 
         let cos_angle = dot(-dir, light.direction);
         let spot = clamp(cos_angle * light.spot_scale + light.spot_offset, 0.0, 1.0);
@@ -739,12 +741,17 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
 
             let ndotl_q = max(dot(hn, sun_dir), 0.0);
             let vis_q   = cast_shadow_ray(hit_pos, hit_mesh_pos, sun_dir);
-            // Direct light at the hit: the sun, plus every placed light that
-            // reaches it. A lamp pointed at a wall lights the room through
-            // this term and nothing else.
+            // What the hit surface sends back: the sun, every placed light
+            // that reaches it, and the sky. Mirrors
+            // `BakeLighting::reemitted`, which the CPU bounce and the probe
+            // gather both call — the sky term in particular, which the two
+            // used to disagree about, leaving static scenery darker in shade
+            // than the dynamic objects standing on it.
             let sun_rgb = vec3<f32>(u.sun_r, u.sun_g, u.sun_b);
+            let ambient = vec3<f32>(u.ambient_r, u.ambient_g, u.ambient_b);
             let direct  = sun_rgb * (ndotl_q * vis_q)
-                        + local_lights(hit_pos, hit_mesh_pos, hn);
+                        + local_lights(hit_pos, hit_mesh_pos, hn)
+                        + ambient;
             // No cur_cos_w — it cancels with the PDF for cosine-weighted
             // hemisphere sampling.
             accum = accum + direct * (throughput * albedo);

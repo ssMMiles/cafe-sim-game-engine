@@ -11,7 +11,7 @@ pub mod terrain;
 
 use crate::game::{
     GameEntity,
-    world::sky::{SkyDomeMaterial, sync_sky_dome},
+    world::sky::{SkyDomeMaterial, sync_sky_colors, sync_sky_dome},
 };
 
 use chunk_assets::{
@@ -42,7 +42,10 @@ pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default());
-        app.add_systems(Update, sync_sky_dome.in_set(WorldSet::InGame));
+        app.add_systems(
+            Update,
+            (sync_sky_dome, sync_sky_colors).in_set(WorldSet::InGame),
+        );
 
         app.add_plugins(terrain::TerrainPlugin);
         app.add_plugins(baking::BakingPlugin);

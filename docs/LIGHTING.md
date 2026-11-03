@@ -1,17 +1,40 @@
-# Baked lighting — reference and review
+# Lighting
 
-Status: **current as of 2026-10-28.** Describes the system as implemented at
-`LIGHTMAP_FORMAT_VERSION = 6`, before illuminance volumes / per-object dynamic
-lighting. §7 is a review of the issues found while writing this, with the
-numbers behind each one; §7.1, §7.2, §7.6 and §7.7 were fixed the same day
-(shader-only and comment changes, no re-bake needed) and are kept as the
-record of *why*.
+Status: **current as of 2026-11-02**, at `LIGHTMAP_FORMAT_VERSION = 12` and
+`WORLD_FORMAT_VERSION = 6`. This is the reference for the whole lighting
+system: how a light becomes a number at bake time, how that number becomes a
+pixel at runtime, which knob to turn for which problem, and what is still
+wrong with it.
 
-Everything here is one pipeline: **bake-time** code turns lights into a texture
-of outgoing radiance, and **runtime** code samples that texture, quantises it,
-and multiplies it by base colour. There is no runtime light evaluation
-anywhere — no shadow maps, no clustering, no light loops. That is what keeps
-the WebGPU path cheap and what makes a `PointLight` cost zero frames.
+Read §3 first if you are trying to make the game look different. Almost
+every "the lighting looks odd" question has turned out to be the transfer
+function, not the bake.
+
+---
+
+## 0. The system in one paragraph
+
+**Nothing is lit at runtime.** The sun, the sky, every placed point and spot
+light, and the indirect bounce between them are all integrated at bake time
+into a texture of outgoing radiance — one lightmap per terrain chunk and per
+placed sub-mesh, plus a lattice of irradiance probes for anything that
+moves. At runtime a fragment does three things: sample its radiance, quantise
+it into five toon bands, multiply by base colour. There are no shadow maps,
+no light loops, no clustering. That is what makes a `PointLight` cost zero
+frames and what keeps the WebGPU path cheap.
+
+Two halves, and the seam between them is where most bugs live:
+
+| | static geometry | anything that moves |
+|---|---|---|
+| receives light from | a baked lightmap, through UV1 | the irradiance probe volume, by world position |
+| casts shadows by | being in the bake BVH | a blob shadow disc, and not at all into the bake |
+| resolution | 16 texels/m | one probe per metre, cubic B-spline |
+| shares | **the same radiance units and the same toon curve** | ditto |
+
+The two must agree about how bright things are, or a character reads as
+pasted onto the floor. Most of §6's defect list is some version of them
+disagreeing.
 
 ---
 
@@ -19,87 +42,114 @@ the WebGPU path cheap and what makes a `PointLight` cost zero frames.
 
 A lightmap texel is **outgoing radiance in lightmap units**: linear RGB where
 `1.0` means "this surface shows its full base colour". Not lux, not lumens,
-not candela. `EnvironmentData.sun_intensity` and `PlacedKind::PointLight
-{ intensity }` are in the same units, so they can be added together directly.
+not candela. `EnvironmentData::sun_intensity` and `PlacedKind::PointLight
+{ intensity }` are in the same units, so they add directly.
 
 Every baker computes the same thing (`BakeLighting`, `baking/lightmap.rs`):
 
 ```
-radiance = sun_rgb * (ndotl * shadow + bounce_strength * bounce)   // direct sun + indirect
-         + ambient_rgb * ao                                         // sky, shaped by occlusion
-         + Σ_lights  color_i * ndotl_i * atten_i * spot_i * vis_i   // placed point/spot lights
+radiance = sun_rgb * (ndotl * shadow)                     // direct sun
+         + bounce                                          // indirect, a colour
+         + ambient_rgb * ao                                // sky, shaped by occlusion
+         + Σ_lights  color_i * ndotl_i * atten_i * spot_i * vis_i
 ```
 
 | Term | Range | Who computes it | Notes |
 |---|---|---|---|
 | `shadow` | 0 or 1 | `raycast::cast_shadow_ray` | Heightmap DDA out to `ao_radius × 4` (80 m), then an exact BVH test. Binary per texel; the blur is what makes a penumbra |
-| `ao` | [0, 1] | `raycast::compute_ao` | Mean over `ao_rays` cosine-weighted hemisphere rays of `hit_t / ao_radius` (1 if nothing is hit within `ao_radius`, 20 m), against terrain **and** the BVH — an occluder's weight falls off linearly with distance |
-| `bounce` | [0, ∞) | `raycast::compute_indirect_bounce` | Multi-bounce off **terrain only**: scenery absorbs bounce rays but never re-emits. Received by terrain and object texels alike (objects since v8) |
-| `atten` | [0, 1] | `BakedLight::sample` | `(1 − d²/r²)²`. Smooth and bounded, deliberately *not* inverse-square |
-| `spot` | [0, 1] | `BakedLight::sample` | `clamp(cosθ·scale + offset, 0, 1)`; a point light stores `scale = 0, offset = 1` so the same branchless maths yields exactly 1 |
+| `ao` | [0, 1] | `raycast::compute_ao` | Mean of `hit_t / ao_radius` over `ao_rays` cosine-weighted hemisphere rays, against terrain **and** the BVH. Distance-weighted, so a chair leg 2 cm away is full occlusion and a canopy 10 m up on a 20 m radius is half |
+| `bounce` | [0, ∞) RGB | `raycast::compute_indirect_bounce` | See §1.1. A colour, not a scalar times `sun_rgb`, because a lamp's colour is its own |
+| `atten` | [0, 1] | `BakedLight::sample` | `(1 − d²/r²)^falloff`, `falloff` per light (default 2). Smooth and bounded, deliberately *not* inverse-square |
+| `spot` | [0, 1] | `BakedLight::sample` | `clamp(cosθ·scale + offset, 0, 1)`; a point light stores `scale = 0, offset = 1`, so the same branchless maths yields exactly 1 |
 | `vis` | 0 or 1 | `raycast::cast_shadow_ray_segment` | Segment ray that *stops at the light*, unlike the sun's fixed reach |
 
 `ao` shapes only the ambient term. Direct sun is already attenuated by a real
 shadow ray; darkening it again with AO would double-count the occlusion.
 
-### Three implementations, one model
+### 1.1 Re-emission — the one definition
+
+When somebody's bounce ray, or a probe's environment ray, lands on a surface,
+what that surface sends back is `BakeLighting::reemitted`:
+
+```
+reemitted = (sun_rgb * ndotl * sun_vis + Σ_lights ... + ambient_rgb) * albedo
+```
+
+One function, called by the lightmap bounce walk, by the probe environment
+gather, and mirrored by hand in `compute_bounce` in the WGSL. Albedo is
+`terrain_albedo` or `scenery_albedo` — one grey number each, because the BVH
+carries triangles and not materials, so there is no colour bleed.
+
+Two things to know about it:
+
+- **The sky term is unoccluded.** The honest answer needs the hit surface's
+  own AO, which is a second hemisphere of rays at every hit of every bounce
+  ray of every texel. So a sealed room is brighter than it physically should
+  be — in the same direction, and for the same reason, as the receiving
+  texel's own `ambient × ao` already is.
+- **It is shared deliberately.** Through v11 the probe gather included the
+  sky here and the lightmap bounce did not, so a sky-lit wall filled a
+  passing character but not the ground underneath them, and static scenery
+  read consistently darker in shade than the dynamic objects standing on it.
+  Guarded by `a_wall_bounces_sky_onto_a_surface_the_sun_never_reaches`.
+
+### 1.2 Three implementations, one model
 
 | Path | File | When |
 |---|---|---|
 | CPU terrain | `baking/terrain.rs` | WebGL2, or `use_gpu = false`, or no `TerrainChunkRegistry` |
 | GPU terrain | `baking/gpu.rs` + `assets/shaders/lightmap_bake.wgsl` | Any adapter reporting compute, **including WebGPU** — gated on the runtime `gpu::GpuBakeSupported` flag, never a `cfg` |
 | CPU objects | `baking/objects.rs` | Every platform. There is no GPU object path (`docs/GPU_OBJECT_BAKE_PLAN.md`) |
+| CPU probes | `baking/probes.rs` | Every platform. Reuses `BakeLighting`, the BVH and the height cache unchanged |
 
-The three must agree texel for texel, which is why `BakedLight` is `#[repr(C)]`
+They must agree texel for texel, which is why `BakedLight` is `#[repr(C)]`
 and uploaded verbatim, the BVH is built once and shared, and the WGSL mirrors
-`ChunkBakeGrid::world_xz` / `texel_seed` operation for operation. Two known
-intentional divergences:
-
-- `cpu_lowfreq_downsample` (default 4) is CPU-only. Set it to `1` for parity.
-- The CPU marches have a `BakeHeightCache::above_terrain` early-out the GPU
-  lacks. Exact, so it changes speed only.
+`ChunkBakeGrid::world_xz` / `texel_seed` operation for operation. Known
+intentional divergences are in §6.
 
 ---
 
-## 2. Bake pass, end to end
+## 2. The bake, end to end
 
 `Shift+B` → `BakeMessage` → `run_bake` (`baking/mod.rs`):
 
 1. **Resolve the sun** from the `BakedSun` entity's forward vector.
 2. **Collect every loaded placed light** into `Vec<BakedLight>` — including
-   ones outside the bake region, since a light just past the edge still shines
-   in. (Lights in *unloaded* chunks are not collected; see §7.8.)
-3. **Build one BVH** (`bvh::collect_occluder_triangles`) over every toon-shaded
-   mesh whose ancestry includes a `PlacedObject` or a `RigidBody::Static`, so
-   editor props and plugin scenery occlude but a plugin's moving mesh does not.
-   Real triangles, not convex hulls — objects shadow themselves.
+   ones outside the bake region, since a light just past the edge still
+   shines in. (Lights in *unloaded* chunks are missed; §6.)
+3. **Build one BVH** (`bvh::collect_occluder_triangles`) over every
+   toon-shaded mesh whose ancestry includes a `PlacedObject` or a
+   `RigidBody::Static` and no `DynamicLit`, so editor props and plugin
+   scenery occlude but a plugin's moving mesh does not. Real triangles, not
+   convex hulls — objects shadow themselves.
 4. **Terrain**: GPU dispatch (via `GpuBakeTrigger`) or the CPU rayon path.
-5. **Objects**: `collect_object_bake_jobs` on the main world (it mutates `Mesh`
-   assets and may add materials), then `run_object_bake_jobs` on
+5. **Objects**: `collect_object_bake_jobs` on the main world (it mutates
+   `Mesh` assets and may add materials), then `run_object_bake_jobs` on
    `AsyncComputeTaskPool`; `apply_object_bake` binds the results.
+6. **Probes**: `baking/probes.rs` on the same lattice, written per chunk.
 
 `BakeConfig::bake_radius` defaults to `Some(1)` — a 3×3 chunk block around
 `WorldFocus`, plus the objects standing on it. `None` bakes all 81 loaded
 chunks and takes minutes.
 
-### Terrain texels
+### 2.1 Terrain texels
 
-One `terrain_resolution²` (1024², = 16 texels/m over a 63.75 m chunk) lightmap
-per chunk, baked on a **padded** grid (`ChunkBakeGrid`): `blur_radius` extra
-texels on every side, blurred on the padded grid, then cropped. Without the
-margin the box blur's clamped window biased each side of a seam toward its own
-edge texel in opposite directions — a ~20% brightness step that the quantiser
-turned into band edges jumping across chunk boundaries. Texel positions and
-hemisphere seeds derive from the **world** texel index, so two chunks bake
-bit-identical texels along a shared edge (`neighbouring_chunks_agree_along_
-their_shared_edge`).
+One `terrain_resolution²` (1024², = 16 texels/m over a 63.75 m chunk)
+lightmap per chunk, baked on a **padded** grid (`ChunkBakeGrid`):
+`blur_radius` extra texels on every side, blurred on the padded grid, then
+cropped. Without the margin the box blur's clamped window biased each side of
+a seam toward its own edge texel in opposite directions — a ~20% brightness
+step that the quantiser turned into band edges jumping across chunk
+boundaries. Texel positions and hemisphere seeds derive from the **world**
+texel index, so two chunks bake bit-identical texels along a shared edge
+(`neighbouring_chunks_agree_along_their_shared_edge`).
 
-Two ray origins per texel: `surface + 0.5·Y` for the coarse DDA (steps are
-~1.25 m, so a surface-level origin would re-hit the ground it left) and
-`surface + normal·0.02` for the exact BVH test (so a crate resting on the
-ground still shadows it).
+**Two ray origins per texel**, a pattern every baker now follows:
+`surface + 0.5·Y` for the coarse heightmap DDA (steps are ~1.25 m, so a
+surface-level origin re-hits the ground it left) and `surface + normal·0.02`
+for the exact BVH test (so a crate resting on the ground still shadows it).
 
-### Object texels
+### 2.2 Object texels
 
 One lightmap per **toon-shaded sub-mesh entity**, not per object and not per
 mesh asset — shared mesh assets share UVs, so a per-asset atlas would collide.
@@ -116,108 +166,342 @@ mesh asset — shared mesh assets share UVs, so a per-asset atlas would collide.
   never the placed root's — glTF nodes carry their own scale (the rock is 2.5×
   inside its file), and a texel placed by the root transform sits inside the
   real mesh where self-shadowing bakes it black.
-- Post: `blur_cells` (confined to each triangle's cell and to covered texels —
-  atlas neighbours are not surface neighbours), then `dilate` to flood the
-  gutter so bilinear taps never reach a black texel.
+- Each triangle is rasterised with a `blur_radius` **margin of extrapolated
+  surface**, the atlas counterpart of `ChunkBakeGrid`: without it the kernel
+  clamped at every triangle edge and biased it in opposite directions across
+  a shared edge, which the quantiser drew as band contours jumping along
+  triangle seams.
+- Post: `blur_cells` (confined to each triangle's cell and to texels some
+  triangle actually covered — atlas neighbours are not surface neighbours),
+  then `dilate` to flood the gutter so bilinear taps never reach a black texel.
 
-### Storage
+### 2.3 Probes
+
+A 1 m world-aligned lattice (`PROBE_CELL_SIZE`; 2 m until 2026-11-02), 13 `f16` per cell: L1 in the
+linear basis for sky, bounce and placed-light lobes, plus the sun's
+**visibility** as a scalar. The sun is deliberately kept out of the L1 part —
+a lobe's negative back cancelled the ground bounce — and is evaluated exactly
+in the shader against the stored visibility, which is the only way four
+coefficients can hold a hard terminator.
+
+Bevy's own `IrradianceVolume` is `cfg!(not(target_arch = "wasm32"))`, i.e.
+unusable on *any* wasm target, which is why this is hand-rolled. Streamed
+like lightmaps into `world/probe_volume.rs`, which fills four fixed-size
+`Rgba16Float` 3D textures (`PROBE_VOLUME_DIMS`, toroidal: cell `i` at texel
+`i mod dims`, repeat sampler, so the shader needs no origin). Bevy rewrites a
+same-shaped `Image` in place, so re-centring never touches a bind group.
+
+**Probe L1 is not read back linearly.** Placed lights are stored as
+peak-preserving `¼+¾cos` lobes, which a linear read makes negative over a
+third of the sphere; clamped, that drew a hard planar black edge across every
+probe-lit object near a lamp. `ProbeSh::eval_l1` / WESL `probe_channel` read
+linearly below `a = |c|/c0 = ½`, as isotropic + a `q³` lobe above 1, and
+smoothstep between (`PROBE_LOBE_BLEND`) — mean-preserving, never negative.
+Plain deringing was measured and rejected (rms 0.42 → 0.48, i.e. worse; the
+lobe read gives 0.22). The Rust and WESL copies must agree; the Rust one is
+what the tests measure.
+
+**The volume is read with a cubic B-spline, not trilinear filtering.**
+Trilinear is C0 but not C1 — its gradient jumps at every probe plane. A smooth
+gradient hides that, but the toon quantiser draws one hard contour per band
+boundary, and each contour *kinks* where it crosses a plane. With a lamp's
+pool only two or three cells across, those kinks are four or eight visible
+corners: the lamp pool on the tops of the cafe's furniture read as a diamond
+with a point along each axis. A cubic B-spline is C2, so there is no slope
+break left to kink on. Four taps per axis would be 64 fetches; pairing
+adjacent samples and placing one off-centre *hardware* tap per pair (Sigg &
+Hadwiger) buys the whole 4×4×4 kernel for 8 trilinear fetches.
+`bspline_axis` exists in Rust solely so `bspline_two_tap_form_is_exact` can
+prove the pairing reproduces the direct weights — an off-by-half there
+silently shifts all dynamic lighting by half a cell.
+
+Measured on the cafe's own lamp at tabletop height (`dump_probe_plane`;
+`kink%` is the rms second difference of the contour radius as a percentage of
+its mean, so a circle scores ~0 and every polygon corner is a spike):
+
+| read | centre lum | kink% b1 | b2 | b3 | axis/diag b1 |
+|---|---|---|---|---|---|
+| trilinear (through v11) | 0.99 | 1.34 | 4.04 | 1.64 | 0.896 |
+| smoothstep-warped trilinear | 1.08 | 1.45 | 3.11 | 1.24 | 0.906 |
+| Catmull-Rom | 1.07 | 1.17 | 4.94 | 1.49 | 0.900 |
+| **cubic B-spline** | 0.73 | **0.09** | **1.10** | **0.03** | **0.989** |
+
+Two alternatives were measured and rejected. Warping the sample coordinate by
+a smoothstep (which makes the hardware's own lerp C1 for free) trades the
+slope break for a *plateau* at every probe plane — a staircase instead of a
+kink. Catmull-Rom interpolates, so it keeps the peak, but it is only C1 and
+its negative lobes overshoot; it left the contours as kinked as trilinear.
+
+The cost is real and worth knowing: a B-spline approximates rather than
+interpolates, so it is a low-pass and the peak of a pool this narrow drops
+about a quarter (measured on the 2 m lattice of the time). That is the honest price of smoothing a coarse lattice, and it
+means lamp intensities may want raising. It also low-passes the stored sun
+visibility, so a probe-lit object's sun terminator is softer still — it was
+already vague by construction (§6.2), so this costs little.
+
+### 2.4 Storage
 
 ```
-worlds/{id}/chunks/chunk_X_Y_lightmap.v8.exr
-worlds/{id}/objects/obj_{id}_{k}_lightmap.v8.exr     # k = sub-mesh index
+worlds/{id}/chunks/chunk_X_Y_lightmap.v12.exr
+worlds/{id}/chunks/chunk_X_Y_probes.v13.bin
+worlds/{id}/objects/obj_{id}_{k}_lightmap.v12.exr     # k = sub-mesh index
 ```
 
-OpenEXR, f16 RGB, ZIP16. The format version is in the **file name**, so an
-older bake is skipped rather than misread, and `warn_stale_lightmaps` says why.
-Native writes a file; wasm hands bytes to OPFS fire-and-forget.
+OpenEXR f16 RGB ZIP16 for lightmaps, an rkyv frame for probes. The format
+version is in the **file name**, so an older bake is skipped rather than
+misread, and `warn_stale_lightmaps` says why. Probes have their own
+`PROBE_FORMAT_VERSION` (13): they shared the lightmap version while every
+change was a lighting-model change that invalidated both, and split off when
+the lattice halved — a change to what a stored cell *index* means, which no
+lightmap texel cares about. A lighting-model change still bumps both. Native
+writes a file; wasm hands bytes to OPFS fire-and-forget.
 
 **`LightmapBuffer::into_image()` sets `ImageSampler::linear()` explicitly and
-must keep doing so.** `lib.rs` sets `ImagePlugin::default_nearest()`, and a
-point-sampled lightmap is piecewise-*constant*: band edges snap to texel
-blocks, the shader's `fwidth` antialiasing measures a rate of change that is
-zero inside a texel, the bake-side blur becomes a staircase of flat blocks, and
-extra resolution only shrinks them. Guarded by
+must keep doing so.** `lib.rs` sets `ImagePlugin::default_nearest()` for the
+game's pixel-art look, and a point-sampled lightmap is piecewise-*constant*:
+band edges snap to texel blocks, the shader's `fwidth` antialiasing measures
+a rate of change that is zero inside a texel, the bake-side blur becomes a
+staircase of flat blocks, and extra resolution only shrinks them. Guarded by
 `baked_lightmaps_carry_an_explicit_linear_sampler`.
 
 ---
 
-## 3. Runtime: sample, band, multiply
+## 3. The runtime: the toon curve
 
-`toon_lighting.wesl` (objects) and `terrain_toon.wesl` (terrain) both do:
+This is the entire runtime lighting model and the thing you almost certainly
+want to change. `engine-api/src/toon_curve.rs` is the reference
+implementation; `toon_lighting.wesl` (objects) and `terrain_toon.wesl`
+(terrain) carry byte-identical copies of it between `// ─── TOON CURVE`
+markers, held in step by `toon_curve_matches_the_shaders`.
 
-```wgsl
-radiance = textureSample(lightmap, lightmap_sampler, in.uv_b).rgb;   // UV1 on the CPU side
-out.color = base_color.rgb * toon_shade(radiance);
+```
+radiance = lightmap sample, or probe reconstruction
+out      = base_color * toon_shade(radiance, curve)
 ```
 
-`toon_band` quantises into `TOON_BANDS = 5` levels, **antialiased with
-`fwidth`**: a hard `floor()` threshold on a filtered texture reconstructs its
-contour at texel granularity and aliases against the pixel grid no matter how
-many texels you spend. The ramp sits in the top of each band and ends exactly
-on the boundary, so the function stays continuous across it.
+### 3.1 Four parameters, which used to be one
 
-`toon_shade` bands **luminance**, spreads the banded value over
-`[TOON_FLOOR, 1]` (`level = mix(0.18, 1.0, band)`), and rescales RGB by
-`level / lum`, so coloured light keeps its hue instead of shifting at each band
-edge. The bottom band is faded to neutral so a trace of tinted light can't
-paint a dark corner; both ends of that fade have luminance `level`, so the
-curve is monotone (§7.2).
+`ToonCurve { bands, floor, white, gamma }` lives in the material uniform and
+is a **per-world setting** (`EnvironmentData::toon_curve`, inspector →
+nothing selected → Shading). Changing it needs no re-bake.
 
-Both functions are **duplicated verbatim** between the two shaders — there is
-no shared import module for asset-path shaders. Keep them in step by hand.
+| Field | Default | What it decides |
+|---|---|---|
+| `bands` | 5 | How many discrete shading levels |
+| `floor` | 0.04 | The darkest displayed fraction of base colour. May be 0 |
+| `white` | 1.0 | Exposure: the lightmap radiance that reads as fully lit |
+| `gamma` | 2.2 | How the bands are spread between black and `white` |
 
-### The transfer function, tabulated
+The curve, in full:
 
-This is the single most important table in this document. Lightmap luminance
-in, displayed fraction of base colour out (flat region, `fwidth ≈ 0`):
+```
+x      = clamp(lum / white, 0, 1) ^ (1/gamma)        // quantise perceived brightness
+band   = quantise(x) into `bands` steps              // antialiased, see 3.3
+floor_x = floor ^ (1/gamma)
+level  = (floor_x + (1 - floor_x) * band) ^ gamma    // evenly spaced in the same space
+out    = mix(level, radiance * level/lum, fade)      // hue, see 3.4
+```
 
-| lightmap lum | 0 – 0.199 | 0.2 – 0.399 | 0.4 – 0.599 | 0.6 – 0.799 | 0.8 – 0.999 | ≥ 1.0 |
+`white` appears **only** on the input. It chooses which radiance reaches the
+top band, not how bright the top band is: `level` runs from `floor` to
+exactly `1.0` whatever the exposure.
+
+### 3.2 Why `gamma`, and why the floor used to be stuck at 0.18
+
+These two are the same story. Until 2026-11-02 the curve was a single
+constant, `TOON_FLOOR = 0.18`, doing three unrelated jobs: the darkest level,
+the bottom of the output range, *and* the width of a chroma fade measured in
+band units. Lowering it broke two things at once.
+
+**It made the shader return NaN.** The fade was
+`smoothstep(0.0, TOON_FLOOR, band)`, which at `TOON_FLOOR = 0` is
+`smoothstep(0, 0, band)` — undefined in WGSL when the edges are equal, and
+lowered by naga to a divide. Not just dark pixels: every fragment on screen.
+The fade is now one *band* wide (`smoothstep(0, 1/bands, band)`), which is
+the dimensionally correct quantity and is never degenerate.
+
+**And the bands had nowhere to put a dark value.** With `gamma = 1` the
+boundaries sit at 0.2/0.4/0.6/0.8 of white. A sunlit surface receives about
+`1.0` and a shaded one about `0.1`, so *everything in shade landed in band 0*
+and four of the five bands covered the brightest octave alone. The floor
+wasn't the colour of a shadow's darkest corner — it was the colour of every
+shadow there was, which is why it had to be bright enough to read as a
+surface. Drop it to zero and the entire shaded world goes black together.
+
+Spacing the bands by perceived brightness fixes the cause. Boundaries move to
+`white · (k/bands)^gamma`, so at the defaults:
+
+| | band 0 | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|---|
-| **output** | 0.18 | 0.34 | 0.51 | 0.67 | 0.84 | 1.00 |
-| chroma | neutral | tinted | tinted | tinted | tinted | tinted |
-| *before §7.1* | *0.18* | *0.20* | *0.40* | *0.60* | *0.80* | *1.00* |
+| **displayed** | 0.040 | 0.123 | 0.257 | 0.446 | 0.693 | 1.000 |
+| **reached at radiance** | 0 | 0.029 | 0.133 | 0.325 | 0.612 | 1.000 |
+| *gamma 1, as shipped through v11* | *0.18* | *0.34* | *0.51* | *0.67* | *0.84* | *1.00* |
+| *…reached at radiance* | *0* | *0.2* | *0.4* | *0.6* | *0.8* | *1.0* |
 
-The second row is what the shaders do now; the last row is what they did until
-2026-10-28, and §7.1 explains why the first two entries of it were a problem.
+A stock scene (sun 1.0, ambient 0.25) now lands: contact shade → floor, tree
+shade → 1, open shade → 2, bounce-lit → 3, grazing sun → 4, open sun → 5. All
+six, instead of the two endpoints.
 
-### Other runtime facts
+Measured over every baked texel in the cafe world
+(`WORLD=worlds/cafe cargo test band_occupancy -- --ignored --nocapture`),
+object lightmaps, 2.87 M texels:
 
-- Camera uses `Tonemapping::Linear` — no tone curve, but it keeps the negative
-  clamp. Bevy 0.20 made `None` a full passthrough that drops that clamp; never
-  put it in front of the quantiser.
-- Placed `PointLight` / `SpotLight` entities spawn **no bevy light component**
-  at all. They are bake inputs, drawn in the editor by `draw_light_gizmos`.
-  Consequence: baked light does not fall on dynamic objects.
-- The one `DirectionalLight` (`BakedSun`, shadows off) and `GlobalAmbientLight`
-  exist only for meshes still on `StandardMaterial` — the player character and
-  editor thumbnails. `world/mod.rs` converts lightmap units to PBR units
-  (`PBR_LUX_PER_UNIT = 10000`, `PBR_AMBIENT_BRIGHTNESS_PER_UNIT = 320`).
-- `Shift+L` swaps to a flat unlit debug view (`use_lightmap = 0` → radiance 1).
+| curve | band 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| gamma 1 (as shipped) | **67%** | 21% | 8% | 4% | 0% | 0% |
+| gamma 2.0 | 17% | 40% | 29% | 11% | 4% | 0% |
+| gamma 2.2 (default) | 14% | 35% | 35% | 12% | 4% | 0% |
+| gamma 2.6 | 10% | 20% | 49% | 14% | 6% | 0% |
+
+### 3.3 The band antialiasing
+
+`toon_band` is not `floor(x * bands) / bands`. A hard threshold on a
+bilinearly filtered texture reconstructs its contour at *texel* granularity
+and then aliases against the pixel grid — the jagged staircase along every
+shadow edge. Raising lightmap resolution only shrinks the steps; there is
+always exactly one texel of staircase, so it stays visible up close no matter
+how many texels you spend.
+
+Instead the boundary is ramped over `fwidth(x)`, the rate of change of the
+banded coordinate per screen pixel, which makes every transition about one
+pixel wide at any resolution, surface size or viewing distance. Flat regions
+have `fwidth ≈ 0` and stay perfectly flat, so the banded look survives
+intact. At grazing angles a whole band can fall inside one pixel, where the
+clamp lets the bands dissolve into smooth shading instead of shimmering. The
+ramp sits in the top of each band and ends exactly on the boundary, which
+keeps the function continuous across it.
+
+### 3.4 Hue, and why the curve is monotone
+
+Banding each channel separately would shift hue at every boundary, so
+`toon_shade` bands **luminance** and rescales RGB by `level / lum`. The
+bottom band fades to neutral grey instead, so a trace of strongly tinted
+light cannot paint a dark corner its own colour; the fade is one band wide,
+so above the first boundary hue is preserved exactly.
+
+Both ends of that fade have luminance exactly `level`, so it moves chroma and
+never brightness, and the whole curve is monotone by construction
+(`the_curve_is_monotone_in_radiance`). An earlier form mixed a *constant*
+0.18 against a value climbing from 0 and dipped 26% below the floor in
+between — a one-pixel dark line, a quarter-stop dark, along every contour
+where the lightmap crossed the first boundary, which was the edge of every
+shadow in the game.
+
+### 3.5 Other runtime facts
+
+- Camera uses `Tonemapping::Linear` — no tone curve, but it keeps the
+  negative clamp. Bevy 0.20 made `None` a full passthrough that drops that
+  clamp; never put it in front of the quantiser.
+- `Shift+L` swaps to a flat unlit debug view (`unlit = 1` / `use_lightmap =
+  0` → radiance 1 → full base colour). Orthogonal to the radiance source.
+- An unbaked surface binds the shared 1×1 white `DefaultToonLightmap`, so it
+  also renders at full base colour rather than black.
+- Placed `PointLight` / `SpotLight` entities spawn **no bevy light
+  component** at all. They are bake inputs, drawn in the editor by
+  `draw_light_gizmos`.
+- The one `DirectionalLight` (`BakedSun`, shadows off) and
+  `GlobalAmbientLight` exist only for meshes still on `StandardMaterial` —
+  editor thumbnails and previews. `world/mod.rs` converts lightmap units to
+  PBR units (`PBR_LUX_PER_UNIT = 10000`,
+  `PBR_AMBIENT_BRIGHTNESS_PER_UNIT = 320`).
+- `ToonLook` (`gfx/toon_material.rs`) is the single path from the level's
+  environment into every toon material, terrain and object alike. One
+  resource for both: a curve that differed between them would draw a step
+  along every place they meet.
+- The sky dome (`world/sky.rs`) is derived from the same environment —
+  ambient, sun colour and direction, and the curve's `white` — by
+  `sync_sky_colors`, so it dims with the lights and re-exposes with the
+  surfaces. It is the one displayed thing that does not pass through the
+  toon curve's bands; it is already a stylised gradient. See §6.1 for the
+  derivation.
 
 ---
 
-## 4. Knobs
+## 4. Knobs: what to turn for what
 
-### Per world — `EnvironmentData` (inspector with nothing selected, saved in `world.meta` v5)
+### 4.1 Per world — `EnvironmentData`
 
-| Field | Default | Meaning |
-|---|---|---|
-| `sun_rotation` | aimed at origin from `(20, 120, −80)` | Only the rotation is baked; position drives the debug cone |
-| `sun_color` / `sun_intensity` | white / `1.0` | Radiance an unshadowed surface facing the sun receives |
-| `ambient_color` / `ambient_intensity` | `(0.9, 0.9, 1.0)` / `0.25` | Radiance a fully unoccluded surface gets from the sky, before AO |
+Inspector with nothing selected; saved in `world.meta` v6.
 
-### Per light — `PlacedKind::PointLight` / `SpotLight`
+| Field | Default | Meaning | Re-bake? |
+|---|---|---|---|
+| `sun_rotation` | aimed at origin from `(20, 120, −80)` | Only the rotation is baked; position drives the debug cone | yes |
+| `sun_color` / `sun_intensity` | white / `1.0` | Radiance an unshadowed surface facing the sun receives | yes |
+| `ambient_color` / `ambient_intensity` | `(0.9, 0.9, 1.0)` / `0.25` | Radiance a fully unoccluded surface gets from the sky, before AO | yes |
+| `toon_curve` | `(5, 0.04, 1.0, 2.2)` | §3 | **no** |
+
+### 4.2 Symptom → knob
+
+| Symptom | Reach for |
+|---|---|
+| Shadows are a washed-out grey, not dark | `floor` down (0 is legal) |
+| Everything is a flat mid-tone with one wandering contour | the scene is sitting inside one band: `white` down to its `Auto` value, or `gamma` up |
+| Sunlit surfaces all pin at full base colour | `white` up |
+| Only the brightest areas show any shading steps | `gamma` up |
+| Too few / too many steps | `bands` |
+| Shadow edges are jagged | not the curve — check the lightmap's sampler is linear, and the atlas resolution (`mesh_texels_per_metre`) |
+| Interiors are dark and featureless | the bake, not the curve: place lights, and check `scenery_albedo` |
+| A character looks pasted onto the floor | §6 — the two halves disagreeing |
+
+**Do not fix an exposure problem with the light intensities.** It is the
+trap the cafe world fell into: with the old linear ramp every sunlit surface
+pinned at the top band, so the sun and ambient were dialled down ~5× until
+they stopped clipping. That left `sun_radiance` luminance at 0.128 against
+`ambient_radiance` 0.130 — a sun *dimmer than the sky*, so turning it off
+barely changed the picture and its shadows had nothing to be darker than.
+Measured, its terrain lightmap has p25 = p50 = p75 = 0.219: half the world is
+one value. Intensities are physical inputs to the bake; `white` is the
+exposure. Keep the sun the brightest thing in the world and grade with the
+curve.
+
+### 4.3 Per light — `PlacedKind::PointLight` / `SpotLight`
 
 Defaults: point `(1.0, 0.85, 0.6)`, intensity `1.0`, range `14`; spot
-`(1.0, 0.95, 0.85)`, intensity `1.5`, range `20`, cone `0.4 / 0.7` rad.
-`shadows: bool` is retained for record stability and currently unused.
+`(1.0, 0.95, 0.85)`, intensity `1.5`, range `20`, cone `0.4 / 0.7` rad. Both
+have `falloff` (default `2.0`, the curve every light had before it was a
+knob): attenuation is `(1 − (d/r)²)^falloff`, so lower spreads the light out
+towards its range and higher pulls it in around the lamp, with the endpoints
+fixed. The half-brightness radius is `r·√(1 − 0.5^(1/falloff))` — 0.54 r at
+2, 0.71 r at 1, 0.41 r at 4. The probe bake uses the same `sample`, so
+dynamic objects see the same shape. `shadows: bool` is retained for record
+stability and currently unused.
 
-### Per bake — `BakeConfig` (quality/cost, not look)
+### 4.4 Per bake — `BakeConfig` (quality and cost, not look)
 
 `terrain_resolution 1024`, `mesh_texels_per_metre 8`, `mesh_resolution_max
 2048`, `ao_rays 16`, `ao_radius 20.0`, `shadow_steps 64`, `ao_steps 32`,
-`bounce_rays 8`, `bounce_strength 1.0`, `terrain_albedo 0.5`, `bounce_count 1`,
-`cpu_lowfreq_downsample 4`, `blur_radius 4`, `bake_radius Some(1)`.
+`bounce_rays 8`, `bounce_strength 1.0`, `terrain_albedo 0.5`,
+`scenery_albedo 0.5`, `bounce_count 1`, `cpu_lowfreq_downsample 4`,
+`blur_radius 4`, `bake_radius Some(1)`, `probe_rays 48`.
+
+**The CPU terrain bake runs two passes.** AO and indirect bounce were ~95% of
+its ray cost (measured: 329 ns sun / 3347 ns AO / 2829 ns bounce per texel)
+and both vary over metres, so they are evaluated on a grid
+`cpu_lowfreq_downsample` (default 4) times coarser and bilinearly
+interpolated, while the sun and local-light shadows — the sharp terms the
+bands key off — stay per-texel. `blur_radius: 4` already smears the result
+over ~25 cm at 16 texels/m, so the lost detail was being discarded anyway.
+Separately, every terrain march early-outs once a climbing ray clears
+`BakeHeightCache::max_height` (exact, not an approximation). Together ~39×
+(a 3×3 region: ~61 s → ~1.6 s single-threaded). Re-measure with
+`cargo test --release terrain_bake_cost_breakdown -- --ignored --nocapture`.
+
+**The CPU bake is single-threaded on WASM and blocks the tab**, which is why
+the GPU path matters most there: rayon falls back to a one-thread pool on
+`wasm32-unknown-unknown`, so every `into_par_iter` is serial, and bevy's wasm
+task pool is `spawn_local` on the main thread. The **object** bake is CPU on
+every platform, so it stays subject to this.
+
+### 4.5 Diagnostics
+
+| Command | Shows |
+|---|---|
+| `WORLD=worlds/cafe cargo test dump_world_meta -- --ignored --nocapture` | A world's saved sun/ambient/curve, with radiances |
+| `WORLD=worlds/cafe cargo test band_occupancy -- --ignored --nocapture` | How a whole world's texels distribute over the ramp, for several candidate curves. `V=11` reads an older bake |
+| `LIGHTMAP=<path> cargo test dump_lightmap -- --ignored --nocapture` | One lightmap as an ASCII map, plus percentiles. `BANDS=1`, `CROP=x,y,w` |
+| `cargo test dump_probes -- --ignored --nocapture` | Probe coefficients and how hard the L1 fit is ringing |
+| `AT=x,z Y=1.1 cargo test dump_probe_plane -- --ignored --nocapture` | The probe volume reconstructed over a horizontal plane from a world's baked files, as a band map plus per-contour anisotropy and kink — the tool for "the light pool on the furniture is the wrong shape" |
+| `cargo test lamp_pool_shape -- --ignored --nocapture` | The same question against an analytic lamp, so there is a ground truth to compare the lattice against |
 
 ---
 
@@ -225,474 +509,160 @@ Defaults: point `(1.0, 0.85, 0.6)`, intensity `1.0`, range `14`; spot
 
 Each of these has cost real debugging time. Breaking one is silent.
 
-1. Lightmap `Image`s carry an explicit **linear** sampler (§2).
-2. `toon_band` / `toon_shade` / `luminance` are identical in both shaders (§3).
-3. Object texels use the **sub-mesh's** transform, not the placed root's (§2).
-4. Lightmap UVs never overlap (§2).
-5. Terrain chunks bake with a `blur_radius` margin and world-keyed texel
-   positions/seeds, or seams reappear (§2).
-6. `BakedLight` stays 64 bytes with every `vec3` 16-byte aligned, matching the
-   WGSL (`baked_light_matches_the_wgsl_layout`).
-7. `LIGHTMAP_FORMAT_VERSION` is bumped whenever the *meaning* of a texel
-   changes. It lives in the file name.
-8. Shaders branch on a `let` read straight from a uniform, never on a field of
-   a `var` built from fragment inputs — WebGPU's uniformity analysis rejects
-   `textureSample` under the latter and native silently does not.
+1. Lightmap `Image`s carry an explicit **linear** sampler (§2.4).
+2. The toon curve block is byte-identical in both shaders and mirrors
+   `engine-api`'s `ToonCurve` (§3). `toon_curve_matches_the_shaders`.
+3. `ToonCurve::floor` may be 0; nothing may derive a `smoothstep` width, a
+   divisor, or a range from it.
+4. Object texels use the **sub-mesh's** transform, not the placed root's (§2.2).
+5. Lightmap UVs never overlap (§2.2).
+6. Terrain chunks bake with a `blur_radius` margin and world-keyed texel
+   positions and seeds, or seams reappear (§2.1).
+7. Every heightmap DDA starts from an origin lifted 0.5 up; only the BVH test
+   starts at the surface (§2.1).
+8. Re-emission goes through `BakeLighting::reemitted` (§1.1).
+9. `BakedLight` stays 64 bytes with every `vec3` 16-byte aligned, matching the
+   WGSL (`baked_light_matches_the_wgsl_layout`), and `BakeUniformsData` stays
+   the same size as the shader's `BakeUniforms`
+   (`bake_uniforms_match_the_shader_struct` — the alignment test alone will
+   not catch a mismatch).
+10. `LIGHTMAP_FORMAT_VERSION` is bumped whenever the *meaning* of a texel
+    changes. It lives in the file name.
+11. `ProbeSh::reconstruct_channel` and WESL `probe_channel` are the same
+    function (§2.3).
+12. Shaders branch on a `let` read straight from a uniform, never on a field
+    of a `var` built from fragment inputs — WebGPU's uniformity analysis
+    rejects `textureSample` under the latter and native silently does not.
+
+A trap that has caught people twice: **`toon_band` splits its input at
+0.2/0.4/0.6/0.8 of `white`**. The familiar 0.04/0.123/0.257/… are the
+*remapped output*. They are different numbers in different spaces.
 
 ---
 
-## 6. Where the dynamic-lighting work plugs in
-
-For the illuminance-volume / dynamic-object work, the contact surface is small:
-
-- `BakeLighting::local_lights` is already the only place a placed light turns
-  into radiance, and `BakedLight::sample` is already shared by all three
-  bakers. A volume baker wants exactly `sample` minus the surface normal.
-- Dynamic objects currently get sun + ambient from `GlobalAmbientLight` and
-  `BakedSun` via `StandardMaterial`, so they are lit *nothing like* the static
-  world. A probe sampled at the object's position and fed into a toon material
-  would close that gap.
-- The lightmap's **alpha channel is unused** (`to_rgba16_bytes` writes a
-  constant 1.0, both shaders read `.rgb`). Storing the baked `ndotl * shadow`
-  scalar there is what lets a runtime shadow subtract the sun term alone
-  instead of darkening the whole summed radiance.
-- §7.1's banding fix was a prerequisite, and is done.
-
-**`docs/DYNAMIC_LIGHTING_PLAN.md` covers this and is implemented** (probe
-volume for receiving, blob shadows for casting): verified platform constraints
-(bevy's own `IrradianceVolume` is compiled out on *all* wasm, so it was not an
-option), the options for both halves, and the as-built design in its §8.
-`baking/probes.rs` reuses `BakeLighting`, the BVH and the height cache
-unchanged.
-
----
-
-## 7. Issues found in this review
+## 6. Known defects and open questions
 
 Ordered by how much they affect what you see.
 
-### 7.1 The two darkest bands are visually identical — lights tint shadows instead of lighting them
+### 6.1 The sky is derived from the lights, but the derivation is a guess at a look
 
-**Fixed 2026-10-28** — the bands now span `[TOON_FLOOR, 1]`; see the end of
-this section. The analysis below describes the shaders as they were.
+Resolved 2026-11-02: `sky_dome.wesl` used to be a hardcoded midday-blue
+gradient that read nothing from the environment, so the dome — which the
+brain takes as the light source — disagreed with the shading under any sun
+or ambient but the default, and a night scene was impossible. The dome's
+stops are now `SkyColors::from_environment` (`world/sky.rs`): zenith
+`0.9 × ambient`, horizon `1.6 × ambient + 0.12 × sun` while the sun is up, a
+hard-edged disc with a halo in the sun's colour, a dark floor below the
+horizon, all divided by the toon curve's `white` so the sky and the ground
+it lights re-expose together. The direction comes from the sphere's radial
+normals, which also fixed the horizon tilting whenever the camera climbed
+(it was keyed to world `y = 0`).
 
-`toon_shade` in `assets/shaders/toon_lighting.wesl` and `terrain_toon.wesl`.
+What is still a guess: the gains. They were chosen so that a sky of radiance
+`A` displays near `A` — coherent with a white surface lit only by it, and
+several times dimmer than sunlit white, as a real clear sky is — but nobody
+has looked at them yet. They are five named constants at the top of
+`sky.rs`. The sky's *hue* is the ambient's: a blue sky wants a bluer
+`ambient_color` than the default `(0.9, 0.9, 1.0)`, which is barely tinted.
 
-`TOON_FLOOR` is `0.18` and the first non-zero band value is `1/5 = 0.20`. So
-anything that lifts a texel out of total darkness but not past lightmap
-luminance `0.4` renders **11% brighter than pitch black** — about two
-percentage points of displayed grey. Meanwhile `toon_shade` rescales RGB by
-`band / lum`, so the *hue* of the result tracks the added light continuously.
-Brightness is quantised into steps that start with a dead one; colour is not.
-The result is that a light which doesn't reach band 2 changes the colour of a
-shadow and nothing else.
+### 6.2 Static and dynamic still disagree in three ways
 
-Measured, with stock defaults and a default warm point light over a shaded
-patch (`ao = 0.4`, no sun):
+§1.1 closed the big one (re-emission). Remaining:
 
-| light placement | light contributes | total lum | band | output |
-|---|---|---|---|---|
-| 2 m up, 1 m away | 0.734 | 0.844 | 4 | 0.80 |
-| 2 m up, 3 m away | 0.418 | 0.528 | 2 | 0.40 |
-| **2 m up, 6 m away** | **0.173** | **0.284** | **1** | **0.20** ← vs 0.18 unlit |
-| 2 m up, 9 m away | 0.060 | 0.171 | 0 | 0.18 |
+- **`bounce_strength` is applied to lightmaps and not to probes.**
+  `terrain.rs`, `objects.rs` and the WGSL all scale `bounce` by it; the probe
+  gather accumulates re-emitted radiance directly. Latent at the default 1.0;
+  set it to 0.5 and dynamic objects keep full indirect while the static world
+  halves.
+- **Dynamic objects have no AO and no self-shadowing.** A probe is a point in
+  open air; nothing accounts for the object's own body occluding it. A
+  character's underside is lit as brightly as their shoulders, minus whatever
+  the L1 directionality gives.
+- **Probe shadows are coarse by design, not blurred** — one *binary*
+  sun-visibility sample per cell, reconstructed with the B-spline kernel.
+  A probe-lit object's terminator cannot resolve anything smaller than
+  `PROBE_CELL_SIZE`. There is no blur knob; the only lever is the lattice
+  size, at cubic cost. So "make baked shadows look like probe shadows" means
+  throwing away detail the lightmap has and the probe volume never had.
+- **A lamp's pool is near the lattice's resolution limit.** The cafe's lamp is
+  2.5 m up and a tabletop is ~1.1 m, so the lit pool is a couple of metres
+  across. The B-spline (§2.3) makes what the lattice can represent smooth and
+  round, but it cannot add detail that was never sampled, and a lamp much
+  closer to a surface than `PROBE_CELL_SIZE` will always read as a vague
+  glow. The cell was halved to 1 m on 2026-11-02 for exactly this; the next
+  halving costs another 8× in probes baked, bytes per chunk, `ProbeStore`
+  memory and volume textures. The 1 m lattice already costs, measured on the cafe: 2.9 MB per
+  chunk file (was 0.36), so a full 81-chunk streaming ring would hold
+  ~230 MB of probes in `ProbeStore` (was ~29); the runtime volume was trimmed to ±96 m
+  horizontally (`PROBE_VOLUME_DIMS` 192×48×192, 56.6 MB per copy, three
+  copies) rather than paying 100 MB per copy for the old ±128 m; and a
+  window re-centre rewrites all of it — 1.77 M cells, which is 17.8 ms
+  single-threaded and so a dropped frame every ~32 m of movement, since it
+  runs inline in `Update`. `ProbeVolume::rebuild` is parallel over the
+  texture's z layers (sound because the mapping is toroidal: one layer is
+  written by exactly one world z), which brings it to 3.0 ms; `rebuild_cost`
+  measures both. Filling only the slab a move exposes would be the real
+  fix. Anything probe-lit outside the window samples wrapped texels from
+  the far side.
 
-That third row is the reported symptom exactly. The light *is* reaching the
-surface — the bake is correct, the shadow ray is clear, the falloff is sane.
-The quantiser is throwing the answer away.
+### 6.3 Bake coverage gaps
 
-It is worse than it looks, because the scene's two most common states sit at
-the two extremes of the table. With stock defaults on flat ground:
-
-| situation | lightmap lum | band | output |
-|---|---|---|---|
-| open sunlit | 1.10 | clipped to 5 | 1.00 |
-| sunlit, `ao 0.8` | 1.04 | clipped to 5 | 1.00 |
-| tree shade, `ao 0.5` | 0.14 | 0 | 0.18 |
-| deep shade, `ao 0.25` | 0.067 | 0 | 0.18 |
-| contact, `ao 0.1` | 0.023 | 0 | 0.18 |
-
-**Of five bands the default scene occupies two**, and they are the endpoints.
-Bands 2–4 appear only inside the ~25 cm blurred penumbra. The sunlit value is
-*above* 1.0, so it is clipped — adding any light to a sunlit surface is also
-invisible, from the other end.
-
-Two independent fixes, both small:
-
-- **Spread the bands over `[TOON_FLOOR, 1]` instead of `[0, 1]`** —
-  **done**: `level = mix(TOON_FLOOR, 1.0, band)` → levels `0.18, 0.34, 0.51,
-  0.67, 0.84, 1.0`. Band 0 → 1 is now a 1.9× jump that reads instantly, and
-  the floor stopped being a special case glued to the bottom band. The 6 m
-  row in the table above now renders at 0.34 instead of 0.20.
-- **Give the scene somewhere to sit** — *open, a level-authoring decision*.
-  Either drop `sun_intensity` to ~0.8 so open sun lands mid-band-4 rather
-  than clipped, or raise `ambient_intensity` so shade lands in band 1 rather
-  than crushed at 0. With stock defaults the middle bands are still only
-  reached by penumbrae and placed lights.
-
-### 7.2 The `TOON_FLOOR` cross-fade is non-monotonic — a dark line along every shadow terminator
-
-**Fixed 2026-10-28**, together with §7.1. The old code in the same two
-functions was:
-
-```wgsl
-return mix(vec3(TOON_FLOOR), tinted, smoothstep(0.0, TOON_FLOOR, band));
-```
-
-`tinted` has luminance exactly `band`, so the mix interpolates between a
-constant `0.18` and a value climbing `0 → 0.2`. In the middle it is **darker
-than both ends**:
-
-```
-band:    0.00   0.04   0.08   0.105  0.14   0.18   0.20
-output:  0.180  0.162  0.138  0.133  0.145  0.180  0.200
-                              ^ minimum, 26% below the floor
-```
-
-The ramp is ~1 screen pixel wide by construction, so this draws a one-pixel
-line, a quarter-stop dark, along every contour where lightmap luminance
-crosses 0.2 — which, per §7.1, is *exactly* the boundary of every shadow in
-the game. It also aliases, because the dip's depth depends on where in the
-ramp a pixel lands.
-
-This is very likely a large part of "contact shadows are a bit intense": the
-shadow edge is outlined. The fix is to give both mix endpoints the same
-luminance, so the hue fade cannot change brightness:
-
-```wgsl
-let level  = mix(TOON_FLOOR, 1.0, band);          // §7.1's remap; never below the floor
-let tinted = radiance * (level / max(lum, 1e-4));  // luminance == level
-return mix(vec3<f32>(level), tinted, smoothstep(0.0, TOON_FLOOR, band));
-```
-
-`level` is monotone in `band` and the mix only moves chroma, so the curve is
-monotone by construction.
-
-### 7.3 `ao_radius` is 20 m, so "ambient occlusion" is not contact-scale
-
-**Fixed 2026-10-28** (lightmap format v7): each ray now contributes
-`hit_t / ao_radius`, so an occluder's weight falls off linearly with distance.
-A ceiling 0.5 m up still reads as near-total occlusion; one 10 m up on the
-20 m radius reads as about half instead of zero. Both CPU and WGSL; the BVH
-gained a closest-hit query (`nearest_hit` / `bvh_nearest`) for it. The
-analysis below is of the binary count it replaced.
-
-`BakeConfig::ao_radius = 20.0`, used unchanged for the hemisphere march and
-the BVH test, with **no distance weighting**: a ray that hits a wall 19 m away
-counts exactly as much as one hitting a chair leg 2 cm away.
-
-AO is the *only* light in shadow (sun is 0, objects get no bounce — §7.4), so
-a tree canopy knocks the whole ground under its 20 m footprint down to
-`ambient × 0.2…0.4`, uniformly, not just where things touch. The term is
-really doing sky-visibility duty, which 20 m is right for, while being asked
-to also read as contact shadow, which it is not.
-
-Options, cheapest first: weight each occluded ray by `1 − (t/radius)` so near
-hits dominate (**taken**); or split into a short contact radius (~1 m) and
-keep the long one for sky visibility — still available if the linear weight
-turns out to leave large canopies too dark, since it only halves them.
-
-### 7.4 Objects get no indirect bounce; terrain does
-
-**Fixed 2026-10-28** (lightmap format v8): `shade_geometry` now calls
-`compute_indirect_bounce` per covered texel, seeded by atlas index, and
-passes `bounce_strength × bounce` exactly as the terrain bake does. The
-analysis below is of the state before.
-
-`shade_geometry` in `baking/objects.rs` passed `bounce = 0.0` to
-`sun_and_ambient`, while `bake_chunk` in `baking/terrain.rs` passes
-`config.bounce_strength * bounce`.
-
-A box standing on sunlit terrain has a shadowed side lit by `ambient × ao`
-alone, where the terrain 10 cm away also receives `sun_rgb × bounce`. With
-`terrain_albedo 0.5` and `bounce_strength 1.0` that is a real gap, and it
-lands precisely at the object/terrain junction where the eye is looking. It
-makes objects read darker than their surroundings in shade and compounds §7.3.
-
-Objects already carried everything needed (`origin`, `normal`, the cache,
-the BVH), so `compute_indirect_bounce` was dropped in as-is. The cost is the
-thing to watch: it was ~45% of the CPU terrain bake's rays, the object bake
-is CPU on every platform and single-threaded on wasm, and unlike the terrain
-bake there is no coarse-grid shortcut (atlas texels aren't spatially
-coherent across cells), so it runs per texel. `BakeStats` logs the shade
-time; if it becomes a problem the fallback is a constant bounce estimate for
-objects rather than rays.
-
-### 7.5 The object bake's terrain march starts at the surface, not 0.5 m up
-
-`baking/objects.rs:542` uses one origin for both the DDA and the BVH test:
-
-```rust
-let origin = g.world_pos + g.face_normal * 0.02;
-```
-
-The comment reasons that "an object texel is not on the ground, so there is
-nothing to step off" — true of the object's own geometry, but the ray still
-marches over *terrain* with 1.25 m steps, and plenty of object texels sit at
-or slightly below the bilinearly-sampled heightmap: anything resting on a
-slope, half-buried props, a building floor. For those, `terrain_h > sample.y`
-fires on the first step and both the sun *and* every local light are killed,
-baking the texel to the floor value.
-
-Terrain's bake lifts its DDA origin 0.5 m for exactly this reason, and the GPU
-shader mirrors it. The object path should take the same two origins. Confidence
-here is lower than 7.1–7.4 — I haven't reproduced it against a specific prop —
-but the asymmetry with the other two paths is real and unexplained.
-
-### 7.6 `light_shadow_steps` hardcodes its clamp in WGSL
-
-**Fixed 2026-10-28.** The WGSL clamped to a `48u` literal while
-`BakeConfig::light_shadow_steps` clamps to `max_light_shadow_steps`; they
-agreed only because the default *is* 48, and changing the config silently
-desynced the GPU terrain bake from the CPU terrain and object bakes. The value
-now travels in `BakeUniforms::max_light_shadow_steps` (it took one of the pad
-slots, so the layout is unchanged).
-
-### 7.7 Stale comments claiming lights aren't baked yet
-
-**Fixed 2026-10-28.** Placed lights have been baked since
-`LIGHTMAP_FORMAT_VERSION` v5, but three module headers still promised them as
-future work:
-
-- `assets/shaders/toon_lighting.wesl:4` — "and — soon — point/spot lights"
-- `baking/lightmap.rs:6` — "the sun and ambient today, point/spot lights next"
-- `baking/mod.rs:4` — lists the terms and omits local lights entirely
-
-Also `BakeStats::report` computed `rays_per_texel = 1 + ao_rays`, which no
-longer matched its own comment (local lights each cost a segment ray), so the
-logged ray estimate under-reported once a world had lights. It now takes the
-light count.
-
-### 7.8 Minor
-
-- Lights in **unloaded** chunks are not baked, though `run_bake`'s comment says
-  lights outside the bake region are included. True for loaded ones only — a
-  light 5 chunks away that is in range of nothing doesn't matter, but a world
-  baked with a small streaming ring differs from one baked with a large one.
-- `collect_object_bake_jobs` tests `region.contains_point` on the placed
-  **root's origin**, so a large object whose origin falls just outside the 3×3
+- **Lights in unloaded chunks are not baked**, though `run_bake`'s comment
+  says lights outside the bake region are included — true for loaded ones
+  only. A world baked with a small streaming ring differs from one baked with
+  a large one.
+- **`collect_object_bake_jobs` tests `region.contains_point` on the placed
+  root's origin**, so a large object whose origin falls just outside the 3×3
   block is skipped entirely even though most of it is inside.
-- `compute_ao` counts a ray with `cos_w <= 0` as occluded (it `continue`s
-  without incrementing `unoccluded`). Unreachable with the current
-  cosine-weighted generator, which always returns `local.y > 0`, but it is a
-  trap for anyone who changes the distribution.
-- HDR headroom above `1.0` is stored (f16 EXR) and then clipped by
-  `toon_band`'s `clamp(value, 0, 1)`. Worth knowing before tuning intensities:
-  the lightmap keeps the detail, the shader discards it.
+- **The GPU terrain path has no `cpu_lowfreq_downsample`** and no
+  `above_terrain` early-out, so native GPU and CPU bakes of the same world
+  differ very slightly in AO. Set `cpu_lowfreq_downsample: 1` for parity.
 
-### 7.9 AO used the same hemisphere directions at every texel
+### 6.4 Smaller things
 
-**Fixed 2026-10-31** (lightmap format v9). `compute_ao` called
-`hemisphere_dir_for_seed(..., azimuth_offset = 0.0)` in all three bakers,
-while `compute_indirect_bounce` right beside it rotated the set by a
-per-texel hash — the comment there ("so neighbours don't share correlated
-ray directions") names the exact problem AO still had. In `terrain.rs` the
-seed was even computed one line *below* the AO call it should have fed.
-
-Sixteen fixed directions are not a noisy estimate, they are a deterministic
-quadrature: its error is a smooth function of position, so the bake's blur
-leaves it almost untouched, and what survives follows the sample directions
-rather than the geometry. Measured on a 20 x 12 x 3 room with a doorway,
-against a 512-ray reference, both fields blurred with the bake's radius-4
-box:
-
-| sample set | mean error | max error |
-|---|---|---|
-| fixed (as shipped through v8) | 0.0159 | 0.0496 (8% of the field's range) |
-| rotated per texel | 0.0028 | 0.0137 (2%) |
-
-A roughness metric does not see this — both are perfectly smooth after the
-blur. Only comparison against a reference does. `ao_sample_rotation_survives_the_bake_blur`
-guards it. The seed is the world-texel hash both other terms already use,
-so the chunk-seam invariant (§5) is unaffected.
-
-### 7.10 Enclosed interiors receive only `ambient x ao`, and land on a band boundary
-
-**Mostly fixed 2026-10-31** (lightmap format v10): scenery now re-emits
-indirect bounce. The analysis below is of the state before, and the last
-subsection is what is still missing.
-
-Only *terrain* re-emitted indirect bounce — `compute_indirect_bounce`
-accumulated at terrain hits, and a scenery hit simply ended the path
-(`bvh.occluded(...) => break`, "scenery is opaque to bounce light, not a
-mirror"). Inside a closed building every bounce ray hits the building, so an
-interior got no indirect light at all, the sun is correctly blocked, and the
-shading reduced to `ambient_rgb x ao` plus whatever placed lights are inside.
-
-Measured AO on the floor of a 3 m-high room is ~0.22, rising to ~0.34 at a
-doorway. The cafe's own baked lightmaps (v8, five sub-meshes) came out:
-
-| sub-mesh | p05 | p50 | p95 | max | band split at 0.2 |
-|---|---|---|---|---|---|
-| floor | 0.102 | 0.193 | 0.288 | 0.303 | 59% / 41% |
-| walls | 0.003 | 0.069–0.185 | 0.32–0.50 | 0.32–0.52 | 67/33 … 50/33/17 |
-
-`toon_band` splits the **input** at 0.2/0.4/0.6/0.8 (the output is then
-remapped to `[TOON_FLOOR, 1]`, which is where 0.18/0.34/0.51/… come from —
-easy to confuse). The floor's median is 0.193, i.e. **0.007 from the first
-boundary**, so the band contour wandered across the whole floor driven by
-whatever small variation existed rather than by any lighting feature.
-
-### 7.11 Probe gathering returned a constant for scenery — why objects looked flat
-
-**Fixed 2026-10-31** (v10). The same gap, in the path that lights everything
-*dynamic*. `ProbeContext::shade` gathered its environment as:
-
-```rust
-let radiance = match self.bvh.nearest_hit(p, d, bound) {
-    Some(_) => lighting.ambient_rgb * 0.5,   // any scenery, any direction
-    ...
-```
-
-A flat constant, ignoring the surface's orientation and whether the sun
-reached it. Indoors nearly every probe ray hits the building, so the gathered
-environment was **the same constant in every direction** — and an L1 fit of a
-constant has no directional term at all (`s1 = s2 = s3 = 0`). `probe_radiance`
-then returns the same value for every normal, so a probe-lit object renders
-identically whichever way its faces point. That is why the cafe furniture read
-as flat, with a seam only where the constant drifted across a band.
-
-Both paths now shade a scenery hit the way a terrain hit is shaded —
-`albedo x (sun x ndotl x visibility + sky)` against the triangle's own
-geometric normal, from `TriangleBvh::nearest_hit_normal`. `BakeConfig::scenery_albedo`
-(default 0.5) is its albedo; the BVH carries triangles, not materials, so it
-is one grey number and there is no colour bleed.
-
-Guarded by `scenery_re_emits_by_its_own_normal_not_a_constant` and
-`a_sunlit_wall_bounces_light_onto_a_shaded_surface`.
-
-### 7.12 Placed lights did not bounce
-
-**Fixed 2026-10-31** (lightmap format v11). Re-emission carried sun and sky
-only, in every path, so a sealed room the daylight never reached gathered
-`ambient x albedo` from every direction and a lamp lit the surfaces it could
-see directly but nothing those surfaces faced — exactly the case of a shop
-interior.
-
-`BakeLighting::local_lights` is now evaluated at every bounce hit
-(`compute_indirect_bounce`, `ProbeContext::direct_at`, and the WGSL
-`compute_bounce`), with the same segment shadow ray a direct light uses.
-
-That forced one model change worth knowing about: **indirect light is a
-colour now, not a scalar.** It used to be a single `f32` the caller
-multiplied by `sun_rgb`, which cannot carry a lamp's own colour, so
-`compute_indirect_bounce` returns `Vec3` and `sun_and_ambient` adds it
-directly:
-
-```
-sun_rgb * (ndotl * shadow) + bounce + ambient_rgb * ao
-```
-
-The terrain bake's low-frequency grid interpolates `(f32, Vec3)` accordingly.
-Guarded by `a_lamp_lights_the_wall_it_faces_and_the_wall_lights_the_room`.
-
-Cost: one extra segment ray per light in range per bounce hit, on top of the
-sun ray already cast there. The interior benchmark has no placed lights, so
-it does not show this — budget for it by light count.
-
-### 7.13 Object atlases had no bake margin, so the blur biased every triangle edge
-
-**Fixed 2026-10-31** (v11). `blur_cells` clamps its kernel to the triangle's
-own cell *and* to texels that were shaded, so at a triangle's edge the window
-was one-sided. A linear field came back shifted by the local gradient times
-about `r/2`, and in **opposite directions on either side of a shared edge** —
-so the two halves of a quad disagreed across their diagonal, and wherever a
-shadow crossed that edge the quantiser turned the step into a band contour
-that jumped. That is what made object shadow borders look ragged along
-triangle seams, against the probe volume's much smoother dynamic shading.
-
-This is precisely the chunk-seam bug `ChunkBakeGrid` already fixed for
-terrain (§2), one level down: the unit is a triangle's atlas cell rather than
-a chunk. `rasterize_geometry` now also shades a `blur_radius` band of
-*extrapolated* surface around each triangle — the UV-to-world map is affine,
-so the margin is the same barycentric interpolation evaluated outside [0,1],
-which for two triangles of one flat quad reproduces the neighbour exactly.
-Covered texels always win over another triangle's margin; the margin is
-blurred through but the dilation pass keeps it, since real extrapolated
-lighting is a better bilinear tap than a dilated copy.
-
-Measured on a unit quad with a linear ramp (a symmetric box blur reproduces
-one exactly, so all the error is the clamped window):
-
-| | worst edge error |
-|---|---|
-| no margin | 0.0488 — 4.9% of the quad's range |
-| `blur_radius` margin | 0.0095 |
-
-Across a shared edge those biases oppose, so the step was ~10% of the range:
-about half a toon band. `the_blur_margin_keeps_a_linear_field_linear_at_triangle_edges`
-guards it.
-
-### 7.14 Probe shadows are smooth because they are coarse, not because they are blurred — **by design**
-
-Worth recording, since it looks like a blur and is not. The probe volume
-stores **one binary sun-visibility sample per probe** (`ProbeSh::sun_vis`, one
-shadow ray), on a 2 m lattice, and the hardware trilinearly interpolates it.
-That is a very aggressive low-pass: a probe-lit object's shadow terminator is
-reconstructed from samples 2 m apart, so it is smooth and vague by
-construction and cannot resolve anything smaller than the lattice. Nothing
-blurs it, and there is no knob.
-
-So "make baked shadows look like probe shadows" means throwing away detail
-the lightmap has and the probe volume never had. The useful direction is the
-reverse — the defects above were making baked edges *wrong*, not merely
-sharp. If the two still read as mismatched once they are correct, the lever
-is `PROBE_CELL_SIZE`, at cubic cost in probe count and memory.
-
-### 7.15 Probe L1 was read back linearly, so lamps cut a hard black edge across dynamic objects
-
-**Fixed 2026-10-31** — a shader change only, no re-bake.
-
-The smooth part of a probe is L1 in the linear basis, and the shader read it
-as `max(0, c0 + c·n)`. Placed lights are stored as peak-preserving lobes
-(`¼L + ¾L cos θ`), which is negative over the third of the sphere facing
-away. Read linearly and clamped, an object near a lamp was bright on one side
-and *black* on the other, with a planar edge at `cos θ = −⅓` — a straight
-hard line across the object at an angle set by the lamp, not by any shadow.
-That is what "probe-lit objects look sharp and oddly shaped" was.
-
-Measured on the cafe's own v11 probes (`dump_probes`, an ignored test): inside
-the shell `|c_dir| / c0 ≥ 1` almost everywhere, 10–25 % of the sphere clamped,
-and the worst probe read `E(+X) = 0.017` against `E(−X) = 0.551`. The same
-signature sits around the campfire lamp outside. Everywhere else the ratio is
-under 0.25 and nothing clamps — only lamp-lit probes ring, because a lamp is
-the one thing four coefficients cannot hold.
-
-Shrinking the lobe (classic deringing) was measured and rejected: it fixes the
-dark side by dimming the lit side and the total error gets *worse* (rms 0.42 →
-0.48). The fix instead reads the data the way it was built. Per channel, with
-`a = |c| / c0`:
-
-| `a` | read | why |
-|---|---|---|
-| ≤ ½ | linear, `c0 + c·n` | exact for broad light; cannot be negative |
-| ≥ 1 | `(c0 − |c|/3) + (4|c|/3)·q³`, `q = ½(1 + n·ĉ)` | a `¼+¾cos` lobe's DC is a third of its length, so this recovers the isotropic part exactly and draws the lobe as a cubic with the clamped cosine's mean and peak, zero only directly behind |
-| between | smoothstep | both preserve the mean, so the blend does |
-
-Against ground truth in a lamp-lit room (`l1_fit_error_indoors`): rms 0.42 →
-0.22, dark side 0.43 → 0.14 at a 4-unit lamp; 1.35 → 0.72 at 12. Under broad
-light it matches the linear read to the third decimal. `reconstruct_channel`
-(Rust) and `probe_channel` (WESL) are the same function and must stay so.
-
-Still true, and now the remaining gap for dynamic objects: no AO, no
-self-shadowing, and a 2 m lattice (§7.14).
+- HDR headroom above `white` is stored (f16 EXR) and then clipped by the
+  quantiser. The lightmap keeps the detail; the shader discards it.
+- `terrain_albedo` and `scenery_albedo` are single grey numbers, so indirect
+  light carries no colour from the surface it bounced off — only from the
+  lamp that lit it.
+- There is no GPU object bake (`docs/GPU_OBJECT_BAKE_PLAN.md`). Object
+  bounce in particular runs per texel with no coarse-grid shortcut, which
+  that document argues is the cheap speed-up nobody has taken.
+- The editor thumbnail rig renders `StandardMaterial` under a real
+  `DirectionalLight`, so catalogue thumbnails are lit nothing like the game.
+  Deliberate (a thumbnail wants even lighting), but worth knowing before
+  comparing one to the viewport.
 
 ---
 
-## 8. Suggested order of work
+## 7. Version history
 
-1. ~~§7.2 (monotone floor) and §7.1 (band remap) together~~ — **done.** A
-   handful of lines in two shaders, no re-bake. Judge the result in the
-   viewport before touching anything else: the shadow outline should be gone,
-   and a placed light in shade should now visibly brighten it, not just tint
-   it.
-2. ~~§7.7 comments, §7.6 uniform~~ — **done.**
-3. §7.5 object ray origin — needs a repro case first.
-3b. ~~§7.9 AO sample rotation~~ (v9), ~~§7.10/§7.11 scenery re-emits bounce~~
-   (v10), ~~§7.12 lights bounce + §7.13 object bake margin~~ (v11),
-   ~~§7.15 probe lobe read~~ (shader only) — **done.** §7.14 records why
-   probe shadows are smoother than baked ones.
-4. ~~§7.3 AO weighting~~ — **done** (v7). ~~§7.4 object bounce~~ — **done**
-   (v8). Re-bake (Shift+B) to see either.
-5. The open half of §7.1: pick default `sun_intensity` / `ambient_intensity`
-   so a stock scene actually occupies the middle bands.
+What changed in the baked data, and why. Bumping
+`LIGHTMAP_FORMAT_VERSION` means old files are skipped, never misread.
+
+| v | Change |
+|---|---|
+| 1 | 8-bit single-channel PNG, sun occlusion only |
+| 2 | f16 RGB EXR radiance: sun + ambient×AO (+ terrain bounce) |
+| 3 | Terrain texels on the true chunk footprint; object lightmaps per sub-mesh |
+| 4 | Per-triangle atlas UVs replace the overlapping triplanar projection |
+| 5 | Placed point and spot lights are baked in |
+| 6 | Object texels use each sub-mesh's own transform |
+| 7 | AO is distance-weighted — an occluder at `t` counts `1 − t/ao_radius`, so a 20 m radius can do sky-visibility duty without reading as contact shadow |
+| 8 | Objects receive indirect bounce, as terrain always had |
+| 9 | AO rotates its hemisphere sample set per texel. Sixteen *fixed* directions are a quadrature whose error is a smooth function of position, so the blur could not remove it: mean error 0.0159 → 0.0028 against a 512-ray reference |
+| 10 | Scenery re-emits bounce, and probe gathering shades a scenery hit by its own normal instead of returning a flat `ambient × 0.5`. An enclosed interior previously received no indirect light at all, and an L1 fit of a constant has no directional term — which is why probe-lit furniture rendered completely flat |
+| 11 | Placed lights re-emit, so a lamp lights the room off the surfaces it falls on. Indirect light became a colour. Object atlases gained a shaded margin around each triangle |
+| 12 | Re-emission includes the sky, through one shared `BakeLighting::reemitted` — the probe gather already did and the lightmap bounce did not. The object bake lifts its heightmap DDA origin 0.5 up, as the other bakers do; object texels at ground level were losing the sun and every local light on the first step |
+
+Runtime changes, which need no re-bake:
+
+| When | Change |
+|---|---|
+| 2026-10-28 | Bands spread over `[floor, 1]`; the hue fade made monotone, removing a dark outline along every shadow edge |
+| 2026-10-31 | Probe L1 read as isotropic + lobe above `a = 1` instead of linearly, removing the hard planar black edge across objects near a lamp (rms 0.42 → 0.22) |
+| 2026-11-02 | `ToonCurve`: the ramp became a four-parameter per-world setting (`world.meta` v6, ABI 11), quantising perceived brightness rather than radiance. The floor is decoupled from the chroma-fade width and may now be 0 |
+| 2026-11-02 | The probe volume is read with a cubic B-spline instead of trilinear filtering, so a lamp's pool on a dynamic object stops reading as a lattice-aligned diamond (§2.3). Shader only |
+| 2026-11-02 | `PROBE_CELL_SIZE` 2 m → 1 m, with its own `PROBE_FORMAT_VERSION` (13) so lightmaps need no re-bake; the runtime window trimmed to ±96 m (§6.2) |
+| 2026-11-02 | The sky dome is derived from the environment instead of hardcoded (§6.1) |
+| 2026-11-02 | Lights gained a per-light `falloff` exponent (`.objects` v7, prefabs v2; re-bake to see it) |

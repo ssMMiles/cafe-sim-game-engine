@@ -6,7 +6,7 @@
 //! point can be shaded with the same model as the static world around it —
 //! sun, sky, bounce and every placed point/spot light, with the same shadows.
 //!
-//! Probes sit on a world-aligned lattice ([`PROBE_CELL_SIZE`]) and are baked
+//! Probes sit on a world-aligned lattice ([`PROBE_CELL_SIZE`], 1 m) and are baked
 //! per chunk: each chunk's file holds the cells whose centres fall inside its
 //! footprint, from a little below its lowest terrain to a fixed height above
 //! its highest. The runtime assembles loaded chunks into one toroidal 3D
@@ -65,11 +65,25 @@ use std::path::{Path, PathBuf};
 
 use super::BakeConfig;
 use super::bvh::TriangleBvh;
-use super::lightmap::{BakeLighting, LIGHTMAP_FORMAT_VERSION, LightmapLocation};
+use super::lightmap::{BakeLighting, LightmapLocation};
 use super::raycast::{self, BakeHeightCache};
 use crate::game::world::objects::CHUNK_WORLD_SIZE;
 use crate::game::world::terrain::storage::StorageError;
 pub use engine_api::toon_material::{PROBE_CELL_SIZE, probe_cell_centre, probe_cell_index};
+
+/// Format version in every probe file's name and header. Old files are
+/// skipped, never misread.
+///
+/// Shared `LIGHTMAP_FORMAT_VERSION` through v12, since a lighting-model change
+/// invalidates both. It split off when [`PROBE_CELL_SIZE`] halved: that changes
+/// what a stored cell index *means* without touching a single lightmap texel,
+/// and re-baking every object atlas to retire the probe files would have been
+/// the slow part of the bake for nothing. Bump this for lattice or layout
+/// changes; a lighting-model change still bumps both.
+///
+/// - 13: 1 m lattice (was 2 m). Numbered past the lightmap version it left so
+///   the two are never confused for each other on disk.
+pub const PROBE_FORMAT_VERSION: u32 = 13;
 
 /// Normals the per-probe radiance function is sampled at before projection.
 const FIT_NORMALS: usize = 32;
@@ -209,6 +223,52 @@ pub fn reconstruct_channel(c0: f32, dir: Vec3, n: Vec3) -> f32 {
     linear + (lobe - linear) * w
 }
 
+/// One axis of the runtime's cubic B-spline reconstruction of the probe
+/// volume, folded into two hardware linear taps. Mirrors `bspline_axis` in
+/// `toon_lighting.wesl`; see that function for why the volume is not read
+/// with plain trilinear filtering.
+///
+/// Nothing on the CPU reads the probe volume, so this exists to be *tested*:
+/// the two-tap pairing is the error-prone half of the shader, and an
+/// off-by-half in a tap position silently shifts all dynamic lighting by
+/// half a cell. Same arrangement as the other WESL mirrors in this file.
+///
+/// `u` is a texel coordinate (world position / [`PROBE_CELL_SIZE`]). Returns
+/// `(tap0, tap1, w0, w1)` with the taps in texels and the weights summing
+/// to 1.
+#[allow(dead_code)]
+pub fn bspline_axis(u: f32) -> (f32, f32, f32, f32) {
+    let x = u - 0.5;
+    let i = x.floor();
+    let t = x - i;
+    let (t2, t3) = (t * t, t * t * t);
+    let w0 = (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0;
+    let w1 = (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0;
+    let w2 = (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0;
+    let w3 = t3 / 6.0;
+    let (g0, g1) = (w0 + w1, w2 + w3);
+    (i - 1.0 + w1 / g0 + 0.5, i + 1.0 + w3 / g1 + 0.5, g0, g1)
+}
+
+/// The four cubic B-spline weights for samples `i-1 ..= i+2`, where `i =
+/// floor(u - 0.5)`. The direct form the two-tap pairing has to reproduce.
+#[allow(dead_code)]
+pub fn bspline_weights(u: f32) -> (i32, [f32; 4]) {
+    let x = u - 0.5;
+    let i = x.floor();
+    let t = x - i;
+    let (t2, t3) = (t * t, t * t * t);
+    (
+        i as i32,
+        [
+            (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0,
+            (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0,
+            (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0,
+            t3 / 6.0,
+        ],
+    )
+}
+
 fn solve_4x4(mut a: [[f32; 4]; 4], mut b: [Vec3; 4]) -> Option<[Vec3; 4]> {
     for col in 0..4 {
         let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
@@ -336,12 +396,14 @@ struct ProbeContext<'a> {
 }
 
 impl ProbeContext<'_> {
-    /// Direct light arriving at a surface the probe can see, plus sky:
-    /// the sun through a shadow ray, and every placed light through a
-    /// segment ray. `dda` is the origin for the terrain march, lifted off
-    /// the surface; `surface` is the point itself, for the BVH.
-    fn direct_at(&self, dda: Vec3, surface: Vec3, normal: Vec3) -> Vec3 {
-        let ndotl = normal.dot(self.lighting.sun_dir).max(0.0);
+    /// Radiance a surface the probe can see sends back, through the shared
+    /// [`BakeLighting::reemitted`] — the same definition the lightmap bounce
+    /// uses, so a wall is exactly as bright to a passing character as it is
+    /// to the ground beneath it.
+    ///
+    /// `dda` is the origin for the terrain march, lifted off the surface;
+    /// `surface` is the point itself, for the BVH.
+    fn reemitted_at(&self, dda: Vec3, surface: Vec3, normal: Vec3, albedo: f32) -> Vec3 {
         let vis = raycast::cast_shadow_ray(
             dda,
             surface,
@@ -351,8 +413,8 @@ impl ProbeContext<'_> {
             self.config.ao_radius * 4.0,
             self.config.shadow_steps,
         );
-        self.lighting.sun_rgb * (ndotl * vis)
-            + self.lighting.local_lights(surface, normal, |dir, dist| {
+        self.lighting
+            .reemitted(surface, normal, albedo, vis, |dir, dist| {
                 raycast::cast_shadow_ray_segment(
                     dda,
                     surface,
@@ -363,23 +425,24 @@ impl ProbeContext<'_> {
                     self.config.light_shadow_steps(dist),
                 )
             })
-            + self.lighting.ambient_rgb
     }
 
-    /// Radiance a terrain hit at `t` along `dir` from `p` sends back: the
-    /// lightmap's own bounce model — albedo x whatever lights it.
+    /// Radiance a terrain hit at `t` along `dir` from `p` sends back.
     fn terrain_radiance(&self, p: Vec3, dir: Vec3, t: f32) -> Vec3 {
         let q = p + dir * t;
         let h = self.cache.sample_height(q.x, q.z);
         let ground = Vec3::new(q.x, h, q.z);
         let (normal, _) = self.cache.sample_normal(q.x, q.z);
-        self.direct_at(ground + Vec3::Y * 0.5, ground + normal * 0.02, normal)
-            * self.config.terrain_albedo
+        self.reemitted_at(
+            ground + Vec3::Y * 0.5,
+            ground + normal * 0.02,
+            normal,
+            self.config.terrain_albedo,
+        )
     }
 
     /// Radiance a scenery hit at `t` along `dir` sends back. The same model
-    /// as [`Self::terrain_radiance`] — albedo x (direct sun + sky) — but
-    /// against the triangle's own normal.
+    /// as [`Self::terrain_radiance`], against the triangle's own normal.
     ///
     /// This used to be a flat `ambient x 0.5` for every scenery hit, which
     /// is what made interiors unshaded: inside a building nearly every probe
@@ -393,7 +456,7 @@ impl ProbeContext<'_> {
         // Lift the terrain march as a terrain hit does: a wall's base sits
         // at ground level, where the bilinear heightmap can read as above it
         // and kill the ray outright.
-        self.direct_at(q + Vec3::Y * 0.5, q, normal) * self.config.scenery_albedo
+        self.reemitted_at(q + Vec3::Y * 0.5, q, normal, self.config.scenery_albedo)
     }
 
     /// Nearest terrain hit along `dir` within `reach`, marching from `p`.
@@ -592,12 +655,11 @@ pub fn bake_chunk_probes(
 // ============================================================================
 
 fn probes_file_name(cx: i32, cy: i32) -> String {
-    format!("chunk_{cx}_{cy}_probes.v{LIGHTMAP_FORMAT_VERSION}.bin")
+    format!("chunk_{cx}_{cy}_probes.v{PROBE_FORMAT_VERSION}.bin")
 }
 
-/// Path of a chunk's probe file inside a world directory. Versioned like the
-/// lightmaps: probes are baked with the same lighting model, so a model
-/// change invalidates both at once.
+/// Path of a chunk's probe file inside a world directory. Versioned by
+/// [`PROBE_FORMAT_VERSION`], in the file name like the lightmaps.
 pub fn chunk_probes_path(world_path: &Path, cx: i32, cy: i32) -> PathBuf {
     world_path.join("chunks").join(probes_file_name(cx, cy))
 }
@@ -630,7 +692,7 @@ pub fn serialize_probes(probes: &ChunkProbes) -> Result<Vec<u8>, StorageError> {
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let mut out = Vec::with_capacity(16 + payload.len());
     out.extend_from_slice(PROBE_MAGIC);
-    out.extend_from_slice(&LIGHTMAP_FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&PROBE_FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(&payload);
     out.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
@@ -648,9 +710,9 @@ pub fn parse_probes(bytes: &[u8]) -> Result<ChunkProbes, StorageError> {
         return Err(StorageError::InvalidMagic);
     }
     let version = u32_at(4)?;
-    if version != LIGHTMAP_FORMAT_VERSION {
+    if version != PROBE_FORMAT_VERSION {
         return Err(StorageError::VersionMismatch {
-            expected: LIGHTMAP_FORMAT_VERSION,
+            expected: PROBE_FORMAT_VERSION,
             found: version,
         });
     }
@@ -791,6 +853,67 @@ mod tests {
         assert!((facing_away - expected).length() < 1e-5);
     }
 
+    /// The runtime reads the probe volume with a cubic B-spline folded into
+    /// two hardware linear taps per axis. That pairing is the error-prone
+    /// part — an off-by-half in the tap position is a silent half-cell shift
+    /// of all dynamic lighting — so it is checked against the direct 4-tap
+    /// weights on arbitrary data.
+    #[test]
+    fn bspline_two_tap_form_is_exact() {
+        // An arbitrary, deliberately not-smooth 1-D sample set.
+        let samples: Vec<f32> = (0..16)
+            .map(|i| ((i * 37 % 11) as f32 * 0.31).sin() * 2.0 + i as f32 * 0.05)
+            .collect();
+        let fetch = |j: i32| samples[j.rem_euclid(samples.len() as i32) as usize];
+        // What the hardware does for a linear tap at texel coordinate `c`.
+        let linear_tap = |c: f32| {
+            let x = c - 0.5;
+            let i = x.floor();
+            let f = x - i;
+            fetch(i as i32) * (1.0 - f) + fetch(i as i32 + 1) * f
+        };
+
+        for k in 0..200 {
+            let u = 3.0 + k as f32 * 0.037;
+            let (i, w) = bspline_weights(u);
+            let direct: f32 = (0..4).map(|j| w[j] * fetch(i - 1 + j as i32)).sum();
+            let (tap0, tap1, g0, g1) = bspline_axis(u);
+            let paired = g0 * linear_tap(tap0) + g1 * linear_tap(tap1);
+            assert!(
+                (direct - paired).abs() < 1e-5,
+                "two-tap form differs at u={u}: {paired} vs {direct}"
+            );
+            assert!(
+                (g0 + g1 - 1.0).abs() < 1e-6,
+                "weights must sum to 1 at u={u}"
+            );
+        }
+    }
+
+    /// A probe sits at the centre of its cell, and the reconstruction must
+    /// not shift the field off the lattice: with every sample equal, any
+    /// interpolation of them is that value, and a ramp must come back as a
+    /// ramp's mean rather than displaced.
+    #[test]
+    fn bspline_preserves_a_constant_and_does_not_shift_a_ramp() {
+        for k in 0..100 {
+            let u = 5.0 + k as f32 * 0.07;
+            let (_, w) = bspline_weights(u);
+            assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+            // Centre of mass of the kernel sits exactly on `u`, so a linear
+            // field is reproduced without a phase shift.
+            let (i, w) = bspline_weights(u);
+            let centre: f32 = (0..4)
+                .map(|j| w[j] * (i - 1 + j as i32) as f32)
+                .sum::<f32>()
+                + 0.5;
+            assert!(
+                (centre - u).abs() < 1e-4,
+                "kernel is off-centre at u={u}: {centre}"
+            );
+        }
+    }
+
     fn quick_config() -> BakeConfig {
         BakeConfig {
             probe_rays: 64,
@@ -823,9 +946,14 @@ mod tests {
                 );
             }
         }
-        // 63.75 m at 2 m cells is 31 or 32 cells.
+        // 63.75 m of chunk holds that many cells, give or take the one on
+        // the boundary.
         let (_, n) = chunk_cell_range(0);
-        assert!((31..=32).contains(&n), "{n}");
+        let expect = CHUNK_WORLD_SIZE / PROBE_CELL_SIZE;
+        assert!(
+            (n as f32 - expect).abs() <= 1.0,
+            "{n} cells for a {CHUNK_WORLD_SIZE} m chunk at {PROBE_CELL_SIZE} m"
+        );
     }
 
     /// A pure lamp lobe reads back with the peak and mean of the clamped
@@ -948,13 +1076,16 @@ mod tests {
         let facing = eval(sun_dir);
         assert!(facing.x > lighting.sun_rgb.x, "facing the sun: {facing}");
 
-        // Below ground: a copy of the first open-air probe above.
+        // Below ground: a copy of the first open-air probe above. On flat
+        // ground at height 0 that is cell 0, whose centre is half a cell up.
         let buried = probes
-            .get(x0 + 5, probe_cell_index(-1.0), probes.z0 + 5)
+            .get(
+                x0 + 5,
+                probe_cell_index(-0.5 * PROBE_CELL_SIZE),
+                probes.z0 + 5,
+            )
             .unwrap();
-        let lowest_open = probes
-            .get(x0 + 5, probe_cell_index(1.0), probes.z0 + 5)
-            .unwrap();
+        let lowest_open = probes.get(x0 + 5, 0, probes.z0 + 5).unwrap();
         assert_eq!(buried, lowest_open);
     }
 
@@ -1066,7 +1197,7 @@ mod tests {
             Err(StorageError::ChecksumMismatch)
         ));
         let mut old = bytes.clone();
-        old[4..8].copy_from_slice(&(LIGHTMAP_FORMAT_VERSION - 1).to_le_bytes());
+        old[4..8].copy_from_slice(&(PROBE_FORMAT_VERSION - 1).to_le_bytes());
         assert!(matches!(
             parse_probes(&old),
             Err(StorageError::VersionMismatch { .. })
@@ -1077,7 +1208,7 @@ mod tests {
         assert_eq!(probes.get_clamped_y(-32, -99, 64), probes.get(-32, -1, 64));
         assert_eq!(probes.get_clamped_y(0, 0, 64), None);
         assert!(chunk_probes_path(Path::new("w"), 3, -4).ends_with(format!(
-            "chunks/chunk_3_-4_probes.v{LIGHTMAP_FORMAT_VERSION}.bin"
+            "chunks/chunk_3_-4_probes.v{PROBE_FORMAT_VERSION}.bin"
         )));
     }
 }
@@ -1455,6 +1586,455 @@ mod diag {
                 lum(p.eval_l1(Vec3::Y)),
                 lum(p.eval_l1(Vec3::NEG_Y)),
             );
+        }
+    }
+
+    /// The shape a lamp's pool of light takes on the probe lattice, and how
+    /// much of the damage is the lattice's resolution versus the *order* of
+    /// interpolation and reconstruction.
+    ///
+    /// Reported symptom: the lamp's pool on the tops of cafe furniture reads
+    /// as a diamond with a sharp point along each axis. The cafe's lamp (id
+    /// 79) sits 2.5 m up with range 16.8 and a tabletop is ~1.0-1.2 m, so
+    /// the lit pool is only a couple of metres across — about *one*
+    /// `PROBE_CELL_SIZE`. Whatever the lattice does to a feature that small
+    /// is what you see.
+    ///
+    /// Three fields are compared on a horizontal plane at tabletop height
+    /// with `n = +Y`:
+    ///
+    /// * `exact` - the probe representation evaluated at the shading point
+    ///   itself. No lattice; isolates the lobe fit.
+    /// * `coeff` - trilinear over the four coefficient *vectors*, then
+    ///   `eval_l1`. What the runtime did before the B-spline.
+    /// * `value` - `eval_l1` at each of the eight corners, then trilinear
+    ///   over the eight scalars. Same data, opposite order.
+    ///
+    /// "Diamondness" is the radius of a half-peak contour measured along +X
+    /// (a lattice axis) divided by the radius along the X=Z diagonal. 1.0 is
+    /// a circle; the further from 1.0, the more the lattice's own geometry
+    /// is showing through.
+    ///
+    /// `cargo test lamp_pool_shape -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lamp_pool_shape() {
+        let hm = super::tests::flat_world();
+        let cache = BakeHeightCache::extract(&hm, -60.0, -60.0, 60.0, 60.0);
+        let bvh = TriangleBvh::build(Vec::new());
+        let config = BakeConfig {
+            probe_rays: 64,
+            ao_steps: 16,
+            shadow_steps: 32,
+            ..Default::default()
+        };
+        // The cafe's own lamp (placed id 79), at its real world position,
+        // because **the lamp's phase against the lattice is the whole
+        // story**: -21.19 is 0.19 from the probe column at -21 and 25.25 is
+        // 0.25 from the one at 25, so the lamp sits almost exactly on top of
+        // a single probe. `LAMP=x,y,z` moves it.
+        let pos = std::env::var("LAMP")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                let c: Vec<f32> = v.split(',').map(|n| n.parse().unwrap()).collect();
+                Vec3::new(c[0], c[1], c[2])
+            })
+            .unwrap_or(Vec3::new(-21.19, 2.50, 25.25));
+        let lamp = BakedLight::point(pos, Vec3::new(1.0, 0.85, 0.6), 1.28, 16.8);
+        let lighting = BakeLighting {
+            sun_dir: Vec3::Y,
+            sun_rgb: Vec3::ZERO,
+            ambient_rgb: Vec3::ZERO,
+            lights: vec![lamp],
+        };
+        let ctx = ProbeContext {
+            cache: &cache,
+            bvh: &bvh,
+            lighting: &lighting,
+            config: &config,
+            env_dirs: fibonacci_sphere(config.probe_rays as usize),
+            normals: fibonacci_sphere(FIT_NORMALS),
+        };
+        let lum = |v: Vec3| 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z;
+
+        let height: f32 = std::env::var("H")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.1);
+        let n = Vec3::Y;
+
+        // Bake the lattice around the lamp, exactly as `bake_chunk_probes`
+        // would: one probe per cell, at the cell centre.
+        let span = 6i32;
+        let (cx, cz) = (probe_cell_index(pos.x), probe_cell_index(pos.z));
+        let yi0 = probe_cell_index(height) - 1;
+        let grid: Vec<ProbeSh> = (0..(2 * span + 1) * (2 * span + 1) * 3)
+            .into_par_iter()
+            .map(|i| {
+                let w = 2 * span + 1;
+                let (xi, zi, yi) = (i % w - span, (i / w) % w - span, i / (w * w));
+                ctx.shade(Vec3::new(
+                    probe_cell_centre(cx + xi),
+                    probe_cell_centre(yi0 + yi),
+                    probe_cell_centre(cz + zi),
+                ))
+            })
+            .collect();
+        let at = |xi: i32, yi: i32, zi: i32| -> ProbeSh {
+            let w = 2 * span + 1;
+            grid[((yi * w + (zi - cz + span)) * w + (xi - cx + span)) as usize]
+        };
+
+        // Trilinear weights for a world point, over cells `i` whose probe
+        // sits at `(i + 0.5) · cell` — the mapping the shader's repeat
+        // sampler performs in hardware.
+        let corners = |p: Vec3| {
+            let t = p / PROBE_CELL_SIZE - Vec3::splat(0.5);
+            let base = t.floor();
+            let f = t - base;
+            (base.as_ivec3(), f)
+        };
+
+        let plane = |p: Vec3| Vec3::new(p.x, height, p.z);
+
+        let sample_coeff = |p: Vec3| {
+            let (b, f) = corners(plane(p));
+            let mut sh = ProbeSh::default();
+            for k in 0..8 {
+                let (dx, dy, dz) = (k & 1, (k >> 1) & 1, (k >> 2) & 1);
+                let w = (if dx == 1 { f.x } else { 1.0 - f.x })
+                    * (if dy == 1 { f.y } else { 1.0 - f.y })
+                    * (if dz == 1 { f.z } else { 1.0 - f.z });
+                let c = at(b.x + dx, b.y + dy - yi0, b.z + dz);
+                for j in 0..4 {
+                    sh.c[j] += c.c[j] * w;
+                }
+            }
+            lum(sh.eval_l1(n))
+        };
+        let sample_value = |p: Vec3| {
+            let (b, f) = corners(plane(p));
+            let mut out = 0.0;
+            for k in 0..8 {
+                let (dx, dy, dz) = (k & 1, (k >> 1) & 1, (k >> 2) & 1);
+                let w = (if dx == 1 { f.x } else { 1.0 - f.x })
+                    * (if dy == 1 { f.y } else { 1.0 - f.y })
+                    * (if dz == 1 { f.z } else { 1.0 - f.z });
+                out += lum(at(b.x + dx, b.y + dy - yi0, b.z + dz).eval_l1(n)) * w;
+            }
+            out
+        };
+        let sample_exact = |p: Vec3| lum(ctx.shade(plane(p)).eval_l1(n));
+        // The answer a lightmap would bake for this surface: the lamp's
+        // clamped cosine, exactly.
+        let sample_truth = |p: Vec3| {
+            lum(lamp
+                .sample(plane(p), n)
+                .map(|(r, _, _)| r)
+                .unwrap_or(Vec3::ZERO))
+        };
+
+        // Radius of the half-peak contour along a direction, by bisection.
+        let radius = |f: &dyn Fn(Vec3) -> f32, dir: Vec3, peak: f32| {
+            let target = peak * 0.5;
+            let (mut lo, mut hi) = (0.0f32, 12.0f32);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if f(pos + Vec3::new(dir.x * mid, 0.0, dir.z * mid)).max(0.0) > target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+
+        let axis = Vec3::X;
+        let diag = Vec3::new(1.0, 0.0, 1.0).normalize();
+        println!("\nlamp pool at y={height}, n=+Y, PROBE_CELL_SIZE={PROBE_CELL_SIZE}");
+        println!(
+            "{:<10} {:>8} {:>9} {:>9} {:>11}",
+            "field", "peak", "r(axis)", "r(diag)", "axis/diag"
+        );
+        for (name, f) in [
+            ("truth", &sample_truth as &dyn Fn(Vec3) -> f32),
+            ("exact", &sample_exact),
+            ("coeff", &sample_coeff),
+            ("value", &sample_value),
+        ] {
+            let peak = f(pos);
+            let (ra, rd) = (radius(f, axis, peak), radius(f, diag, peak));
+            println!(
+                "{name:<10} {peak:>8.4} {ra:>9.3} {rd:>9.3} {:>11.3}",
+                ra / rd.max(1e-6)
+            );
+        }
+
+        // An ASCII slice of each lattice field, so the shape is visible.
+        for (name, f) in [
+            ("coeff", &sample_coeff as &dyn Fn(Vec3) -> f32),
+            ("value", &sample_value),
+            ("exact", &sample_exact),
+        ] {
+            let peak = f(pos);
+            println!("\n{name} (rows = z, cols = x, 0-9 = fraction of peak {peak:.3}):");
+            for zi in -24..=24 {
+                let mut line = String::new();
+                for xi in -24..=24 {
+                    let v = f(pos + Vec3::new(xi as f32 * 0.25, 0.0, zi as f32 * 0.25));
+                    let d = ((v / peak.max(1e-6)) * 9.0).clamp(0.0, 9.0) as usize;
+                    line.push(b"0123456789"[d] as char);
+                }
+                println!("{line}");
+            }
+        }
+    }
+
+    /// Reconstruct the probe volume exactly as the shader does, over a
+    /// horizontal plane, from a world's **baked** probe files — and print
+    /// both the smooth field and the toon band index a surface there would
+    /// land on, for the trilinear read and the B-spline one.
+    ///
+    /// The band map is the one that matters: the field can be perfectly
+    /// smooth and still read as a hard-edged shape, because the quantiser
+    /// draws one contour per boundary. This is the tool for "the light pool
+    /// on the furniture is the wrong shape".
+    ///
+    /// `kink%` is the rms second difference of the contour radius `r(theta)`
+    /// as a percentage of its mean — a circle scores ~0, every corner of a
+    /// polygon is a spike. Measured on the cafe's lamp at tabletop height,
+    /// over the four reconstructions that were tried:
+    ///
+    /// | read | centre lum | kink% b1 | b2 | b3 | axis/diag b1 |
+    /// |---|---|---|---|---|---|
+    /// | trilinear | 0.99 | 1.34 | 4.04 | 1.64 | 0.896 |
+    /// | smoothstep-warped trilinear | 1.08 | 1.45 | 3.11 | 1.24 | 0.906 |
+    /// | Catmull-Rom | 1.07 | 1.17 | 4.94 | 1.49 | 0.900 |
+    /// | **cubic B-spline** | 0.73 | **0.09** | **1.10** | **0.03** | **0.989** |
+    ///
+    /// Only the B-spline actually removes the corners. Smoothstep warping
+    /// trades the slope break for a plateau at every probe plane — a
+    /// staircase instead of a kink — and Catmull-Rom, being interpolating
+    /// and only C1, keeps the peak but leaves the contours as kinked as
+    /// trilinear (its negative lobes make one band worse). Pre-smoothing the
+    /// baked data with a binomial kernel scored well (0.52 / 0.54 / 0.04)
+    /// and costs nothing at runtime, but it dims more than the B-spline,
+    /// needs a format bump, and would need a margin per chunk to avoid
+    /// seams, since probe grids are baked one chunk at a time.
+    ///
+    /// `WORLD=worlds/cafe V=12 AT=-21.19,25.25 Y=1.1 cargo test
+    ///  dump_probe_plane -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_probe_plane() {
+        use crate::game::world::terrain::storage::parse_world_meta_from_bytes;
+        use engine_api::toon_curve::luminance;
+
+        let world = std::env::var("WORLD").unwrap_or_else(|_| "worlds/cafe".into());
+        let root = std::path::Path::new(&world);
+        let version: u32 = std::env::var("V")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(PROBE_FORMAT_VERSION);
+        let y: f32 = std::env::var("Y")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.1);
+        let span: f32 = std::env::var("SPAN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7.0);
+        let at: Vec<f32> = std::env::var("AT")
+            .unwrap_or_else(|_| "-21.19,25.25".into())
+            .split(',')
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let centre = Vec3::new(at[0], y, at[1]);
+
+        let meta = parse_world_meta_from_bytes(
+            &std::fs::read(root.join("world.meta")).expect("world.meta"),
+        )
+        .expect("parse world.meta");
+        let env = &meta.environment;
+        let curve = env.toon_curve();
+        let sun_dir = -env.sun_transform().forward().as_vec3();
+        let sun_rgb = env.sun_radiance();
+
+        let suffix = format!("_probes.v{version}.bin");
+        let grids: Vec<ChunkProbes> = std::fs::read_dir(root.join("chunks"))
+            .expect("chunks dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().ends_with(&suffix))
+            .filter_map(|p| std::fs::read(&p).ok().and_then(|b| parse_probes(&b).ok()))
+            .collect();
+        assert!(!grids.is_empty(), "no v{version} probe files under {world}");
+        println!(
+            "{} chunk grids, lamp plane y={y}, curve {:?}",
+            grids.len(),
+            curve
+        );
+
+        // The cell lookup the runtime volume performs, across chunk
+        // boundaries. Vertically clamped, as `ProbeStore` is.
+        let cell = |cx: i32, cy: i32, cz: i32| -> ProbeSh {
+            grids
+                .iter()
+                .find_map(|g| {
+                    (cx >= g.x0 && cx < g.x0 + g.nx as i32 && cz >= g.z0 && cz < g.z0 + g.nz as i32)
+                        .then(|| g.get_clamped_y(cx, cy, cz))
+                        .flatten()
+                })
+                .unwrap_or_default()
+        };
+        // Plain trilinear over the coefficients, then reconstruct: what the
+        // shader did before the B-spline, kept as the baseline.
+        // Cubic B-spline over the coefficients: 4 taps per axis instead of
+        // 2, weights summing to 1. C2 everywhere, so the reconstructed
+        // field has no slope break at a probe plane for a contour to kink
+        // on. It is approximating rather than interpolating — it smooths
+        // the data slightly, which for a lattice this coarse is a feature.
+        let bspline_w = |t: f32| {
+            let t2 = t * t;
+            let t3 = t2 * t;
+            [
+                (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0,
+                (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0,
+                (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0,
+                t3 / 6.0,
+            ]
+        };
+        let radiance_bspline = |p: Vec3, n: Vec3| -> Vec3 {
+            let t = p / PROBE_CELL_SIZE - Vec3::splat(0.5);
+            let b = t.floor();
+            let f = t - b;
+            let b = b.as_ivec3();
+            let (wx, wy, wz) = (bspline_w(f.x), bspline_w(f.y), bspline_w(f.z));
+            let mut sh = ProbeSh::default();
+            for (iz, &az) in wz.iter().enumerate() {
+                for (iy, &ay) in wy.iter().enumerate() {
+                    for (ix, &ax) in wx.iter().enumerate() {
+                        let w = ax * ay * az;
+                        let c = cell(
+                            b.x + ix as i32 - 1,
+                            b.y + iy as i32 - 1,
+                            b.z + iz as i32 - 1,
+                        );
+                        for j in 0..4 {
+                            sh.c[j] += c.c[j] * w;
+                        }
+                        sh.sun_vis += c.sun_vis * w;
+                    }
+                }
+            }
+            sh.eval_l1(n) + sun_rgb * (sh.sun_vis * n.dot(sun_dir).max(0.0))
+        };
+
+        let radiance_trilinear = |p: Vec3, n: Vec3| -> Vec3 {
+            let t = p / PROBE_CELL_SIZE - Vec3::splat(0.5);
+            let b = t.floor();
+            let f = t - b;
+            let b = b.as_ivec3();
+            let mut sh = ProbeSh::default();
+            for k in 0..8 {
+                let (dx, dy, dz) = (k & 1, (k >> 1) & 1, (k >> 2) & 1);
+                let w = (if dx == 1 { f.x } else { 1.0 - f.x })
+                    * (if dy == 1 { f.y } else { 1.0 - f.y })
+                    * (if dz == 1 { f.z } else { 1.0 - f.z });
+                let c = cell(b.x + dx, b.y + dy, b.z + dz);
+                for j in 0..4 {
+                    sh.c[j] += c.c[j] * w;
+                }
+                sh.sun_vis += c.sun_vis * w;
+            }
+            sh.eval_l1(n) + sun_rgb * (sh.sun_vis * n.dot(sun_dir).max(0.0))
+        };
+
+        let n = Vec3::Y;
+        let cols = 97usize;
+        let step = 2.0 * span / (cols - 1) as f32;
+
+        let field = |p: Vec3, mode: usize| match mode {
+            0 => luminance(radiance_trilinear(p, n)),
+            _ => luminance(radiance_bspline(p, n)),
+        };
+        let radius_at = |dir: Vec3, level: f32, mode: usize| {
+            let (mut lo, mut hi) = (0.0f32, span * 2.0);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if field(centre + dir * mid, mode) > level {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+
+        for (mode, label) in [(0, "trilinear (pre-v12)"), (1, "b-spline (shipped)")] {
+            let peak = field(centre, mode);
+            println!(
+                "\n=== {label}: centre lum {peak:.4} -> band {} of {}",
+                (curve.band(peak) * curve.bands) as u32,
+                curve.bands as u32
+            );
+            println!("band index per pixel ({span} m each way, '.' = band 0):");
+            for zi in 0..cols {
+                let mut line = String::new();
+                for xi in 0..cols {
+                    let p = centre
+                        + Vec3::new(
+                            (xi as f32 - (cols / 2) as f32) * step,
+                            0.0,
+                            (zi as f32 - (cols / 2) as f32) * step,
+                        );
+                    let b = (curve.band(field(p, mode)) * curve.bands).round() as usize;
+                    line.push(if b == 0 {
+                        '.'
+                    } else {
+                        b"0123456789"[b] as char
+                    });
+                }
+                println!("{line}");
+            }
+
+            // Per band contour: anisotropy between a lattice axis and the
+            // diagonal, and "kinkiness" — the rms second difference of
+            // r(theta) around the contour, as a fraction of the mean radius.
+            // A circle scores ~0; every corner of a polygon is a spike.
+            println!("band contour  r(axis)  r(diag)  axis/diag   kink%");
+            let diag = Vec3::new(1.0, 0.0, 1.0).normalize();
+            for k in 1..=curve.bands as u32 {
+                let level = curve.threshold(k);
+                if level >= peak {
+                    continue;
+                }
+                let (ra, rd) = (
+                    radius_at(Vec3::X, level, mode),
+                    radius_at(diag, level, mode),
+                );
+                let m = 720usize;
+                let r: Vec<f32> = (0..m)
+                    .map(|i| {
+                        let a = i as f32 / m as f32 * std::f32::consts::TAU;
+                        radius_at(Vec3::new(a.cos(), 0.0, a.sin()), level, mode)
+                    })
+                    .collect();
+                let mean = r.iter().sum::<f32>() / m as f32;
+                let kink = (0..m)
+                    .map(|i| {
+                        let d = r[(i + 1) % m] - 2.0 * r[i] + r[(i + m - 1) % m];
+                        d * d
+                    })
+                    .sum::<f32>()
+                    / m as f32;
+                println!(
+                    "{k:>12}  {ra:>7.3}  {rd:>7.3}  {:>9.3}  {:>6.3}",
+                    ra / rd.max(1e-6),
+                    100.0 * kink.sqrt() / mean.max(1e-6)
+                );
+            }
         }
     }
 }

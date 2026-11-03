@@ -67,7 +67,7 @@ scale not alpha. Tens of casters are free; hundreds would want measuring.
 constructs `ExtendedMaterial { base: StandardMaterial, extension:
 ToonMaterial::new(ToonSource::ProbeVolume, default_lightmap, &probes) }` from
 `DefaultToonLightmap` + `ProbeVolumeImages` (both resources are shared types).
-`sync_toon_sun` fills the sun uniform on `AssetEvent::Added`, one frame late,
+`sync_toon_look` fills the sun uniform on `AssetEvent::Added`, one frame late,
 so a plugin material never needs to know the environment.
 
 ## 3. What blocks a plugin today

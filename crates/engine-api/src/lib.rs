@@ -10,11 +10,13 @@ use std::collections::HashSet;
 pub use bevy;
 
 pub mod script;
+pub mod toon_curve;
 pub mod toon_material;
 pub use script::{
     LevelDataHooks, PropDef, PropDefault, PropValue, RegisteredScript, ScriptBinding,
     ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
 };
+pub use toon_curve::ToonCurve;
 pub use toon_material::{
     DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonShading, ToonSource,
     create_default_toon_lightmap, create_probe_volume_images,
@@ -45,7 +47,10 @@ pub use toon_material::{
 ///   surface by value, so their layouts gate loading.
 /// - 10: [`ConvertToToon`] is shared, so a plugin's own glTF scenes can ask
 ///   the host for the same toon conversion level objects get.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 10;
+/// - 11: [`ToonShading`] carries the [`ToonCurve`], so the toon ramp is a
+///   per-world setting rather than a constant compiled into the shaders.
+///   The uniform grew a `vec4`, which every toon material shares.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 11;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
