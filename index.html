@@ -3,32 +3,30 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Swag Gaming</title>
+    <link rel="icon" href="data:,">
     <style>
         :root {
             --espresso:    #120705;
             --crema:       #c4844f;
+            --crema-soft:  rgba(196, 132, 79, 0.35);
+            --crema-faint: rgba(196, 132, 79, 0.12);
             --steam:       #f2e4d0;
-            --plum:        #1e0e1a;
-            --teal:        #0a1614;
+            --steam-dim:   rgba(242, 228, 208, 0.45);
+            --steam-faint: rgba(242, 228, 208, 0.22);
+            --danger:      #e07a6a;
             --card-bg:     rgba(255, 248, 240, 0.03);
             --card-border: rgba(196, 132, 79, 0.2);
             --track-bg:    rgba(255, 248, 240, 0.06);
+            --serif:       'Palatino Linotype', 'Palatino', 'Book Antiqua', Georgia, serif;
+            --mono:        'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        html, body {
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        }
-
-        body {
-            background: var(--espresso);
-        }
+        html, body { width: 100%; height: 100%; overflow: hidden; }
+        body { background: var(--espresso); color: var(--steam); }
 
         canvas {
             background-color: black;
@@ -37,8 +35,17 @@
             height: 100vh !important;
         }
 
-        /* ── Loading overlay ── */
-        #loading-overlay {
+        button {
+            font: inherit;
+            color: inherit;
+            background: none;
+            border: none;
+            cursor: pointer;
+        }
+        button:disabled { cursor: default; }
+
+        /* ── Landing overlay ─────────────────────────────────────────────── */
+        #landing {
             position: fixed;
             inset: 0;
             z-index: 100;
@@ -52,13 +59,8 @@
                 linear-gradient(158deg, #120705 0%, #1e0e1a 48%, #0a1614 100%);
             transition: opacity 0.8s ease;
         }
+        #landing.fade-out { opacity: 0; pointer-events: none; }
 
-        #loading-overlay.fade-out {
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        /* Floating particles */
         .particle {
             position: absolute;
             border-radius: 50%;
@@ -66,26 +68,25 @@
             animation: particle-drift linear infinite;
             pointer-events: none;
         }
-
         @keyframes particle-drift {
-            0%   { transform: translateY(0) translateX(0);                    opacity: 0; }
+            0%   { transform: translateY(0) translateX(0); opacity: 0; }
             8%   { opacity: 1; }
             88%  { opacity: 0.4; }
             100% { transform: translateY(-45vh) translateX(var(--dx, 20px)); opacity: 0; }
         }
 
-        /* ── Card ── */
-        .loading-card {
+        /* ── Card ────────────────────────────────────────────────────────── */
+        .card {
             position: relative;
             display: flex;
             flex-direction: column;
-            align-items: center;
-            gap: 26px;
-            padding: 52px 64px 46px;
-            width: min(400px, 88vw);
+            gap: 28px;
+            padding: 48px 52px 40px;
+            width: min(540px, 92vw);
+            max-height: 92vh;
+            overflow-y: auto;
             background: var(--card-bg);
             border: 1px solid var(--card-border);
-            border-radius: 1px;
             backdrop-filter: blur(24px) saturate(120%);
             -webkit-backdrop-filter: blur(24px) saturate(120%);
             box-shadow:
@@ -94,86 +95,91 @@
                 inset 0 1px 0 rgba(255, 248, 240, 0.04);
         }
 
-        /* Corner marks */
         .corner {
             position: absolute;
             width: 14px;
             height: 14px;
-            border-color: rgba(196, 132, 79, 0.35);
+            border-color: var(--crema-soft);
             border-style: solid;
         }
-        .corner.tl { top: 11px;    left: 11px;    border-width: 1px 0 0 1px; }
-        .corner.tr { top: 11px;    right: 11px;   border-width: 1px 1px 0 0; }
-        .corner.bl { bottom: 11px; left: 11px;    border-width: 0 0 1px 1px; }
-        .corner.br { bottom: 11px; right: 11px;   border-width: 0 1px 1px 0; }
+        .corner.tl { top: 11px;    left: 11px;  border-width: 1px 0 0 1px; }
+        .corner.tr { top: 11px;    right: 11px; border-width: 1px 1px 0 0; }
+        .corner.bl { bottom: 11px; left: 11px;  border-width: 0 0 1px 1px; }
+        .corner.br { bottom: 11px; right: 11px; border-width: 0 1px 1px 0; }
 
-        /* Title */
-        .loading-title {
-            font-family: 'Palatino Linotype', 'Palatino', 'Book Antiqua', Georgia, serif;
+        header { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+
+        .title {
+            font-family: var(--serif);
             font-size: 2.1rem;
             font-weight: 400;
             letter-spacing: 0.3em;
             text-transform: uppercase;
-            color: var(--steam);
-            text-shadow:
-                0 0 50px rgba(196, 132, 79, 0.35),
-                0 1px 2px rgba(0, 0, 0, 0.5);
-            line-height: 1;
             padding-right: 0.3em; /* optical offset for letter-spacing */
+            line-height: 1;
+            text-shadow: 0 0 50px rgba(196, 132, 79, 0.35), 0 1px 2px rgba(0, 0, 0, 0.5);
         }
 
-        /* Thin rule */
         .rule {
             width: 36px;
             height: 1px;
             background: linear-gradient(90deg, transparent, rgba(196, 132, 79, 0.45), transparent);
-            margin: -6px 0;
         }
 
-        /* Spinner */
-        .spinner {
-            width: 26px;
-            height: 26px;
-            border-radius: 50%;
-            border: 1.5px solid rgba(196, 132, 79, 0.12);
-            border-top-color:  rgba(196, 132, 79, 0.85);
-            border-right-color: rgba(196, 132, 79, 0.35);
-            animation: spin 0.85s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-            flex-shrink: 0;
-        }
+        /* ── Sections ────────────────────────────────────────────────────── */
+        section { display: flex; flex-direction: column; gap: 10px; }
 
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* Progress bar */
-        .progress-wrap {
-            width: 100%;
+        .section-head {
             display: flex;
-            flex-direction: column;
-            gap: 0;
-            opacity: 0;
-            transition: opacity 0.4s ease;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
         }
-        .progress-wrap.visible { opacity: 1; }
+
+        .label {
+            font-family: var(--mono);
+            font-size: 0.62rem;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--steam-dim);
+        }
+
+        .value {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            letter-spacing: 0.06em;
+            color: var(--steam-faint);
+            text-align: right;
+        }
+        .value.ok   { color: var(--crema); }
+        .value.bad  { color: var(--danger); }
 
         .progress-track {
             width: 100%;
             height: 2px;
             background: var(--track-bg);
-            border-radius: 2px;
-            overflow: visible;
             position: relative;
+            overflow: visible;
+            transition: opacity 0.4s ease;
         }
+        .progress-track.hidden { opacity: 0; }
 
         .progress-fill {
             height: 100%;
             width: 0%;
             background: linear-gradient(90deg, rgba(196, 132, 79, 0.5), #c4844f 80%, #dda06a);
-            border-radius: 2px;
             transition: width 0.12s linear;
             position: relative;
         }
-
-        /* Glowing tip */
+        .progress-fill.indeterminate {
+            width: 30% !important;
+            animation: slide 1.2s ease-in-out infinite;
+        }
+        @keyframes slide {
+            0%   { margin-left: 0; }
+            50%  { margin-left: 70%; }
+            100% { margin-left: 0; }
+        }
         .progress-fill::after {
             content: '';
             position: absolute;
@@ -189,170 +195,793 @@
         }
         .progress-fill.active::after { opacity: 1; }
 
-        /* Status */
+        /* ── Worlds list ─────────────────────────────────────────────────── */
+        .world-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            border-top: 1px solid var(--crema-faint);
+        }
+        .world-list li {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 9px 2px;
+            border-bottom: 1px solid var(--crema-faint);
+            font-size: 0.85rem;
+        }
+        .world-list .name { flex: 1; font-family: var(--serif); letter-spacing: 0.04em; }
+        .world-list .meta { font-family: var(--mono); font-size: 0.65rem; color: var(--steam-faint); }
+        .world-list .remove {
+            font-family: var(--mono);
+            font-size: 0.6rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--steam-faint);
+            padding: 4px 6px;
+            opacity: 0;
+            transition: opacity 0.15s, color 0.15s;
+        }
+        .world-list li:hover .remove { opacity: 1; }
+        .world-list .remove:hover { color: var(--danger); }
+        .world-list .empty {
+            justify-content: center;
+            color: var(--steam-faint);
+            font-size: 0.78rem;
+            font-style: italic;
+        }
+
+        .link {
+            font-family: var(--mono);
+            font-size: 0.62rem;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--crema);
+            padding: 2px 0;
+            border-bottom: 1px solid transparent;
+            transition: border-color 0.15s;
+        }
+        .link:hover:not(:disabled) { border-bottom-color: var(--crema-soft); }
+        .link:disabled { color: var(--steam-faint); }
+
+        .hint {
+            font-size: 0.72rem;
+            line-height: 1.5;
+            color: var(--steam-faint);
+        }
+        .hint code {
+            font-family: var(--mono);
+            font-size: 0.68rem;
+            color: var(--steam-dim);
+        }
+
+        /* ── Enter ───────────────────────────────────────────────────────── */
+        .enter {
+            align-self: center;
+            margin-top: 4px;
+            padding: 12px 44px;
+            font-family: var(--serif);
+            font-size: 0.95rem;
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            padding-right: calc(44px - 0.3em);
+            color: var(--steam);
+            border: 1px solid var(--crema-soft);
+            background: var(--crema-faint);
+            transition: background 0.2s, border-color 0.2s, color 0.2s, opacity 0.3s;
+        }
+        .enter:hover:not(:disabled) {
+            background: rgba(196, 132, 79, 0.3);
+            border-color: var(--crema);
+        }
+        .enter:disabled { opacity: 0.35; }
+
         .status {
-            font-family: 'Courier New', 'Courier', monospace;
+            font-family: var(--mono);
             font-size: 0.65rem;
             letter-spacing: 0.14em;
             text-transform: uppercase;
-            color: rgba(242, 228, 208, 0.3);
+            color: var(--steam-faint);
             text-align: center;
             min-height: 1em;
             transition: color 0.3s ease;
         }
-        .status.prominent { color: rgba(242, 228, 208, 0.45); }
+        .status.prominent { color: var(--steam-dim); }
+        .status.bad { color: var(--danger); }
+
+        /* ── Drop veil ───────────────────────────────────────────────────── */
+        #drop-veil {
+            position: fixed;
+            inset: 0;
+            z-index: 200;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(18, 7, 5, 0.82);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            pointer-events: none;
+        }
+        #drop-veil.visible { display: flex; }
+        #drop-veil .frame {
+            padding: 48px 72px;
+            border: 1px dashed var(--crema-soft);
+            font-family: var(--serif);
+            font-size: 1.1rem;
+            letter-spacing: 0.3em;
+            text-transform: uppercase;
+            color: var(--steam);
+            text-align: center;
+            line-height: 1.8;
+        }
+        #drop-veil .frame small {
+            display: block;
+            font-family: var(--mono);
+            font-size: 0.62rem;
+            letter-spacing: 0.14em;
+            color: var(--steam-dim);
+        }
     </style>
 </head>
 
 <body id="wasm-example">
-<div id="loading-overlay">
-    <div class="loading-card">
+<div id="landing">
+    <div class="card">
         <div class="corner tl"></div>
         <div class="corner tr"></div>
         <div class="corner bl"></div>
         <div class="corner br"></div>
 
-        <h1 class="loading-title">Swag Gaming</h1>
-        <div class="rule"></div>
+        <header>
+            <h1 class="title">Swag Gaming</h1>
+            <div class="rule"></div>
+        </header>
 
-        <div class="spinner" id="spinner"></div>
-
-        <div class="progress-wrap" id="progress-wrap">
-            <div class="progress-track">
-                <div class="progress-fill" id="progress-fill"></div>
+        <section>
+            <div class="section-head">
+                <span class="label">Engine</span>
+                <span class="value" id="engine-status">Connecting…</span>
             </div>
-        </div>
+            <div class="progress-track" id="engine-track">
+                <div class="progress-fill" id="engine-fill"></div>
+            </div>
+        </section>
 
-        <p class="status" id="status">Connecting&hellip;</p>
+        <section>
+            <div class="section-head">
+                <span class="label">Worlds in this browser</span>
+                <button class="link" id="import-btn">Import zip…</button>
+            </div>
+            <ul class="world-list" id="world-list">
+                <li class="empty">Looking…</li>
+            </ul>
+            <div class="progress-track hidden" id="import-track">
+                <div class="progress-fill" id="import-fill"></div>
+            </div>
+            <p class="hint">
+                Export a world from the native editor (File ▸ Export world as zip) and drop it
+                anywhere on this page. A link can carry one too:
+                <code>?world=&lt;url-of-zip&gt;</code>.
+            </p>
+        </section>
+
+        <button class="enter" id="enter" disabled>Enter</button>
+        <p class="status" id="status">Connecting…</p>
     </div>
 </div>
 
+<div id="drop-veil">
+    <div class="frame" id="drop-text">Drop to import<small>a world .zip</small></div>
+</div>
+
+<input type="file" id="file-input" accept=".zip,application/zip" hidden>
+
 <!-- Fallback: catches module import failures where the script block never runs -->
 <script>
-    window.__wasmLoaded = false;
-    window.addEventListener('error', function (e) {
-        document.getElementById('status').textContent = 'Script error — see console';
+    window.addEventListener('error', function () {
+        var el = document.getElementById('status');
+        if (el) { el.textContent = 'Script error — see console'; el.classList.add('bad'); }
     });
     window.addEventListener('unhandledrejection', function (e) {
-        document.getElementById('status').textContent = 'Load error — see console';
+        var el = document.getElementById('status');
+        if (el) { el.textContent = 'Load error — see console'; el.classList.add('bad'); }
         console.error('Unhandled rejection:', e.reason);
     });
 </script>
 
-    <script type="module">
-        import init from "./pkg/game_engine_lib.js";
+<script type="module">
 
-        const overlay = document.getElementById('loading-overlay');
-        const spinner = document.getElementById('spinner');
-        const progressWrap = document.getElementById('progress-wrap');
-        const progressFill = document.getElementById('progress-fill');
-        const statusEl = document.getElementById('status');
+    // ── DOM ───────────────────────────────────────────────────────────────
+    const $ = (id) => document.getElementById(id);
+    const landing = $('landing');
+    const engineStatus = $('engine-status');
+    const engineTrack = $('engine-track');
+    const engineFill = $('engine-fill');
+    const importTrack = $('import-track');
+    const importFill = $('import-fill');
+    const worldList = $('world-list');
+    const importBtn = $('import-btn');
+    const fileInput = $('file-input');
+    const enterBtn = $('enter');
+    const statusEl = $('status');
+    const dropVeil = $('drop-veil');
+    const dropText = $('drop-text');
 
-        // Spawn ambient particles
-        for (let i = 0; i < 16; i++) {
-            const el = document.createElement('div');
-            el.className = 'particle';
-            const size = 3 + Math.random() * 6;
-            el.style.cssText = [
-                `width:${size}px`,
-                `height:${size}px`,
-                `left:${8 + Math.random() * 84}%`,
-                `bottom:${Math.random() * 40}%`,
-                `--dx:${(Math.random() - 0.5) * 90}px`,
-                `animation-duration:${7 + Math.random() * 9}s`,
-                `animation-delay:${-Math.random() * 12}s`,
-            ].join(';');
-            overlay.appendChild(el);
+    const params = new URLSearchParams(location.search);
+
+    // Ambient particles
+    for (let i = 0; i < 16; i++) {
+        const el = document.createElement('div');
+        el.className = 'particle';
+        const size = 3 + Math.random() * 6;
+        el.style.cssText = [
+            `width:${size}px`, `height:${size}px`,
+            `left:${8 + Math.random() * 84}%`, `bottom:${Math.random() * 40}%`,
+            `--dx:${(Math.random() - 0.5) * 90}px`,
+            `animation-duration:${7 + Math.random() * 9}s`,
+            `animation-delay:${-Math.random() * 12}s`,
+        ].join(';');
+        landing.appendChild(el);
+    }
+
+    function setStatus(text, kind = '') {
+        statusEl.textContent = text;
+        statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    }
+
+    function setProgress(fill, track, pct) {
+        track.classList.remove('hidden');
+        if (pct == null) {
+            fill.classList.add('indeterminate');
+            fill.classList.remove('active');
+            return;
+        }
+        fill.classList.remove('indeterminate');
+        fill.style.width = Math.min(100, pct) + '%';
+        fill.classList.toggle('active', pct < 100);
+    }
+
+    const fmtBytes = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+
+    // ── Download with progress ────────────────────────────────────────────
+    function download(url, onProgress) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.responseType = 'arraybuffer';
+            xhr.onprogress = (e) => onProgress(e.lengthComputable ? (e.loaded / e.total) * 100 : null, e.loaded);
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) resolve(new Uint8Array(xhr.response));
+                else reject(new Error(`HTTP ${xhr.status} fetching ${url}`));
+            };
+            xhr.onerror = () => reject(new Error(`Network error fetching ${url}`));
+            xhr.send();
+        });
+    }
+
+    // ── OPFS ──────────────────────────────────────────────────────────────
+    // The engine's web storage is OPFS, keyed by the same repo-relative
+    // paths native uses (`worlds/{id}/…`, `projects/{id}/project.toml`,
+    // `assets/prefabs/{name}.prefab`). A bundle's entries are those keys.
+    const opfsAvailable = !!(navigator.storage && navigator.storage.getDirectory
+        && window.FileSystemFileHandle && FileSystemFileHandle.prototype.createWritable);
+
+    const root = () => navigator.storage.getDirectory();
+
+    async function dirOf(base, parts, create) {
+        let dir = base;
+        for (const p of parts) dir = await dir.getDirectoryHandle(p, { create });
+        return dir;
+    }
+
+    async function writeKey(base, key, data) {
+        const parts = key.split('/');
+        const file = parts.pop();
+        const dir = await dirOf(base, parts, true);
+        const handle = await dir.getFileHandle(file, { create: true });
+        const w = await handle.createWritable();
+        await w.write(data);
+        await w.close();
+    }
+
+    async function readText(base, key) {
+        try {
+            const parts = key.split('/');
+            const file = parts.pop();
+            const dir = await dirOf(base, parts, false);
+            const handle = await dir.getFileHandle(file);
+            return await (await handle.getFile()).text();
+        } catch (e) {
+            if (e && e.name === 'NotFoundError') return null;
+            throw e;
+        }
+    }
+
+    async function dirSize(dir) {
+        let total = 0;
+        for await (const [, handle] of dir.entries()) {
+            if (handle.kind === 'file') total += (await handle.getFile()).size;
+            else total += await dirSize(handle);
+        }
+        return total;
+    }
+
+    async function listWorlds() {
+        const base = await root();
+        let worlds;
+        try { worlds = await base.getDirectoryHandle('worlds'); }
+        catch (e) { if (e.name === 'NotFoundError') return []; throw e; }
+        const out = [];
+        for await (const [id, handle] of worlds.entries()) {
+            if (handle.kind !== 'directory') continue;
+            let hasMeta = true;
+            try { await handle.getFileHandle('world.meta'); } catch { hasMeta = false; }
+            out.push({ id, bytes: await dirSize(handle), hasMeta });
+        }
+        out.sort((a, b) => a.id.localeCompare(b.id));
+        return out;
+    }
+
+    // @bundle-logic-start — pure functions, no DOM or OPFS. `tools/bundle-check.mjs`
+    // evaluates this slice to show what a zip would import as; keep it self-contained.
+    // ── Project manifests ─────────────────────────────────────────────────
+    // Mirrors `projects::serialize_manifest` / `parse_manifest` for the flat
+    // schema the engine writes: name, [description], plugins, worlds, start_world.
+    const unquote = (s) => s.replace(/\\(["\\])/g, '$1');
+    const quote = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+
+    function parseManifest(text) {
+        const str = (k) => {
+            const m = text.match(new RegExp(`^${k}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'm'));
+            return m ? unquote(m[1]) : undefined;
+        };
+        const arr = (k) => {
+            const m = text.match(new RegExp(`^${k}\\s*=\\s*\\[([^\\]]*)\\]`, 'm'));
+            return m ? [...m[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((x) => unquote(x[1])) : [];
+        };
+        const worlds = arr('worlds');
+        return {
+            name: str('name') || '',
+            description: str('description'),
+            plugins: arr('plugins'),
+            worlds,
+            start_world: str('start_world') || worlds[0] || '',
+        };
+    }
+
+    function serializeManifest(m) {
+        let out = `name = ${quote(m.name)}\n`;
+        if (m.description) out += `description = ${quote(m.description)}\n`;
+        out += `plugins = [${m.plugins.map(quote).join(', ')}]\n`;
+        out += `worlds = [${m.worlds.map(quote).join(', ')}]\n`;
+        out += `start_world = ${quote(m.start_world)}\n`;
+        return out;
+    }
+
+    // ── Zip reading ───────────────────────────────────────────────────────
+    // Central-directory walk plus DecompressionStream for deflate; enough for
+    // the exporter's archives and for a hand-zipped world folder.
+    const SIG_EOCD = 0x06054b50, SIG_EOCD64_LOC = 0x07064b50, SIG_EOCD64 = 0x06064b50;
+    const SIG_CD = 0x02014b50, SIG_LOCAL = 0x04034b50;
+
+    function readZipDirectory(bytes) {
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let eocd = -1;
+        for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+            if (dv.getUint32(i, true) === SIG_EOCD) { eocd = i; break; }
+        }
+        if (eocd < 0) throw new Error('Not a zip file');
+        let count = dv.getUint16(eocd + 10, true);
+        let cdOffset = dv.getUint32(eocd + 16, true);
+        if (count === 0xffff || cdOffset === 0xffffffff) {
+            const loc = eocd - 20;
+            if (loc < 0 || dv.getUint32(loc, true) !== SIG_EOCD64_LOC) throw new Error('Truncated zip64 archive');
+            const z = Number(dv.getBigUint64(loc + 8, true));
+            if (dv.getUint32(z, true) !== SIG_EOCD64) throw new Error('Bad zip64 directory');
+            count = Number(dv.getBigUint64(z + 32, true));
+            cdOffset = Number(dv.getBigUint64(z + 48, true));
+        }
+        const entries = [];
+        const utf8 = new TextDecoder('utf-8');
+        let p = cdOffset;
+        for (let i = 0; i < count; i++) {
+            if (dv.getUint32(p, true) !== SIG_CD) throw new Error('Bad central directory');
+            const flags = dv.getUint16(p + 8, true);
+            const method = dv.getUint16(p + 10, true);
+            let compressedSize = dv.getUint32(p + 20, true);
+            let size = dv.getUint32(p + 24, true);
+            const nameLen = dv.getUint16(p + 28, true);
+            const extraLen = dv.getUint16(p + 30, true);
+            const commentLen = dv.getUint16(p + 32, true);
+            let localOffset = dv.getUint32(p + 42, true);
+            const name = utf8.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+            // zip64 extended information
+            let e = p + 46 + nameLen;
+            const extraEnd = e + extraLen;
+            while (e + 4 <= extraEnd) {
+                const id = dv.getUint16(e, true), len = dv.getUint16(e + 2, true);
+                if (id === 1) {
+                    let f = e + 4;
+                    if (size === 0xffffffff) { size = Number(dv.getBigUint64(f, true)); f += 8; }
+                    if (compressedSize === 0xffffffff) { compressedSize = Number(dv.getBigUint64(f, true)); f += 8; }
+                    if (localOffset === 0xffffffff) { localOffset = Number(dv.getBigUint64(f, true)); }
+                }
+                e += 4 + len;
+            }
+            if (flags & 1) throw new Error(`${name} is encrypted`);
+            entries.push({ name, method, compressedSize, size, localOffset });
+            p += 46 + nameLen + extraLen + commentLen;
+        }
+        return entries;
+    }
+
+    async function zipEntryData(bytes, entry) {
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const p = entry.localOffset;
+        if (dv.getUint32(p, true) !== SIG_LOCAL) throw new Error(`Bad local header for ${entry.name}`);
+        const start = p + 30 + dv.getUint16(p + 26, true) + dv.getUint16(p + 28, true);
+        const raw = bytes.subarray(start, start + entry.compressedSize);
+        if (entry.method === 0) return raw;
+        if (entry.method === 8) {
+            const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+            return new Uint8Array(await new Response(stream).arrayBuffer());
+        }
+        throw new Error(`Unsupported compression (method ${entry.method}) in ${entry.name}`);
+    }
+
+    // ── Bundle layout ─────────────────────────────────────────────────────
+    const ID_RE = /^[A-Za-z0-9_-]+$/;
+
+    function safeKey(key) {
+        const parts = key.split('/');
+        return parts.every((p) => p && p !== '.' && p !== '..');
+    }
+
+    /// Map archive entries to OPFS keys. Two layouts are accepted:
+    ///  - the exporter's: `worlds/{id}/…`, `projects/{id}/project.toml`,
+    ///    `assets/prefabs/{name}.prefab`;
+    ///  - a hand-zipped world folder: `{id}/world.meta` (or `world.meta` at
+    ///    the root, taking the id from the file name). That one gets a
+    ///    synthesised project so the engine's menu can reach it.
+    function planBundle(entries, nameHint) {
+        const files = entries.filter((e) =>
+            !e.name.endsWith('/') && !e.name.startsWith('__MACOSX/') && !/(^|\/)\.DS_Store$/.test(e.name));
+
+        const writes = [];       // { key, entry }
+        const worlds = new Set();
+        const projects = [];     // { id, entry }
+        let ignored = 0;
+
+        if (files.some((e) => /^worlds\/[^/]+\/world\.meta$/.test(e.name))) {
+            for (const e of files) {
+                if (!safeKey(e.name)) { ignored++; continue; }
+                let m;
+                if ((m = e.name.match(/^worlds\/([^/]+)\//)) && ID_RE.test(m[1])) {
+                    worlds.add(m[1]);
+                    writes.push({ key: e.name, entry: e });
+                } else if ((m = e.name.match(/^projects\/([^/]+)\/project\.toml$/)) && ID_RE.test(m[1])) {
+                    projects.push({ id: m[1], entry: e });
+                } else if (/^assets\/prefabs\/[^/]+\.prefab$/.test(e.name)) {
+                    writes.push({ key: e.name, entry: e });
+                } else {
+                    ignored++;
+                }
+            }
+            return { writes, worlds: [...worlds], projects, synthesise: false, ignored };
         }
 
-        function setStatus(text, prominent = false) {
-            statusEl.textContent = text;
-            statusEl.classList.toggle('prominent', prominent);
+        const meta = files.find((e) => /^(?:[^/]+\/)?world\.meta$/.test(e.name));
+        if (!meta) throw new Error('No world.meta in this archive');
+        const prefix = meta.name.slice(0, -'world.meta'.length);
+        const id = prefix ? prefix.slice(0, -1) : nameHint;
+        if (!ID_RE.test(id)) throw new Error(`"${id}" is not a valid world id (letters, digits, - and _ only)`);
+        for (const e of files) {
+            if (!e.name.startsWith(prefix)) { ignored++; continue; }
+            const key = `worlds/${id}/${e.name.slice(prefix.length)}`;
+            if (!safeKey(key)) { ignored++; continue; }
+            writes.push({ key, entry: e });
         }
+        return { writes, worlds: [id], projects: [], synthesise: true, ignored };
+    }
 
-        function setProgress(pct) {
-            progressFill.style.width = Math.min(100, pct) + '%';
-            progressFill.classList.toggle('active', pct < 100);
+    // @bundle-logic-end
+
+    /// Write `incoming` for project `id`, folding its worlds into an existing
+    /// manifest rather than replacing it (a second bundle from the same
+    /// project must not drop the first world).
+    async function mergeManifest(base, id, incoming) {
+        const key = `projects/${id}/project.toml`;
+        const existingText = await readText(base, key);
+        let merged = incoming;
+        if (existingText) {
+            const existing = parseManifest(existingText);
+            merged = {
+                ...existing,
+                plugins: [...new Set([...existing.plugins, ...incoming.plugins])],
+                worlds: [...new Set([...existing.worlds, ...incoming.worlds])],
+                start_world: existing.start_world || incoming.start_world,
+            };
         }
+        await writeKey(base, key, new TextEncoder().encode(serializeManifest(merged)));
+    }
 
-        // XHR-based download with progress — more reliable than fetch+ReadableStream
-        function downloadWasm(url) {
-            return new Promise((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open('GET', url, true);
-                xhr.responseType = 'arraybuffer';
-
-                xhr.onloadstart = () => {
-                    setStatus('Downloading  0%');
-                    spinner.style.display = 'none';
-                    progressWrap.classList.add('visible');
-                };
-
-                xhr.onprogress = (e) => {
-                    if (e.lengthComputable) {
-                        const pct = (e.loaded / e.total) * 100;
-                        setProgress(pct);
-                        setStatus(`Downloading  ${Math.round(pct)}%`);
-                    } else {
-                        setStatus(`Downloading  ${(e.loaded / 1048576).toFixed(1)} MB`, true);
-                    }
-                };
-
-                xhr.onload = () => {
-                    if (xhr.status >= 200 && xhr.status < 300) {
-                        setProgress(100);
-                        resolve(new Uint8Array(xhr.response));
-                    } else {
-                        reject(new Error(`HTTP ${xhr.status}`));
-                    }
-                };
-
-                xhr.onerror = () => reject(new Error('Network error'));
-                xhr.send();
-            });
-        }
-
-        async function run() {
-            try {
-                setStatus('Downloading\u2026', true);
-
-                // ── Phase 1: download with progress ───────────────────────
-                const wasmBytes = await downloadWasm('./pkg/game_engine_lib_bg.wasm');
-
-                // ── Phase 2: compile + init ───────────────────────────────
-                progressWrap.classList.remove('visible');
-                spinner.style.display = '';
-                setStatus('Initializing\u2026', true);
-
-                await init({ module_or_path: wasmBytes });
-
-                // ── Phase 3: fade out ─────────────────────────────────────
-                overlay.classList.add('fade-out');
-                overlay.addEventListener('transitionend', () => {
-                    overlay.style.display = 'none';
-                }, { once: true });
-
-                document.addEventListener('visibilitychange', () => {
-                    if (document.hidden) {
-                        console.log("Page hidden");
-                    } else {
-                        console.log("Page visible");
-                        window.dispatchEvent(new Event('resize'));
-                    }
-                });
-
-                console.log("WASM Loaded");
-
-            } catch (e) {
-                spinner.style.display = 'none';
-                progressWrap.classList.remove('visible');
-                setStatus(`Error: ${e.message} — see console`, true);
-                console.error("Failed to load WASM:", e);
+    async function forgetWorldInManifests(base, worldId) {
+        let projects;
+        try { projects = await base.getDirectoryHandle('projects'); }
+        catch (e) { if (e.name === 'NotFoundError') return; throw e; }
+        for await (const [pid, handle] of projects.entries()) {
+            if (handle.kind !== 'directory') continue;
+            const key = `projects/${pid}/project.toml`;
+            const text = await readText(base, key);
+            if (!text) continue;
+            const m = parseManifest(text);
+            if (!m.worlds.includes(worldId)) continue;
+            m.worlds = m.worlds.filter((w) => w !== worldId);
+            if (m.worlds.length === 0) {
+                await projects.removeEntry(pid, { recursive: true });
+            } else {
+                if (m.start_world === worldId) m.start_world = m.worlds[0];
+                await writeKey(base, key, new TextEncoder().encode(serializeManifest(m)));
             }
         }
+    }
 
-        run();
-    </script>
+    async function deleteWorld(id) {
+        const base = await root();
+        const worlds = await base.getDirectoryHandle('worlds');
+        await worlds.removeEntry(id, { recursive: true });
+        await forgetWorldInManifests(base, id);
+    }
+
+    async function importBundle(bytes, nameHint) {
+        if (!opfsAvailable) throw new Error('This browser cannot store worlds (no OPFS writable streams)');
+        const entries = readZipDirectory(bytes);
+        const plan = planBundle(entries, nameHint);
+        const base = await root();
+        const total = plan.writes.reduce((n, w) => n + w.entry.size, 0);
+        let done = 0;
+        for (const { key, entry } of plan.writes) {
+            await writeKey(base, key, await zipEntryData(bytes, entry));
+            done += entry.size;
+            setProgress(importFill, importTrack, total ? (done / total) * 100 : 100);
+            setStatus(`Importing  ${Math.round(total ? (done / total) * 100 : 100)}%`, 'prominent');
+        }
+        const text = new TextDecoder('utf-8');
+        for (const { id, entry } of plan.projects) {
+            await mergeManifest(base, id, parseManifest(text.decode(await zipEntryData(bytes, entry))));
+        }
+        if (plan.synthesise) {
+            for (const id of plan.worlds) {
+                await mergeManifest(base, id, { name: id, plugins: [], worlds: [id], start_world: id });
+            }
+        }
+        if (plan.ignored) console.info(`[import] ignored ${plan.ignored} entr${plan.ignored === 1 ? 'y' : 'ies'} outside the bundle layout`);
+        return plan.worlds;
+    }
+
+    // ── Worlds panel ──────────────────────────────────────────────────────
+    async function refreshWorlds() {
+        worldList.replaceChildren();
+        if (!opfsAvailable) {
+            const li = document.createElement('li');
+            li.className = 'empty';
+            li.textContent = 'This browser cannot store worlds';
+            worldList.append(li);
+            importBtn.disabled = true;
+            return;
+        }
+        let worlds;
+        try { worlds = await listWorlds(); }
+        catch (e) {
+            console.error(e);
+            const li = document.createElement('li');
+            li.className = 'empty';
+            li.textContent = 'Could not read storage';
+            worldList.append(li);
+            return;
+        }
+        if (worlds.length === 0) {
+            const li = document.createElement('li');
+            li.className = 'empty';
+            li.textContent = 'No worlds yet — import one, or create one in the editor';
+            worldList.append(li);
+            return;
+        }
+        for (const w of worlds) {
+            const li = document.createElement('li');
+            const name = document.createElement('span');
+            name.className = 'name';
+            name.textContent = w.id;
+            const meta = document.createElement('span');
+            meta.className = 'meta';
+            meta.textContent = w.hasMeta ? fmtBytes(w.bytes) : 'unsaved';
+            const remove = document.createElement('button');
+            remove.className = 'remove';
+            remove.textContent = 'remove';
+            remove.title = `Delete "${w.id}" from this browser`;
+            remove.addEventListener('click', async () => {
+                if (!confirm(`Delete the world "${w.id}" from this browser?`)) return;
+                try { await deleteWorld(w.id); }
+                catch (e) { console.error(e); setStatus(`Could not delete ${w.id}`, 'bad'); }
+                await refreshWorlds();
+            });
+            li.append(name, meta, remove);
+            worldList.append(li);
+        }
+    }
+
+    // ── Import sources ────────────────────────────────────────────────────
+    let importing = null; // Promise while an import runs
+    let engineStarted = false;
+
+    function runImport(job) {
+        if (importing) return importing;
+        importing = (async () => {
+            try {
+                const ids = await job();
+                importTrack.classList.add('hidden');
+                setStatus(`Imported ${ids.join(', ')}`, 'prominent');
+                await refreshWorlds();
+                if (engineStarted) {
+                    // The engine discovered its projects at startup; reload so
+                    // the new world shows up in its menu.
+                    dropText.innerHTML = `Imported ${ids.join(', ')}<small>reloading…</small>`;
+                    dropVeil.classList.add('visible');
+                    setTimeout(() => location.reload(), 600);
+                }
+                return ids;
+            } catch (e) {
+                console.error('[import]', e);
+                importTrack.classList.add('hidden');
+                setStatus(`Import failed: ${e.message}`, 'bad');
+                if (engineStarted) dropVeil.classList.remove('visible');
+                return [];
+            } finally {
+                importing = null;
+            }
+        })();
+        return importing;
+    }
+
+    const importFile = (file) => runImport(async () => {
+        setStatus(`Reading ${file.name}…`, 'prominent');
+        setProgress(importFill, importTrack, null);
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        return importBundle(bytes, file.name.replace(/\.zip$/i, ''));
+    });
+
+    const importUrl = (url) => runImport(async () => {
+        setStatus('Downloading world…', 'prominent');
+        setProgress(importFill, importTrack, null);
+        const bytes = await download(url, (pct, loaded) => {
+            setProgress(importFill, importTrack, pct);
+            setStatus(pct == null ? `Downloading world  ${fmtBytes(loaded)}` : `Downloading world  ${Math.round(pct)}%`, 'prominent');
+        });
+        const hint = decodeURIComponent(url.split('?')[0].split('/').pop() || 'world').replace(/\.zip$/i, '');
+        return importBundle(bytes, hint);
+    });
+
+    importBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        fileInput.value = '';
+        if (file) importFile(file);
+    });
+
+    let dragDepth = 0;
+    const isFileDrag = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+    window.addEventListener('dragenter', (e) => {
+        if (!isFileDrag(e)) return;
+        e.preventDefault();
+        if (dragDepth++ === 0) {
+            dropText.innerHTML = 'Drop to import<small>a world .zip</small>';
+            dropVeil.classList.add('visible');
+        }
+    });
+    window.addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault(); });
+    window.addEventListener('dragleave', (e) => {
+        if (!isFileDrag(e)) return;
+        if (--dragDepth <= 0) { dragDepth = 0; dropVeil.classList.remove('visible'); }
+    });
+    window.addEventListener('drop', (e) => {
+        if (!isFileDrag(e)) return;
+        e.preventDefault();
+        dragDepth = 0;
+        const file = e.dataTransfer.files[0];
+        if (!engineStarted) dropVeil.classList.remove('visible');
+        else dropText.innerHTML = `Importing ${file ? file.name : ''}<small>hold on</small>`;
+        if (file) importFile(file);
+    });
+
+    // ── Engine ────────────────────────────────────────────────────────────
+    const WASM_URL = './pkg/game_engine_lib_bg.wasm';
+    const GLUE_URL = './pkg/game_engine_lib.js';
+
+    // wasm-pack writes unhashed file names and plain static servers (python's
+    // http.server included) send no Cache-Control, so browsers apply heuristic
+    // freshness: a 63 MB wasm cached days ago is happily served next to a
+    // freshly fetched shader, and the mismatch surfaces as a bind-group /
+    // pipeline validation error at startup. Ask the server for the wasm's
+    // Last-Modified (revalidated, never from cache) and key both engine
+    // files on it, so a new build is a new URL and an old build stays cached.
+    async function engineBuildId() {
+        try {
+            const res = await fetch(WASM_URL, { method: 'HEAD', cache: 'no-cache' });
+            const stamp = res.headers.get('last-modified') || res.headers.get('etag');
+            if (stamp) return encodeURIComponent(Date.parse(stamp) || stamp);
+        } catch (e) {
+            console.warn('[engine] could not read the wasm headers; skipping the cache', e);
+        }
+        return String(Date.now());
+    }
+
+    async function loadEngine() {
+        engineStatus.textContent = 'Checking…';
+        const build = await engineBuildId();
+        engineStatus.textContent = 'Downloading…';
+        const bytes = await download(`${WASM_URL}?v=${build}`, (pct, loaded) => {
+            setProgress(engineFill, engineTrack, pct);
+            engineStatus.textContent = pct == null ? `Downloading ${fmtBytes(loaded)}` : `Downloading ${Math.round(pct)}%`;
+        });
+        engineStatus.textContent = 'Compiling…';
+        setProgress(engineFill, engineTrack, null);
+        const [module, glue] = await Promise.all([
+            WebAssembly.compile(bytes),
+            import(`${GLUE_URL}?v=${build}`),
+        ]);
+        setProgress(engineFill, engineTrack, 100);
+        engineStatus.textContent = 'Ready';
+        engineStatus.classList.add('ok');
+        return { module, init: glue.default };
+    }
+
+    async function startEngine({ module, init }) {
+        if (engineStarted) return;
+        engineStarted = true;
+        enterBtn.disabled = true;
+        setStatus('Starting…', 'prominent');
+        await init({ module_or_path: module });
+        landing.classList.add('fade-out');
+        landing.addEventListener('transitionend', () => { landing.style.display = 'none'; }, { once: true });
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) window.dispatchEvent(new Event('resize'));
+        });
+        console.log('WASM Loaded');
+    }
+
+    async function main() {
+        refreshWorlds();
+        const sharedWorld = params.get('world');
+        const pendingImport = sharedWorld ? importUrl(sharedWorld) : Promise.resolve([]);
+
+        let engine;
+        try {
+            engine = await loadEngine();
+        } catch (e) {
+            console.error('Failed to load WASM:', e);
+            engineStatus.textContent = 'Failed';
+            engineStatus.classList.add('bad');
+            engineTrack.classList.add('hidden');
+            setStatus(`Error: ${e.message} — see console`, 'bad');
+            return;
+        }
+
+        await pendingImport;
+        if (!statusEl.classList.contains('bad')) setStatus(sharedWorld ? statusEl.textContent : 'Ready');
+        enterBtn.disabled = false;
+        enterBtn.addEventListener('click', () => startEngine(engine).catch((e) => {
+            console.error('Failed to start:', e);
+            setStatus(`Error: ${e.message} — see console`, 'bad');
+        }));
+        enterBtn.focus();
+
+        // `?play` skips the landing page once the engine (and any shared
+        // world) is in — the old auto-start behaviour, for quick testing.
+        if (params.has('play')) enterBtn.click();
+    }
+
+    main();
+</script>
 </body>
 
 </html>

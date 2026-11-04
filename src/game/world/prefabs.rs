@@ -598,7 +598,7 @@ pub mod legacy {
 
 /// `prefabs/{name}.prefab` — the storage key (OPFS) and, under the project
 /// root, the native path tail.
-fn prefab_key(name: &str) -> String {
+pub(crate) fn prefab_key(name: &str) -> String {
     format!("{PREFAB_DIR}/{name}.prefab")
 }
 

@@ -41,6 +41,7 @@ mod terrain_save;
 mod thumbnails;
 mod tool;
 mod ui;
+mod world_export;
 
 use actions::{EditorAction, apply_level_actions, apply_selection_actions};
 use baking_trigger::trigger_bake;
@@ -150,6 +151,11 @@ impl Plugin for EditorPlugin {
         app.init_resource::<PrefabEditState>();
         app.init_resource::<LightingState>();
         app.init_resource::<History>();
+        app.init_resource::<world_export::WorldExport>();
+        app.add_systems(
+            Update,
+            world_export::poll_world_export.in_set(EditorSet::InGame),
+        );
         // Undo/redo first: the messages it emits are committed below in the
         // same frame. `settle_history` last: it sees this frame's recordings.
         app.add_systems(

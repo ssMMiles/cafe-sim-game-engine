@@ -20,3 +20,5 @@ To build for web:
 ```
 wasm-pack build --target web --release --features opfs
 ```
+
+Then serve the repo root with `python3 tools/serve.py [port]` (plain `http.server` with `Cache-Control: no-cache`, so a rebuilt wasm or shader is never paired with a stale cached one) and open `index.html`. The start page shows the worlds stored in the browser and imports world zips (drag one in, *Import zip…*, or `?world=<url>`); `?play` skips the landing card. Export a world from the native editor with File ▸ Export world as zip — see `docs/WORLD_SHARING.md`.

@@ -25,6 +25,13 @@ profiling = ["bevy/trace_chrome", "bevy/sysinfo_plugin", "bevy/debug"]
 tracy = ["bevy/trace_tracy", "bevy/debug"]
 physics_debug = ["avian3d/debug-plugin"]
 opfs = []
+# Web profiling: bevy's system/schedule spans become `performance.measure`
+# entries (tracing-wasm), so Chrome's Performance panel shows them on the
+# Timings track next to long tasks. Costs a few percent per system — measure
+# stutters with it, not steady-state frame time. `tools/web-trace.mjs`
+# records and summarises a run. Build:
+#   wasm-pack build --target web --release --features opfs,web-profile
+web-profile = ["bevy/trace"]
 
 [profile.dev]
 # codegen-backend = "cranelift"
@@ -86,6 +93,13 @@ half = "2.6"
 engine-api = { path = "crates/engine-api" }
 libloading = "0.8"
 toml = "0.8"
+
+# World bundles (File → Export world as zip): the exporter is native-only, the
+# web page unpacks the archive with its own JavaScript. Reading support is
+# built in; `deflate-flate2` (the flate2 already in the graph, no zopfli) is
+# the only codec the bundles use.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"

@@ -31,6 +31,24 @@ pub fn menu_bar(ui: &mut egui::Ui, panels: &mut Panels) {
                 panels.actions.write(EditorAction::Bake);
                 ui.close();
             }
+            let exporting = panels.export.running();
+            let label = if exporting {
+                "Exporting…"
+            } else {
+                "Export world as zip"
+            };
+            if ui
+                .add_enabled(!exporting, egui::Button::new(label))
+                .on_hover_text(
+                    "Writes worlds/{id}.zip with the saved world, its prefabs and the \
+                     project manifest — drop it on the web build's start page to share it. \
+                     Exports what is on disk, so save first.",
+                )
+                .clicked()
+            {
+                panels.actions.write(EditorAction::ExportWorld);
+                ui.close();
+            }
             ui.separator();
             let current = panels
                 .world_config

@@ -341,7 +341,7 @@ pub fn write_manifest(manifest: &ProjectManifest) -> Result<(), String> {
 /// Hand-rolled TOML serialization for the manifest schema. Avoids pulling in
 /// serde just for one write path. Strings are quoted with `"` and escaped
 /// for `\` and `"`.
-fn serialize_manifest(m: &ProjectManifest) -> String {
+pub(crate) fn serialize_manifest(m: &ProjectManifest) -> String {
     let mut out = String::new();
     out.push_str(&format!("name = {}\n", quote(&m.name)));
     if let Some(desc) = m.description.as_deref()

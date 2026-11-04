@@ -18,6 +18,7 @@ use super::history::{Change, History};
 use super::selection::{PlacedTree, Selection, ancestors, delete_placed, descendants};
 use super::tool::EditorTool;
 use super::ui::MenuState;
+use super::world_export::WorldExport;
 use crate::AppState;
 use crate::game::gfx::camera::PlayerCamera;
 use crate::game::world;
@@ -27,7 +28,10 @@ use crate::game::world::objects::{PlacedObject, PlacedObjectRegistry};
 use crate::game::world::prefabs::PrefabLibrary;
 use crate::game::world::streaming::StreamingState;
 use crate::game::world::terrain::{
-    TerrainChunk, bootstrap::TerrainSetupMarker, save::SaveTerrainMessage, storage::WorldConfig,
+    TerrainChunk,
+    bootstrap::TerrainSetupMarker,
+    save::SaveTerrainMessage,
+    storage::{TerrainWorld, WorldConfig},
 };
 use crate::projects::{self, ActiveProject, ProjectRegistry};
 use crate::script_host::ReloadRequested;
@@ -36,6 +40,8 @@ use crate::script_host::ReloadRequested;
 pub enum EditorAction {
     Save,
     Bake,
+    /// Write `worlds/{id}.zip` for sharing (`world_export.rs`).
+    ExportWorld,
     ReloadPlugins,
     ExitToMenu,
     SwitchWorld(String),
@@ -118,6 +124,9 @@ pub fn apply_level_actions(
     mut active: Option<ResMut<ActiveProject>>,
     mut project_registry: ResMut<ProjectRegistry>,
     mut menu: ResMut<MenuState>,
+    mut export: ResMut<WorldExport>,
+    terrain_world: Option<Res<TerrainWorld>>,
+    time: Res<Time>,
 ) {
     for action in actions.read() {
         match action {
@@ -127,6 +136,13 @@ pub fn apply_level_actions(
             EditorAction::Bake => {
                 info!("Bake requested");
                 bake.write(BakeMessage);
+            }
+            EditorAction::ExportWorld => {
+                export.request(
+                    terrain_world.as_deref(),
+                    active.as_deref(),
+                    time.elapsed_secs_f64(),
+                );
             }
             EditorAction::ReloadPlugins => {
                 reload.0 = true;

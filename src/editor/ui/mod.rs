@@ -197,6 +197,7 @@ pub struct Panels<'w, 's> {
     pub brush: ResMut<'w, BrushSettings>,
     pub lighting: ResMut<'w, LightingState>,
     pub history: ResMut<'w, History>,
+    pub export: Res<'w, super::world_export::WorldExport>,
     pub registry: Res<'w, PlacedObjectRegistry>,
     pub prefabs: Res<'w, PrefabLibrary>,
     pub prefab_edit: ResMut<'w, PrefabEditState>,
@@ -382,17 +383,32 @@ pub(super) fn editor_ui(
         missing.sort_unstable();
         missing.dedup();
         let notice = panels.history.notice();
-        if !missing.is_empty() || notice.is_some() {
+        let export = panels.export.notice();
+        if !missing.is_empty() || notice.is_some() || export.is_some() {
             ui.horizontal_wrapped(|ui| {
                 let red = egui::Color32::from_rgb(255, 120, 120);
+                let mut first = true;
+                let mut sep = |ui: &mut egui::Ui| {
+                    if !first {
+                        ui.separator();
+                    }
+                    first = false;
+                };
                 if !missing.is_empty() {
+                    sep(ui);
                     ui.colored_label(red, format!("missing prefab(s): {}", missing.join(", ")));
                 }
                 if let Some(notice) = notice {
-                    if !missing.is_empty() {
-                        ui.separator();
-                    }
+                    sep(ui);
                     ui.colored_label(red, notice);
+                }
+                if let Some((text, error)) = export {
+                    sep(ui);
+                    if error {
+                        ui.colored_label(red, text);
+                    } else {
+                        ui.label(text);
+                    }
                 }
             });
         }
