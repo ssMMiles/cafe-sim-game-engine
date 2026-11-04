@@ -9,7 +9,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use engine_api::{PlayerCamera, ToonMat};
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use std::collections::HashSet;
 
 use crate::cafe::CafeOpen;
@@ -204,7 +204,7 @@ pub fn spawn_customers(
         return;
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let (counter_cell, queue_cell) = *candidates.choose(&mut rng).expect("candidates non-empty");
     let queue_local = anchor.cell_local(queue_cell.0, queue_cell.1);
     let target = anchor.above_floor(queue_local, CUSTOMER_FLOAT);

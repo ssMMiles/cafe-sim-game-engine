@@ -1238,3 +1238,18 @@ code, yet ~500 joint-solver spans per physics step in the web trace), avian
 `rand`/`getrandom 0.2`. Cranelift component is installed but unused (no wasm32 support
 → needs per-target override). The user measures on a faster machine; do not time builds
 here.
+
+## Build-time changes applied — 3 November 2026
+
+All of docs/BUILD_TIMES.md §1–4 except `dynamic_linking` relocation (plugins would get
+a static bevy when built alone) and per-config target dirs. Native graph 689 → 596
+crates. Gotchas met: `mesh_picking` is required (editor ray casts are `MeshRayCast`);
+terrain collider used `avian3d::debug_render::DebugRender` → now `#[cfg(feature =
+"physics_debug")]`; rand 0.10 renamed `Rng` → `RngExt`, `thread_rng` → `rng`,
+`gen_range` → `random_range`, `SliceRandom::choose` → `IndexedRandom`; a target-specific
+`rustflags` table replaces `[build].rustflags`, so `-Zthreads` is listed in both; **cranelift reverted**:
+the test binary aborted on `llvm.aarch64.neon.fmaxnmv.f32.v4f32 is not yet supported`
+(glam NEON intrinsic inlined into our crate; rustc_codegen_cranelift #171). `cargo test --release` → `cargo test --profile perf`
+everywhere. Validation: `cargo check`, `cargo check --workspace`, `cargo test --lib`,
+`cargo check --target wasm32 --features opfs` — no wasm-pack build was run (user builds
+on a faster machine).

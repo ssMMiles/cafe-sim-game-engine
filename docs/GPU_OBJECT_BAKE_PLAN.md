@@ -315,7 +315,7 @@ hits something, that is the difference between almost free and the single
 largest term.
 
 Measured per texel inside a closed room
-(`cargo test --release interior_bake_cost -- --ignored --nocapture`), against
+(`cargo test --profile perf interior_bake_cost -- --ignored --nocapture`), against
 the outdoor terrain figures from `terrain_bake_cost_breakdown`:
 
 | term | interior | outdoor terrain |

@@ -484,7 +484,7 @@ over ~25 cm at 16 texels/m, so the lost detail was being discarded anyway.
 Separately, every terrain march early-outs once a climbing ray clears
 `BakeHeightCache::max_height` (exact, not an approximation). Together ~39×
 (a 3×3 region: ~61 s → ~1.6 s single-threaded). Re-measure with
-`cargo test --release terrain_bake_cost_breakdown -- --ignored --nocapture`.
+`cargo test --profile perf terrain_bake_cost_breakdown -- --ignored --nocapture`.
 
 **The CPU bake is single-threaded on WASM and blocks the tab**, which is why
 the GPU path matters most there: rayon falls back to a one-thread pool on

@@ -1,13 +1,33 @@
-# cargo-features = ["codegen-backend"]
 
 [workspace]
 members = [".", "crates/engine-api", "plugins/*"]
 resolver = "3"
 
 [workspace.dependencies]
-bevy = { version = "0.20", default-features = true, features = [
+# Explicit feature list instead of bevy's defaults: the defaults pull audio
+# (rodio/cpal/vorbis), gamepads (gilrs), sysinfo, a second clipboard stack,
+# webgl2 shader variants, ktx2/zstd/LUTs, sprite picking, morph targets,
+# bevy_post_process and auto type registration — none of which this project
+# uses. Each is a bevy rebuild to add back; see docs/BUILD_TIMES.md.
+bevy = { version = "0.20", default-features = false, features = [
+    # platform / app
+    "std", "async_executor", "multi_threaded",
+    "bevy_asset", "bevy_log", "bevy_state", "bevy_winit",
+    "keyboard", "mouse",
+    # rendering: pbr + the pieces the camera uses (Fxaa, volumetric/distance fog)
+    "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_light", "bevy_anti_alias",
+    "bevy_gltf", "gltf_animation", "bevy_scene",
+    # the gameplay render-target sprite, gizmos, player-facing bevy_ui
+    "bevy_sprite_render", "bevy_gizmos_render",
+    "bevy_ui", "bevy_ui_render", "bevy_ui_widgets", "default_font",
+    # ui_picking: bevy_ui buttons; mesh_picking: `MeshRayCast`, which the
+    # editor's own picker/placement/brush ray casts are built on
+    "bevy_picking", "ui_picking", "mesh_picking",
+    # textures the asset manifest admits
+    "png", "jpeg",
+    # web build (WEBGL2 is a compile-time cfg; we ship webgpu only)
     "web", "webgpu",
-    "jpeg",
+    # system names in spans / wgpu labels; fast incremental native link
     "debug",
     "dynamic_linking",
 ] }
@@ -33,23 +53,58 @@ opfs = []
 #   wasm-pack build --target web --release --features opfs,web-profile
 web-profile = ["bevy/trace"]
 
+# Build profiles — see docs/BUILD_TIMES.md for the reasoning behind each.
 [profile.dev]
-# codegen-backend = "cranelift"
 opt-level = 1
+# Cranelift was tried for our crates (2026-11-03) and aborts at runtime:
+# glam's NEON `fmaxnmv` intrinsic is inlined into this crate and
+# rustc_codegen_cranelift has no lowering for it (issue #171). Revisit when
+# that lands or if glam's `scalar-math` becomes acceptable.
 
 [profile.dev.package."*"]
 opt-level = 3
+# No DWARF for 680 optimised dependency crates: smaller artifacts, faster
+# link of libbevy_dylib. Our own crates keep full debuginfo.
+debug = false
 
+# Deploy artifacts: fat LTO + one codegen unit. Slow by design — do not
+# iterate on this profile; use `web-dev` / `perf` below.
 [profile.release]
 lto = true
 codegen-units = 1
-# opt-level = 'z'
+debug = false
+strip = "debuginfo"
+
+# Iterating on the browser build: thin LTO, parallel codegen.
+#   cargo build --target wasm32-unknown-unknown --profile web-dev --features opfs
+#   wasm-bindgen --target web --out-dir pkg --out-name game_engine_lib \
+#       target/wasm32-unknown-unknown/web-dev/game_engine_lib.wasm
+[profile.web-dev]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+opt-level = 2
+
+# Optimised but not LTO'd: the ignored benchmarks
+# (`cargo test --profile perf <name> -- --ignored --nocapture`).
+[profile.perf]
+inherits = "release"
+lto = false
+codegen-units = 16
 
 [profile.release-native]
 inherits = "release"
 opt-level = 3
-lto = true
-codegen-units = 1
+
+# wasm-pack runs wasm-opt over the 63 MB module after every `--release`
+# build: minutes, for a smaller/faster artifact. Off by default; turn it on
+# for a real deploy (`wasm-opt = ["-O"]`).
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = false
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
 
 [package]
 name = "engine"
@@ -57,29 +112,28 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-argh = "0.1.12"
-rand = { version = "0.9.0", features = [] }
+# getrandom needs its JS backend on wasm; bevy pulls 0.4. Listed here only to
+# switch that feature on — not used directly.
 getrandom = { version = "0.4.1", features = ["wasm_js"] }
-# Force wasm_js/js features onto transitive getrandom versions for WASM compatibility
-getrandom3 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
-getrandom2 = { package = "getrandom", version = "0.2", features = ["js"] }
-image = "0.25.6"
-anyhow = "1.0.97"
 
 # Terrain storage
 rkyv = { version = "0.8", features = ["bytecheck"] }
 crc32fast = "1.4"
-winit = "0.30.12"
-env_logger = "0.11.9"
 log = "0.4.29"
-wasm-bindgen = "0.2.111"
 
-avian3d = { version = "0.8" }
+# No joints anywhere in the project (the default `xpbd_joints` still ran ~500
+# empty joint-solver systems per physics step), no avian picking.
+# `debug-plugin` only under the `physics_debug` feature.
+avian3d = { version = "0.8", default-features = false, features = [
+    "3d", "parry-f32", "parallel", "collider-from-mesh", "bevy_scene",
+] }
 # Editor chrome (docked viewport, outliner, inspector). 0.43 is the Bevy 0.20
 # line; egui_dock 0.21 is on the same egui (0.36). Both must always agree on
 # the egui minor — see docs/EDITOR_UI_DESIGN.md §1.1 and
 # docs/BEVY_0_20_UPGRADE_PLAN.md §1.
-bevy_egui = "0.43"
+bevy_egui = { version = "0.43", default-features = false, features = [
+    "render", "default_fonts", "bevy_ui", "manage_clipboard",
+] }
 # serde: the dock layout is persisted to editor_settings.json (user-level).
 egui_dock = { version = "0.21", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -102,6 +156,7 @@ toml = "0.8"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.111"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "Window", "Navigator", "StorageManager",

@@ -11,8 +11,8 @@
 //! separate full-screen Hire menu (an [`ActiveMenu::HireStaff`] modal).
 
 use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
-use rand::Rng;
-use rand::seq::SliceRandom;
+use rand::RngExt;
+use rand::seq::IndexedRandom;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::menus::ActiveMenu;
@@ -118,16 +118,16 @@ const FIRST_NAMES: &[&str] = &[
 
 /// Roll a fresh candidate with random stats and a stats-correlated wage.
 pub fn generate_candidate() -> StaffMember {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let name = FIRST_NAMES
         .choose(&mut rng)
         .copied()
         .unwrap_or("Pat")
         .to_string();
-    let drink_time_mod = rng.gen_range(-0.5..=0.5);
-    let move_speed_mod = rng.gen_range(-0.2..=0.4);
-    let friendliness = rng.gen_range(0.0..=1.0);
+    let drink_time_mod = rng.random_range(-0.5..=0.5);
+    let move_speed_mod = rng.random_range(-0.2..=0.4);
+    let friendliness = rng.random_range(0.0..=1.0);
 
     // Quality in [0, 1]: faster drinks, higher speed, and higher friendliness
     // all push it up. Each component is normalized to its own range first.
@@ -139,7 +139,7 @@ pub fn generate_candidate() -> StaffMember {
     const PAY_MIN: f32 = 8.0;
     const PAY_MAX: f32 = 25.0;
     let base = PAY_MIN + quality * (PAY_MAX - PAY_MIN);
-    let variance = rng.gen_range(0.8..=1.2);
+    let variance = rng.random_range(0.8..=1.2);
     let pay = (base * variance).round().max(1.0) as i64;
 
     StaffMember {
@@ -154,7 +154,7 @@ pub fn generate_candidate() -> StaffMember {
 
 /// Roll 3–5 fresh candidates for the Hire menu.
 pub fn generate_candidates() -> Vec<StaffMember> {
-    let count = rand::thread_rng().gen_range(3..=5);
+    let count = rand::rng().random_range(3..=5);
     (0..count).map(|_| generate_candidate()).collect()
 }
 

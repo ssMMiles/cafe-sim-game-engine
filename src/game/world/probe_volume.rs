@@ -615,7 +615,7 @@ mod tests {
         volume.enqueue_all();
     }
 
-    /// `cargo test --release rebuild_cost -- --ignored --nocapture`:
+    /// `cargo test --profile perf rebuild_cost -- --ignored --nocapture`:
     /// the cost of a full window refill (first placement, environment
     /// change), of one chunk's grid arriving, and of a one-cell step.
     #[test]

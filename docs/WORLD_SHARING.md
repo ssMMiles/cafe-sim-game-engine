@@ -48,7 +48,7 @@ It exports **what is on disk** — save first. Native only: the request posts a
 (`default-features = false, features = ["deflate-flate2"]`, native target
 only).
 
-Dev check: `WORLD=cafe cargo test --release export_world_fixture -- --ignored
+Dev check: `WORLD=cafe cargo test --profile perf export_world_fixture -- --ignored
 --nocapture` exports a real world into a temp dir through a symlink (nothing
 in `worlds/` is touched) and prints the archive path.
 

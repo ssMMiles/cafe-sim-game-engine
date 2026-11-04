@@ -271,11 +271,19 @@ pub fn spawn_chunk_from_result(
         ))
         .id();
 
-    commands.entity(entity).with_child((
-        result.collider,
-        Transform::from_translation(result.collider_offset),
-        avian3d::debug_render::DebugRender::none(),
-    ));
+    let collider = commands
+        .spawn((
+            result.collider,
+            Transform::from_translation(result.collider_offset),
+        ))
+        .id();
+    // The heightfield would swamp the physics debug view (Shift+P); hide it
+    // there. The component only exists with avian's `debug-plugin`.
+    #[cfg(feature = "physics_debug")]
+    commands
+        .entity(collider)
+        .insert(avian3d::debug_render::DebugRender::none());
+    commands.entity(entity).add_child(collider);
 
     chunk_registry
         .loaded_chunks

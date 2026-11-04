@@ -683,7 +683,7 @@ mod indoor {
     /// the terrain bake evaluates them on a grid `cpu_lowfreq_downsample`
     /// times coarser and interpolates.
     ///
-    /// `cargo test --release object_bake_residual_noise -- --ignored --nocapture`
+    /// `cargo test --profile perf object_bake_residual_noise -- --ignored --nocapture`
     #[test]
     #[ignore = "measurement, not a correctness check"]
     fn object_bake_residual_noise() {
@@ -1120,7 +1120,7 @@ mod tests {
 /// Per-texel ray cost of the CPU terrain bake, measured rather than guessed.
 ///
 /// Run with:
-/// `cargo test --release terrain_bake_cost_breakdown -- --ignored --nocapture`
+/// `cargo test --profile perf terrain_bake_cost_breakdown -- --ignored --nocapture`
 ///
 /// This exists because the object-bake optimisation found the bottleneck was
 /// nowhere near where it was assumed to be (see memory.md). Numbers here are
@@ -1226,7 +1226,7 @@ mod cost {
     /// re-emission changes the arithmetic: a scenery hit used to end the
     /// path immediately, and now casts a sun ray and keeps bouncing.
     ///
-    /// `cargo test --release interior_bake_cost -- --ignored --nocapture`
+    /// `cargo test --profile perf interior_bake_cost -- --ignored --nocapture`
     #[test]
     #[ignore = "timing benchmark, not a correctness check"]
     fn interior_bake_cost() {

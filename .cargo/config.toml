@@ -1,18 +1,20 @@
 [alias]
 build-plugins = "build --workspace --exclude engine"
 
+# sccache: shares compiled dependency artifacts across target dirs and
+# worktrees, so a second worktree's cold build hits the cache for the ~680
+# dependency crates. Install: `brew install sccache`.
+[build]
+rustc-wrapper = "sccache"
+# Parallel rustc front end (nightly). Our crate is 44k lines in one unit.
+# NB: a target-specific `rustflags` table *replaces* this one rather than
+# merging, so the wasm table below repeats it.
+rustflags = ["-Zthreads=8"]
+
 [target.wasm32-unknown-unknown]
 runner = "wasm-server-runner"
-rustflags = ["--cfg", "feature=\"opfs\""]
-
-# Enable max optimizations for dependencies, but not for our code:
-# From https://bevy-cheatbook.github.io/pitfalls/performance.html
-# Gives us better performance in dev without increasing compile times aside from the first build
-[profile.dev.package."*"]
-opt-level = 3
+# `--cfg feature="opfs"` keeps the OPFS storage paths on for every wasm build.
+rustflags = ["--cfg", "feature=\"opfs\"", "-Zthreads=8"]
 
 [profile.dev.package.objc2]
 debug-assertions = false
-
-# [target.'cfg(not(target_os = "macos"))']
-# rustflags = ["-Zcodegen-backend=cranelift"]

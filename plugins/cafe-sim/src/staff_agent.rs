@@ -16,7 +16,7 @@
 
 use bevy::prelude::*;
 use engine_api::ToonMat;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashSet;
 
 use crate::balance::{Balance, spawn_balance_loss_popup, spawn_balance_popup};
@@ -590,9 +590,9 @@ fn step_toward(
 }
 
 fn random_interior_target(anchor: &CafeAnchor) -> Vec3 {
-    let mut rng = rand::thread_rng();
-    let i = rng.gen_range(0..anchor.width());
-    let j = rng.gen_range(0..anchor.depth());
+    let mut rng = rand::rng();
+    let i = rng.random_range(0..anchor.width());
+    let j = rng.random_range(0..anchor.depth());
     anchor.above_floor(anchor.cell_local(i, j), STAFF_FLOAT)
 }
 
