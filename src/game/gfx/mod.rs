@@ -4,6 +4,7 @@ pub mod atmosphere;
 pub mod camera;
 pub mod crosshair;
 pub mod post_process;
+pub mod profiling;
 pub mod toon_material;
 
 use atmosphere::{AtmospherePlugin, sync_atmosphere_settings};
@@ -13,6 +14,7 @@ use camera::{
 };
 use crosshair::update_crosshair_display;
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings};
+use profiling::{GfxProfilingPlugin, run_effect_bench};
 
 use crate::editor::EditorMode;
 use crate::game::gfx::toon_material::{
@@ -90,10 +92,19 @@ impl Plugin for GfxPlugin {
         >::default());
         app.add_plugins(EdgeDetectionPlugin);
         app.add_plugins(AtmospherePlugin);
+        app.add_plugins(GfxProfilingPlugin);
 
+        // The benchmark's override has to be set before the uniforms that
+        // read it are built, or it would take effect a frame late — on the
+        // boundary between an A phase and a B phase.
         app.add_systems(
             Update,
-            (sync_edge_detection_settings, sync_atmosphere_settings).in_set(GfxSet::InGame),
+            (
+                run_effect_bench,
+                (sync_edge_detection_settings, sync_atmosphere_settings),
+            )
+                .chain()
+                .in_set(GfxSet::InGame),
         );
     }
 }

@@ -198,6 +198,8 @@ pub struct Panels<'w, 's> {
     pub gizmo_store: ResMut<'w, GizmoConfigStore>,
     pub edge_style: ResMut<'w, crate::game::gfx::post_process::EdgeStyle>,
     pub atmosphere: ResMut<'w, crate::game::gfx::atmosphere::AtmosphereStyle>,
+    pub bench: ResMut<'w, crate::game::gfx::profiling::EffectBench>,
+    pub gpu_timing: Res<'w, crate::game::gfx::profiling::GpuTimingSupport>,
     /// Frame rate for the status line, and the render app's per-pass GPU
     /// timings for the inspector's readout.
     pub diagnostics: Res<'w, DiagnosticsStore>,

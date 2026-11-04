@@ -51,6 +51,7 @@ use bevy::{
 use serde::{Deserialize, Serialize};
 
 use super::PostProcessPass;
+use super::profiling::{BenchEffect, EffectOverride};
 use super::toon_material::ToonLook;
 
 const SHADER_ASSET_PATH: &str = "shaders/atmosphere_post.wesl";
@@ -399,8 +400,12 @@ fn sun_on_screen(clip_from_world: Mat4, sun_dir: Vec3) -> (Vec2, f32) {
 pub fn sync_atmosphere_settings(
     style: Res<AtmosphereStyle>,
     look: Res<ToonLook>,
+    bench: Res<EffectOverride>,
     mut cameras: Query<(&mut AtmosphereSettings, &GlobalTransform, &Projection)>,
 ) {
+    // An A/B run forces one effect off without touching the authored style.
+    let fog_on = style.fog_enabled && !bench.suppressed(BenchEffect::Fog);
+    let rays_on = style.rays_enabled && !bench.suppressed(BenchEffect::GodRays);
     for (mut settings, transform, projection) in &mut cameras {
         let clip_from_view = projection.get_clip_from_view();
         let world_from_view = transform.to_matrix();
@@ -429,8 +434,8 @@ pub fn sync_atmosphere_settings(
                 .extend(style.rays_spread.max(0.0)),
             ray_color: ray_rgb.extend(style.rays_decay.clamp(0.0, 1.0)),
             flags: UVec4::new(
-                style.fog_enabled as u32,
-                style.rays_enabled as u32,
+                fog_on as u32,
+                rays_on as u32,
                 style.fog_steps,
                 style.rays_samples.clamp(1, MAX_RAY_SAMPLES),
             ),

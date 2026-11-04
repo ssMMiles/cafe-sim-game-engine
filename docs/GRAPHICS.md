@@ -545,11 +545,13 @@ Mac ([`WEB_PROFILING.md`](WEB_PROFILING.md)).
 
 `Time<Virtual>::set_max_delta(50 ms)` caps fixed-step catch-up after a hitch.
 
-**For live numbers, don't guess from this table**: the inspector's *GPU
-timings* section (nothing selected) lists every render pass in milliseconds
-from bevy's `RenderDiagnosticsPlugin`, which `src/lib.rs` adds explicitly.
-Note a value, toggle the effect, look again. Rows marked `ᶜ` are CPU encode
-times, which happens only where the adapter has no `TIMESTAMP_QUERY`.
+**For live numbers, don't guess from this table**: the inspector's
+*Performance* section (nothing selected) has a frame-time trace, an A/B
+measurement that prices one effect by switching it off and on, and per-pass
+GPU times where the adapter can produce them. Per-pass timings are empty on
+macOS — Metal has no `TIMESTAMP_QUERY_INSIDE_PASSES`, which is what bevy's
+spans need — so the A/B measurement is the one to use there.
+`docs/ATMOSPHERE.md` §7.
 
 ---
 

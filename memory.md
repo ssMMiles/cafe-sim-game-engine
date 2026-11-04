@@ -1273,11 +1273,20 @@ Dropping it (build-time trims) made every glTF spawn panic in
 Transform". Restored in the bevy feature list. rust-analyzer is told not to run cargo in
 this workspace (`.vscode/settings.json`) — the user doesn't hand-write code here.
 
-## mold on macOS — 4 November 2026
+## Linkers on macOS — 4 November 2026
 
-Not possible: brew's mold 3.0.0 emits ELF only and rejects Mach-O input; the macOS fork
-(sold) is discontinued. Apple's ld-1167 is already the fast linker; wasm links via
-rust-lld. Don't re-investigate unless a Linux native target appears.
+**mold**: not possible — brew's mold 3.0.0 emits ELF only and rejects Mach-O input; the
+macOS fork (sold) is discontinued. Only matters if a Linux native target appears.
+
+**lld: adopted, ~2x on the edit-rebuild loop.** `-Clink-arg=-fuse-ld=lld` in
+`[target.aarch64-apple-darwin]`. touch src/lib.rs + `cargo build`: Apple ld-27037 8.4-10.4 s
+(median ~9.2) vs Homebrew LLD 23.1.5 3.5-4.9 s (median ~4.1). I had previously written off
+the linker because Apple's new ld is "the fast one" — being faster than old ld64 doesn't make
+it faster than lld. **Requires `brew install lld`**; the flag rehashes every crate so each
+target dir pays one full rebuild. Verified plugin dylibs still dlopen + report ABI 13 (a
+linker change is exactly what could break the dylib plugin system). Note neither linker emits
+`LC_RPATH`: `cargo run` supplies `DYLD_FALLBACK_LIBRARY_PATH` for `bevy/dynamic_linking`, so a
+bare dlopen from outside cargo needs that env set — that is not an lld regression.
 
 ## Editor view toggles, world dropdown, placement names — 4 November 2026
 
@@ -1357,3 +1366,23 @@ default `WgpuSettingsPriority::Functionality` requests every adapter feature; wi
 `TIMESTAMP_QUERY` it silently reports CPU *encode* time instead, which the panel marks `ᶜ`.
 `AtmosphereStyle` is persisted per user next to `EdgeStyle`; fog arguably belongs in
 `EnvironmentData` (world.meta v7) once the look settles.
+
+## GPU timings don't work on macOS; A/B measurement instead — 4 November 2026
+
+Why the GPU timings panel was empty on macOS (verified in wgpu-hal 30.0.1
+`metal/adapter.rs` + bevy's `diagnostic/internal.rs`): bevy's `pass_span` writes timestamps
+*inside* the render pass → needs `TIMESTAMP_QUERY_INSIDE_PASSES`, which Metal doesn't set
+(Apple GPUs sample counters at stage boundaries only). And because `TIMESTAMP_QUERY` alone
+*is* set, wgpu creates a query set, so bevy's recorder takes the GPU path and never falls back
+to its CPU timings — result is nothing at all, not even `ᶜ` rows. `GpuTimingSupport`
+(`gfx/profiling.rs`, Arc<AtomicU8> mirrored from RenderStartup like `GpuBakeSupported`) now
+detects it and the panel explains instead of showing an empty table.
+
+Replacement that works anywhere: **A/B frame-time measurement** — 8 phases alternating the
+effect off/on, 20 warm-up frames discarded + 80 measured each, median delta with IQR spread,
+"no measurable cost" when inside the noise. Drives `EffectOverride` (read by the two sync
+systems) rather than `AtmosphereStyle`, so a run can't dirty editor_settings.json. Unit-tested
+by feeding synthetic frame times: recovers an injected 1.25 ms to within 0.05 ms despite
+periodic 25 ms spikes. Caveat documented: only sees cost while GPU-bound. Real per-pass GPU
+timing on macOS would need our own query set via `RenderPassDescriptor::timestamp_writes`
+(stage boundaries, which Metal does support) — noted as future work.

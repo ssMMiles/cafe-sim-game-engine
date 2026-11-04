@@ -7,7 +7,7 @@
 //! one [`ScriptEdit::SetProps`] when the user stops interacting, because a
 //! commit re-hydrates the binding and resets the plugin's runtime state.
 
-use bevy::diagnostic::DiagnosticsStore;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::egui;
 use engine_api::{PropDef, PropValue, ScriptBinding, ScriptProp};
@@ -19,6 +19,7 @@ use crate::editor::history::{Change, MergeKey};
 use crate::editor::prefab_edit::PrefabAction;
 use crate::game::gfx::atmosphere::{AtmosphereStyle, MAX_RAY_SAMPLES};
 use crate::game::gfx::post_process::EdgeStyle;
+use crate::game::gfx::profiling::{BenchEffect, EffectBench, GpuTimingSupport};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -960,7 +961,12 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
 
     edges(ui, &mut panels.edge_style);
     atmosphere(ui, &mut panels.atmosphere);
-    gpu_timings(ui, &panels.diagnostics);
+    performance(
+        ui,
+        &panels.diagnostics,
+        &mut panels.bench,
+        &panels.gpu_timing,
+    );
 
     if env != before {
         // The curve is a display setting — the shaders read it straight from
@@ -1255,77 +1261,213 @@ fn atmosphere(ui: &mut egui::Ui, style: &mut ResMut<AtmosphereStyle>) {
     style.set_if_neq(s);
 }
 
-/// Per-pass GPU time, straight from bevy's render diagnostics.
+/// Frame cost: a frame-time trace, an A/B measurement of one effect, and
+/// per-pass GPU times where the adapter can produce them.
 ///
-/// This is how to price an effect: note the number, toggle the effect, look
-/// again. Each pass is timed on the GPU with timestamp queries; where the
-/// adapter has none, bevy falls back to CPU *encode* time, which is not the
-/// same thing — the heading says which is on show.
-fn gpu_timings(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
-    egui::CollapsingHeader::new("GPU timings")
+/// `docs/ATMOSPHERE.md` §7 explains which of these to trust when.
+fn performance(
+    ui: &mut egui::Ui,
+    diagnostics: &DiagnosticsStore,
+    bench: &mut ResMut<EffectBench>,
+    support: &GpuTimingSupport,
+) {
+    egui::CollapsingHeader::new("Performance")
         .default_open(false)
         .show(ui, |ui| {
-            // `render/<pass>/elapsed_gpu`, as recorded by `pass_span`.
-            let mut rows: Vec<(String, f64, bool)> = diagnostics
-                .iter()
-                .filter_map(|d| {
-                    let path = d.path().as_str();
-                    let rest = path.strip_prefix("render/")?;
-                    let (name, field) = rest.rsplit_once('/')?;
-                    let gpu = match field {
-                        "elapsed_gpu" => true,
-                        "elapsed_cpu" => false,
-                        _ => return None,
-                    };
-                    Some((name.replace('/', " › "), d.smoothed()?, gpu))
-                })
-                .collect();
+            frame_time_chart(ui, diagnostics);
+            ui.add_space(4.0);
+            ab_measurement(ui, bench);
+            ui.add_space(4.0);
+            gpu_timings(ui, diagnostics, support);
+        });
+}
 
-            if rows.is_empty() {
-                ui.weak("No render diagnostics yet — they land a few frames in.");
-                return;
+/// The last ~120 frames as a filled trace, with the median marked.
+///
+/// A chart rather than a number because the thing you need to know about
+/// frame time is its *shape*: a steady 9 ms and a 6 ms average with a 40 ms
+/// spike every second feel nothing alike, and read identically as a mean.
+fn frame_time_chart(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
+    let Some(diagnostic) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FRAME_TIME) else {
+        ui.weak("No frame-time diagnostic.");
+        return;
+    };
+    let samples: Vec<f32> = diagnostic.values().map(|v| *v as f32).collect();
+    if samples.len() < 2 {
+        ui.weak("Collecting frames…");
+        return;
+    }
+
+    let peak = samples.iter().copied().fold(f32::MIN, f32::max);
+    let mut sorted = samples.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    // Headroom so the trace never touches the top of its box.
+    let top = (peak * 1.15).max(1.0);
+
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
+
+    let x_of =
+        |i: usize| rect.left() + rect.width() * (i as f32 / (samples.len() - 1).max(1) as f32);
+    let y_of = |ms: f32| rect.bottom() - rect.height() * (ms / top).clamp(0.0, 1.0);
+
+    // Median line first, so the trace draws over it.
+    let median_y = y_of(median);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), median_y),
+            egui::pos2(rect.right(), median_y),
+        ],
+        egui::Stroke::new(1.0, visuals.weak_text_color().gamma_multiply(0.6)),
+    );
+    painter.add(egui::Shape::line(
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, ms)| egui::pos2(x_of(i), y_of(*ms)))
+            .collect(),
+        egui::Stroke::new(1.0, visuals.text_color()),
+    ));
+
+    ui.horizontal(|ui| {
+        ui.monospace(format!("{median:.2} ms median"));
+        ui.weak(format!(
+            "· peak {peak:.1} · {:.0} fps",
+            1000.0 / median.max(1e-3)
+        ));
+    });
+}
+
+/// Switch one effect off and on for a few hundred frames and compare the
+/// frame times. Works without GPU timers, which is the point.
+fn ab_measurement(ui: &mut egui::Ui, bench: &mut ResMut<EffectBench>) {
+    if let Some(run) = bench.running() {
+        let effect = run.effect();
+        let progress = run.progress();
+        ui.horizontal(|ui| {
+            ui.label(format!("Measuring {}…", effect.label()));
+            if ui.small_button("Cancel").clicked() {
+                bench.cancel();
             }
+        });
+        ui.add(egui::ProgressBar::new(progress).desired_height(6.0));
+        ui.weak("Hold the camera still and don't resize the viewport.");
+        return;
+    }
 
-            // A pass that reports GPU time has a CPU row too; the GPU one is
-            // what anyone pricing an effect wants, so drop the duplicate.
-            let timed_on_gpu: std::collections::HashSet<String> = rows
+    ui.horizontal(|ui| {
+        ui.label("A/B measure").on_hover_text(
+            "Switches the effect off and on for a few hundred frames and \
+             compares frame times. Only sees a cost while the frame is \
+             GPU-bound, so it reports the noise alongside the result.",
+        );
+        for effect in BenchEffect::ALL {
+            if ui.small_button(effect.label()).clicked() {
+                bench.start(effect);
+            }
+        }
+    });
+
+    let Some(result) = bench.last else {
+        return;
+    };
+    let delta = result.delta_ms();
+    if result.significant() {
+        let share = if result.with_ms > 1e-3 {
+            100.0 * delta / result.with_ms
+        } else {
+            0.0
+        };
+        ui.colored_label(
+            egui::Color32::from_rgb(140, 200, 255),
+            format!(
+                "{}: {delta:+.2} ms/frame ({share:+.0}% of {:.2} ms)",
+                result.effect.label(),
+                result.with_ms
+            ),
+        );
+    } else {
+        ui.weak(format!(
+            "{}: no measurable cost ({delta:+.2} ms, inside the noise)",
+            result.effect.label()
+        ));
+    }
+    ui.weak(format!(
+        "on {:.2} ±{:.2} · off {:.2} ±{:.2} · {} frames each",
+        result.with_ms,
+        result.with_spread,
+        result.without_ms,
+        result.without_spread,
+        result.samples
+    ));
+}
+
+/// Per-pass GPU time from bevy's render diagnostics, where the adapter can
+/// produce it. Note a number, toggle the effect, look again.
+fn gpu_timings(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore, support: &GpuTimingSupport) {
+    ui.separator();
+    ui.weak(support.explain());
+
+    // `render/<pass>/elapsed_gpu`, as recorded by `pass_span`.
+    let mut rows: Vec<(String, f64, bool)> = diagnostics
+        .iter()
+        .filter_map(|d| {
+            let path = d.path().as_str();
+            let rest = path.strip_prefix("render/")?;
+            let (name, field) = rest.rsplit_once('/')?;
+            let gpu = match field {
+                "elapsed_gpu" => true,
+                "elapsed_cpu" => false,
+                _ => return None,
+            };
+            Some((name.replace('/', " › "), d.smoothed()?, gpu))
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return;
+    }
+
+    // A pass that reports GPU time has a CPU row too; the GPU one is what
+    // anyone pricing an effect wants, so drop the duplicate.
+    let timed_on_gpu: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|(_, _, gpu)| *gpu)
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    rows.retain(|(name, _, gpu)| *gpu || !timed_on_gpu.contains(name));
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    if rows.iter().any(|(_, _, gpu)| !gpu) {
+        ui.weak("ᶜ = CPU encode time, not GPU time.");
+    }
+    egui::Grid::new("gpu_timings")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            let total: f64 = rows
                 .iter()
                 .filter(|(_, _, gpu)| *gpu)
-                .map(|(name, _, _)| name.clone())
-                .collect();
-            rows.retain(|(name, _, gpu)| *gpu || !timed_on_gpu.contains(name));
-            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-            let any_cpu = rows.iter().any(|(_, _, gpu)| !gpu);
-            ui.weak(if any_cpu {
-                "ms per pass. ᶜ = CPU encode time (no GPU timer on this adapter)."
-            } else {
-                "ms per pass, measured on the GPU."
-            });
-            egui::Grid::new("gpu_timings")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    let total: f64 = rows
-                        .iter()
-                        .filter(|(_, _, gpu)| *gpu)
-                        .map(|(_, v, _)| v)
-                        .sum();
-                    for (name, value, gpu) in &rows {
-                        ui.label(if *gpu {
-                            name.clone()
-                        } else {
-                            format!("{name} ᶜ")
-                        });
-                        ui.monospace(format!("{value:.3}"));
-                        ui.end_row();
-                    }
-                    if total > 0.0 {
-                        ui.strong("total (GPU)");
-                        ui.monospace(format!("{total:.3}"));
-                        ui.end_row();
-                    }
+                .map(|(_, v, _)| v)
+                .sum();
+            for (name, value, gpu) in &rows {
+                ui.label(if *gpu {
+                    name.clone()
+                } else {
+                    format!("{name} ᶜ")
                 });
+                ui.monospace(format!("{value:.3}"));
+                ui.end_row();
+            }
+            if total > 0.0 {
+                ui.strong("total (GPU)");
+                ui.monospace(format!("{total:.3}"));
+                ui.end_row();
+            }
         });
 }
 

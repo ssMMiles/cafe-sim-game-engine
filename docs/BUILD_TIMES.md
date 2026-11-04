@@ -162,14 +162,32 @@ bevy = { version = "0.20", default-features = false, features = [
   `--release` too, which costs runtime (no LTO across bevy) rather than
   build time — move it to a `dev` feature or `cargo run --features
   bevy/dynamic_linking` when a release native binary matters.
-- Linker: macOS already uses Apple's new `ld` (ld-1167), which is the fast
-  one. **mold cannot be used on macOS at all** (checked 2026-11-04 with
-  brew's mold 3.0.0: it only emits ELF, rejects Mach-O objects as "unknown
-  file type"; its macOS fork `sold` was discontinued). The wasm build links
-  with rustc's bundled `rust-lld` regardless. mold only matters if a Linux
-  native target appears (then a `[target.x86_64-unknown-linux-gnu]`
-  `-C link-arg=-fuse-ld=mold` rustflag). `split-debuginfo = "unpacked"` is the
-  macOS default already.
+- **Linker: lld, applied 2026-11-04.** `-Clink-arg=-fuse-ld=lld` in the
+  `[target.aarch64-apple-darwin]` table. Measured on this project, `touch
+  src/lib.rs` then `cargo build`:
+
+  | Linker | Samples (s) | Median |
+  |--------|-------------|--------|
+  | Apple `ld-27037` (Xcode 26.5) | 8.43, 8.94, 9.51, 10.38 | ~9.2 s |
+  | Homebrew LLD 23.1.5 | 3.53, 3.59, 3.67, 3.85, 4.22, 4.44, 4.61, 4.88 | ~4.1 s |
+
+  So the edit-rebuild loop roughly halves. This was worth re-testing even
+  though Apple's new `ld` is itself the "fast" linker — being faster than
+  the *old* ld64 did not make it faster than lld here. Verified after the
+  switch: 174 tests link and pass, the plugin dylibs still `dlopen` and
+  report the right ABI version (checked directly, since a linker is exactly
+  the thing that could break the dylib plugin system).
+
+  Caveats: **`brew install lld` is now required** for any native build, the
+  flag rehashes every crate so each target dir pays one full rebuild, and
+  the binary still relies on `cargo run` setting `DYLD_FALLBACK_LIBRARY_PATH`
+  for `bevy/dynamic_linking` (no `LC_RPATH` is emitted, with either linker).
+- **mold cannot be used on macOS at all** (checked 2026-11-04 with brew's
+  mold 3.0.0: it only emits ELF, rejects Mach-O objects as "unknown file
+  type"; its macOS fork `sold` was discontinued). It only matters if a Linux
+  native target appears. The wasm build links with rustc's bundled
+  `rust-lld` regardless. `split-debuginfo = "unpacked"` is the macOS default
+  already.
 
 ## 4. Stop rebuilding the same bevy over and over
 

@@ -190,31 +190,65 @@ things in.
 
 ## 7. Measuring what it costs
 
-Inspector → nothing selected → **GPU timings** lists each render pass with
-its time in milliseconds, worst first. To price an effect: note the number,
-toggle the effect, look again.
+Inspector → nothing selected → **Performance**. Three things, because no
+single one works everywhere.
 
-This comes from bevy's `RenderDiagnosticsPlugin`, which brackets each
-recorded span in GPU timestamp queries. Bevy only adds it under
-`tracing-tracy`, so `src/lib.rs` adds it explicitly; our two passes are
-wrapped in `pass_span`s ("edge detection", "atmosphere") and bevy's own
-passes come with theirs, so the list covers the whole frame.
+### Frame-time trace
 
-Two caveats worth knowing:
+The last ~120 frames drawn as a trace, with the median marked. A chart
+rather than a number because the shape is the point: a steady 9 ms and a
+6 ms average with a 40 ms spike every second read identically as a mean and
+feel nothing alike.
 
-- Timestamps need the `TIMESTAMP_QUERY` wgpu feature. Bevy's default
-  `WgpuSettingsPriority::Functionality` requests every feature the adapter
-  supports, so this is present on Metal/Vulkan/DX12. Where it is missing,
-  bevy falls back to CPU *encode* time, which measures how long it took to
-  record the commands, not to run them. The panel marks those rows `ᶜ` and
-  changes its heading, because the two are not comparable.
-- The numbers are smoothed over recent frames, so give them a second to
-  settle after a toggle.
+### A/B measurement
+
+Pick an effect and it is switched off and on for a few hundred frames
+(8 phases, 20 warm-up frames discarded then 80 measured each), comparing
+the frame times. Reports the median delta with the interquartile spread of
+each phase, and says "no measurable cost" when the delta is inside that
+noise.
+
+This is the one that works on macOS. Three things to know:
+
+- It measures **frame time**, so it only sees a GPU cost while the frame is
+  GPU-bound. If the frame is CPU-bound, a real GPU cost reads as zero. The
+  spread is printed so you can judge.
+- Hold the camera still and don't resize the viewport while it runs — both
+  change the cost of the very thing being measured.
+- In the editor the 3D view is only as big as the viewport tab, so a
+  fullscreen-cost effect measures smaller here than it does in gameplay.
+
+It drives the effect through `EffectOverride`, not `AtmosphereStyle`, so a
+measurement never touches your authored settings or
+`editor_settings.json`. The phase machine is unit-tested: it recovers an
+injected 1.25 ms cost to within 0.05 ms through spiky synthetic frame
+times, discards the warm-up frames, and reports pure noise as
+insignificant.
+
+### Per-pass GPU times
+
+Each render pass with its GPU time in milliseconds, from bevy's
+`RenderDiagnosticsPlugin` (bevy only adds it under `tracing-tracy`, so
+`src/lib.rs` adds it explicitly; our two passes are wrapped in `pass_span`s
+named "edge detection" and "atmosphere").
+
+**This list is empty on macOS, by design of the hardware.** Bevy writes its
+timestamps *inside* the render pass, which needs
+`TIMESTAMP_QUERY_INSIDE_PASSES`. Apple GPUs sample counters at stage
+boundaries only, so Metal reports `TIMESTAMP_QUERY` (enough for wgpu to
+create a query set) but not the inside-passes variant — and because a query
+set exists, bevy's recorder never falls back to its CPU timings either.
+Nothing is reported at all. The panel detects this (`GpuTimingSupport`) and
+says so instead of showing an empty table.
+
+So: on Windows/Linux (DX12, Vulkan) this is the precise answer; on macOS
+use the A/B measurement, or take a GPU capture in Xcode for a real
+per-pass breakdown.
 
 The god-ray cost should scale close to linearly with **Samples**: it is
 `samples` depth taps per pixel and almost nothing else. Halving the slider
-should roughly halve the pass. If it doesn't, the pass is bound by something
-else — bandwidth on the full-screen read/write, most likely.
+should roughly halve the pass. If it doesn't, the pass is bound by
+something else — bandwidth on the full-screen read/write, most likely.
 
 ## 8. Open ends
 
@@ -229,3 +263,7 @@ else — bandwidth on the full-screen read/write, most likely.
 - **Fog and the edge fade are tuned separately** and can disagree — the
   outline fade is in `EdgeStyle`, in metres, and does not know the fog
   exists.
+- **Per-pass GPU timing on macOS** would need our own query set with
+  `RenderPassDescriptor::timestamp_writes` (stage-boundary sampling, which
+  Metal *does* support) plus a resolve and readback, rather than bevy's
+  `pass_span`. Worth doing only if the A/B measurement stops being enough.

@@ -37,6 +37,20 @@ rustc-wrapper = "sccache"
 # merging, so the wasm table below repeats it.
 rustflags = ["-Zthreads=8"]
 
+# LLVM lld instead of Apple's ld. Measured 2026-11-04 on this project:
+# touch src/lib.rs + `cargo build` went 8.4-10.4 s -> 4.2-4.9 s, i.e. the
+# edit-rebuild loop roughly halved. (Apple's ld-27037 is the new fast
+# linker and mold can't emit Mach-O at all -- lld is the only alternative
+# that works here, and it still wins.)
+#
+# **Requires `brew install lld`**; without it every native link fails with
+# "unable to find library -lld". Repeats `-Zthreads=8` because a
+# target-specific table *replaces* `[build].rustflags` rather than merging.
+# `-fuse-ld=lld` resolves through PATH, so no machine-specific path.
+# Changing this line rehashes every crate: one full rebuild per target dir.
+[target.aarch64-apple-darwin]
+rustflags = ["-Zthreads=8", "-Clink-arg=-fuse-ld=lld"]
+
 [target.wasm32-unknown-unknown]
 runner = "wasm-server-runner"
 # `--cfg feature="opfs"` keeps the OPFS storage paths on for every wasm

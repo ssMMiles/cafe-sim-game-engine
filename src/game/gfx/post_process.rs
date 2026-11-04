@@ -52,6 +52,8 @@ use bevy::{
 
 use serde::{Deserialize, Serialize};
 
+use super::profiling::{BenchEffect, EffectOverride};
+
 const SHADER_ASSET_PATH: &str = "shaders/edge_detection_post.wesl";
 
 pub struct EdgeDetectionPlugin;
@@ -391,8 +393,11 @@ pub fn toggle_edge_detection(
 pub fn sync_edge_detection_settings(
     user_settings: Res<crate::settings::UserSettings>,
     style: Res<EdgeStyle>,
+    bench: Res<EffectOverride>,
     mut cameras: Query<(&mut EdgeDetectionSettings, &Projection)>,
 ) {
+    let enabled =
+        user_settings.edge_detection_enabled && !bench.suppressed(BenchEffect::EdgeDetection);
     for (mut settings, projection) in &mut cameras {
         // The depth term assumes reverse-Z perspective (`near / distance`).
         let Projection::Perspective(perspective) = projection else {
@@ -401,7 +406,7 @@ pub fn sync_edge_detection_settings(
         settings.set_if_neq(EdgeDetectionSettings::new(
             &style,
             perspective.near,
-            user_settings.edge_detection_enabled,
+            enabled,
         ));
     }
 }
