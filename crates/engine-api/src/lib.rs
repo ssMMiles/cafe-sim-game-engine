@@ -53,7 +53,10 @@ pub use toon_material::{
 /// - 12: [`UserSettings`] lost `edge_depth_sensitivity` /
 ///   `edge_normal_sensitivity`. The outline look is the host's `EdgeStyle`
 ///   now; the duplicate pair overrode the camera's values on a timing whim.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 12;
+/// - 13: [`UserSettings`] lost `outline_visible` with the inert
+///   `bevy_mod_outline` hover-outline system it belonged to (the screen-space
+///   edge pass is the only outline now).
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 13;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -494,7 +497,6 @@ pub struct UserSettings {
     pub movement_mode: MovementMode,
     pub mouse_sensitivity: f32,
     pub movement_speed: f32,
-    pub outline_visible: bool,
     pub camera_view: CameraView,
     pub third_person_distance: f32,
     pub edge_detection_enabled: bool,
@@ -509,7 +511,6 @@ impl Default for UserSettings {
             movement_mode: MovementMode::default(),
             mouse_sensitivity: 0.002,
             movement_speed: 0.5,
-            outline_visible: false,
             camera_view: CameraView::FirstPerson,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
@@ -533,11 +534,6 @@ impl UserSettings {
                 name: "Crosshair",
                 keybind: "Shift+T",
                 current_value: if self.crosshair_visible { "ON" } else { "OFF" }.to_string(),
-            },
-            SettingInfo {
-                name: "Outline",
-                keybind: "Shift+O",
-                current_value: if self.outline_visible { "ON" } else { "OFF" }.to_string(),
             },
             SettingInfo {
                 name: "Movement Mode",
@@ -584,10 +580,6 @@ impl UserSettings {
 
     pub fn toggle_crosshair(&mut self) {
         self.crosshair_visible = !self.crosshair_visible;
-    }
-
-    pub fn toggle_outline(&mut self) {
-        self.outline_visible = !self.outline_visible;
     }
 
     pub fn toggle_camera_view(&mut self) {

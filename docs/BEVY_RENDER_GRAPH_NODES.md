@@ -1,5 +1,10 @@
 # Bevy Render Graph Node Reference
 
+> **Obsolete (2026-11-04).** Written for Bevy 0.17's render graph (`ViewNode`,
+> `add_render_graph_edges`, `Node3d` labels), which Bevy 0.19 removed: passes are
+> now systems in the `Core3d` schedule. The paths and lighting model it
+> describes are gone too. Current pipeline: [`GRAPHICS.md`](GRAPHICS.md).
+
 This document provides a comprehensive reference for all built-in nodes in Bevy's render graph. This complements [RENDER_GRAPH.md](RENDER_GRAPH.md), which explains how to extend the render graph for your own needs.
 
 ## Table of Contents

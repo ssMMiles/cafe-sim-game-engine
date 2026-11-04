@@ -66,7 +66,6 @@ pub fn run() {
                 ..default()
             }),
     )
-    // .add_plugins(OutlinePlugin)
     .add_plugins(PhysicsPlugins::default())
     .add_plugins(storage::StoragePlugin)
     .add_plugins(settings::SettingsPlugin)

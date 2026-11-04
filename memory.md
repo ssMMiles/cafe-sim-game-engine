@@ -1306,3 +1306,31 @@ geometry. `EdgeStyle` is persisted per user in `editor_settings.json` (user's ch
 `editor/ui/layout.rs` became `persist.rs`, entries parse independently). An *unrendered*
 `DockState` has infinite rects that JSON writes as null and can't read back — real saves are
 finite. Open: terrain skirt zero normals in the prepass.
+
+## Graphics overview docs — 4 November 2026
+
+`docs/GRAPHICS.md` (technical, file:line) + `docs/GRAPHICS_OVERVIEW.md` (plain language). Found
+while surveying, all verified in code: `VolumetricFog` is a no-op (bevy strips it without a
+`VolumetricLight`; no `FogVolume`s exist); `DistanceFog` reaches only StandardMaterial meshes
+(no fog in our shaders); `outline.rs` inert; Shift+L misses toon materials created while unlit;
+terrain LOD1+ starts at 500 m, beyond the load ring; `Tonemapping::Linear` does clamp negatives
+(`max(in.rgb, 0)` at the top of bevy's `tone_mapping`). RENDER_GRAPH.md / BEVY_RENDER_GRAPH_NODES.md
+got obsolete banners. §18 of GRAPHICS.md lists stale code comments (not fixed).
+
+## Fog costs nothing today; hover outlines deleted — 4 November 2026
+
+Removed `gfx/outline.rs`, its `GfxSet::Running` registration, Shift+O and
+`UserSettings::outline_visible` (**ABI 13**). The edge pass is the only outline.
+
+Fog, read from bevy 0.20 source (not GPU-measured): **both components are free right now.**
+`extract_volumetric_fog` early-returns and strips `VolumetricFog` off render views when no
+`VolumetricLight` exists, so all three `prepare_*` systems and the pass match nothing — including
+`prepare_view_depth_textures_for_volumetric_fog`, which queries the *render* world, so the
+depth-usage bump I claimed in GRAPHICS.md §17 never happens (corrected). `DistanceFog` is one
+~96-byte uniform write per frame + binding 13 in the view layout; our shaders never read it.
+Adding distance fog to the toon/terrain shaders is tens of ALU — the real questions are
+before-or-after the toon curve, and leaving the 900 m sky dome unfogged. Bevy's volumetric fog
+raymarches 64 steps sampling a **directional shadow map**, which `BakedSun` doesn't have
+(`shadow_maps_enabled: false`); enabling it means real-time cascade passes over a fully baked
+world. If we want shafts: depth-buffer radial god rays as a post-process next to the edge pass.
+See `docs/GRAPHICS.md` §9.1.

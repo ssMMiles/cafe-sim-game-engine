@@ -2,7 +2,6 @@ use bevy::{pbr::ExtendedMaterial, prelude::*};
 
 pub mod camera;
 pub mod crosshair;
-pub mod outline;
 pub mod post_process;
 pub mod toon_material;
 
@@ -11,7 +10,6 @@ use camera::{
     resize_render_texture_sprite,
 };
 use crosshair::update_crosshair_display;
-use outline::update_outline;
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings};
 
 use crate::editor::EditorMode;
@@ -77,7 +75,6 @@ impl Plugin for GfxPlugin {
         >::default());
         app.add_plugins(EdgeDetectionPlugin);
 
-        app.add_systems(Update, update_outline.in_set(GfxSet::Running));
         app.add_systems(Update, sync_edge_detection_settings.in_set(GfxSet::InGame));
     }
 }

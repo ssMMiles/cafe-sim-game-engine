@@ -1,5 +1,10 @@
 # Bevy Render Graph Guide
 
+> **Obsolete (2026-11-04).** Written for Bevy 0.17's render graph (`ViewNode`,
+> `add_render_graph_edges`, `Node3d` labels), which Bevy 0.19 removed: passes are
+> now systems in the `Core3d` schedule. The paths and lighting model it
+> describes are gone too. Current pipeline: [`GRAPHICS.md`](GRAPHICS.md).
+
 This document explains how the Bevy render graph works, how to extend it, and optimization strategies for our toon shader and edge detection implementation.
 
 ## Table of Contents

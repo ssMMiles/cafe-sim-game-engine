@@ -309,7 +309,6 @@ impl Plugin for EditorPlugin {
                 toggle_light_gizmos,
                 toggle_lightmap_mode,
                 crate::game::gfx::crosshair::toggle_crosshair,
-                crate::game::gfx::outline::toggle_outline,
                 crate::game::gfx::post_process::toggle_edge_detection,
             )
                 .in_set(EditorSet::InGame)
