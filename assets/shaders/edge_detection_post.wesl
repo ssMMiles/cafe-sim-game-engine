@@ -1,79 +1,126 @@
+// Outline post-process: draws a line wherever the depth or normal prepass
+// breaks. docs/EDGE_DETECTION.md explains every term and knob.
+
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
-// Settings for edge detection
+// Mirrors `EdgeDetectionSettings` (post_process.rs) field for field;
+// `edge_settings_match_the_shader_struct` checks the size.
 struct EdgeSettings {
-    edge_thickness: f32,
-    depth_sensitivity: f32,
-    normal_sensitivity: f32,
     edge_color: vec4<f32>,
+    depth_threshold: f32,
+    grazing_bias: f32,
+    // 1 − cos(crease angle).
+    normal_threshold: f32,
+    softness: f32,
+    thickness: f32,
+    fade_start: f32,
+    fade_end: f32,
+    near: f32,
     enabled: u32,
 }
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var depth_texture: texture_depth_multisampled_2d;
 @group(0) @binding(2) var normal_texture: texture_multisampled_2d<f32>;
-@group(0) @binding(3) var texture_sampler: sampler;
-@group(0) @binding(4) var<uniform> settings: EdgeSettings;
+@group(0) @binding(3) var<uniform> settings: EdgeSettings;
 
+// Sample 0 of the multisampled prepass. Every pixel reads the same sample
+// position, so the offset is uniform across the screen and the plane
+// property below still holds.
 fn load_depth(pixel: vec2<i32>) -> f32 {
     return textureLoad(depth_texture, pixel, 0);
 }
 
 fn load_normal(pixel: vec2<i32>) -> vec3<f32> {
-    let normal_sample = textureLoad(normal_texture, pixel, 0);
-    // Prepass normals are packed from [-1, 1] to [0, 1]
-    return normalize(normal_sample.xyz * 2.0 - vec3<f32>(1.0));
+    // Prepass normals are world space, packed from [-1, 1] to [0, 1].
+    let packed = textureLoad(normal_texture, pixel, 0).xyz;
+    return normalize(packed * 2.0 - vec3<f32>(1.0));
+}
+
+// Depth discontinuity across `a – c – b` (three pixels on a line), relative
+// to the threshold: ≥ 1 draws a line.
+//
+// Reverse-Z depth is `near / distance`, which is *affine in screen space
+// across any plane*, so `a + b − 2c` is exactly zero on a flat surface at
+// any viewing angle and only becomes non-zero where the surface breaks.
+// Dividing by the nearest of the three makes it distance-independent: a
+// step from distance z to z' reads as `1 − z/z'`.
+//
+// The threshold grows with the flatter side's own slope (`grazing_bias`):
+// a depth change no bigger than what the surface already does from pixel
+// to pixel is a bump seen edge-on, not an outline.
+fn depth_strength(a: f32, c: f32, b: f32) -> f32 {
+    let nearest = max(c, max(a, b));
+    if (nearest <= 0.0) {
+        return 0.0; // all three are sky (cleared depth)
+    }
+    let step = abs(a + b - 2.0 * c) / nearest;
+    let slope = min(abs(a - c), abs(b - c)) / nearest;
+    return step / (settings.depth_threshold + settings.grazing_bias * slope);
+}
+
+fn in_bounds(pixel: vec2<i32>, dims: vec2<i32>) -> bool {
+    return all(pixel >= vec2<i32>(0)) && all(pixel < dims);
 }
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let dims = vec2<i32>(textureDimensions(screen_texture));
-    let pixel_coords = vec2<i32>(in.position.xy);
+    let pixel = vec2<i32>(in.position.xy);
+    let base = textureLoad(screen_texture, pixel, 0);
 
-    // Sample center values once and compare neighbors against them.
-    // This is more stable than Sobel over interpolated normals and reduces
-    // triangle artifacts that move as the camera rotates.
-    let center_depth = load_depth(pixel_coords);
-    let center_normal = load_normal(pixel_coords);
+    let radius = max(1, i32(round(settings.thickness)));
+    let c = load_depth(pixel);
+    let n = load_normal(pixel);
 
-    let pixel_radius = max(1, i32(round(settings.edge_thickness)));
+    // The four lines through the pixel: horizontal, vertical, both diagonals.
+    var axes = array<vec2<i32>, 4>(
+        vec2<i32>(1, 0),
+        vec2<i32>(0, 1),
+        vec2<i32>(1, 1),
+        vec2<i32>(1, -1),
+    );
 
-    var max_depth_delta = 0.0;
-    var max_normal_delta = 0.0;
+    var strength = 0.0;
+    var nearest = c;
+    for (var i = 0; i < 4; i++) {
+        let offset = axes[i] * radius;
+        let pa = pixel + offset;
+        let pb = pixel - offset;
+        let a_ok = in_bounds(pa, dims);
+        let b_ok = in_bounds(pb, dims);
 
-    for (var y: i32 = -1; y <= 1; y++) {
-        for (var x: i32 = -1; x <= 1; x++) {
-            if (x == 0 && y == 0) {
-                continue;
-            }
+        // The second difference needs both sides. At the screen border it
+        // would degenerate into a first difference, which is non-zero on
+        // every sloped plane — so that line is skipped there instead.
+        if (a_ok && b_ok) {
+            let a = load_depth(pa);
+            let b = load_depth(pb);
+            strength = max(strength, depth_strength(a, c, b));
+            nearest = max(nearest, max(a, b));
+        }
 
-            let offset = vec2<i32>(x, y) * pixel_radius;
-            let sample_coords = clamp(pixel_coords + offset, vec2<i32>(0), dims - vec2<i32>(1));
-
-            let sample_depth = load_depth(sample_coords);
-            let sample_normal = load_normal(sample_coords);
-
-            max_depth_delta = max(max_depth_delta, abs(sample_depth - center_depth));
-
-            // Angular difference proxy: 0 for aligned normals, 1 for orthogonal,
-            // 2 for opposite.
-            let normal_delta = 1.0 - dot(center_normal, sample_normal);
-            max_normal_delta = max(max_normal_delta, normal_delta);
+        // Crease: angle between neighbouring normals, as 1 − cos.
+        if (a_ok) {
+            strength = max(strength, (1.0 - dot(n, load_normal(pa))) / settings.normal_threshold);
+        }
+        if (b_ok) {
+            strength = max(strength, (1.0 - dot(n, load_normal(pb))) / settings.normal_threshold);
         }
     }
 
-    let depth_edge = max_depth_delta * settings.depth_sensitivity;
-    let normal_edge = max_normal_delta * settings.normal_sensitivity;
-    let edge_strength = max(depth_edge, normal_edge);
+    // A soft band around the threshold so an edge that hovers near it fades
+    // in and out instead of popping. Geometric antialiasing is FXAA's job:
+    // this pass runs before it.
+    let soft = max(settings.softness, 1e-3);
+    let edge = smoothstep(1.0 - soft, 1.0 + soft, strength);
 
-    // Gradient-based analytic AA: adapt the smoothstep ramp to ~1 screen pixel wide.
-    // dpdx/dpdy gives the rate-of-change of edge_strength across the current 2x2 pixel
-    // quad, letting us compute fractional coverage at the detected-edge boundary.
-    let gradient_len = length(vec2f(dpdx(edge_strength), dpdy(edge_strength)));
-    let half_width = max(gradient_len * 0.5, 0.01);
-    let threshold = 0.03;
-    let edge = smoothstep(threshold - half_width, threshold + half_width, edge_strength);
+    // Fade with the distance of the nearest surface in the neighbourhood,
+    // so a silhouette against the sky (cleared depth 0) fades with the
+    // object rather than vanishing on the sky side.
+    let distance = settings.near / max(nearest, 1e-9);
+    let fade = 1.0 - smoothstep(settings.fade_start, settings.fade_end, distance);
 
-    let base_color = textureSample(screen_texture, texture_sampler, in.uv);
-    return mix(base_color, settings.edge_color, edge);
+    let amount = edge * fade * settings.edge_color.a;
+    return vec4<f32>(mix(base.rgb, settings.edge_color.rgb, amount), base.a);
 }

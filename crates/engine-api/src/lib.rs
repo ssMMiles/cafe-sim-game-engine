@@ -50,7 +50,10 @@ pub use toon_material::{
 /// - 11: [`ToonShading`] carries the [`ToonCurve`], so the toon ramp is a
 ///   per-world setting rather than a constant compiled into the shaders.
 ///   The uniform grew a `vec4`, which every toon material shares.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 11;
+/// - 12: [`UserSettings`] lost `edge_depth_sensitivity` /
+///   `edge_normal_sensitivity`. The outline look is the host's `EdgeStyle`
+///   now; the duplicate pair overrode the camera's values on a timing whim.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 12;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -495,8 +498,6 @@ pub struct UserSettings {
     pub camera_view: CameraView,
     pub third_person_distance: f32,
     pub edge_detection_enabled: bool,
-    pub edge_depth_sensitivity: f32,
-    pub edge_normal_sensitivity: f32,
     pub physics_debug: bool,
     pub use_lightmap: bool,
 }
@@ -512,8 +513,6 @@ impl Default for UserSettings {
             camera_view: CameraView::FirstPerson,
             third_person_distance: 20.0,
             edge_detection_enabled: true,
-            edge_depth_sensitivity: 2.0,
-            edge_normal_sensitivity: 0.1,
             physics_debug: false,
             use_lightmap: true,
         }

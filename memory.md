@@ -1291,3 +1291,18 @@ rust-lld. Don't re-investigate unless a Linux native target appears.
 - Placement names come from `AssetCatalog::selected_index(&config)` (no extra field in
   `PlacementConfig`, whose `kind` has four writers) and go through `PlacedObject::unique_name`
   against loaded entities' display names. Duplicate uses it too. Prefab roots are left alone.
+
+## Edge detection review — 4 November 2026
+
+`docs/EDGE_DETECTION.md` is the reference. Found and fixed: (1) the depth term thresholded raw
+reverse-Z depth differences (`0.1·Δ/z²`) and was dead beyond ~2 m, so same-facing silhouettes
+(table top over floor from above) never drew. Now a relative second difference, which is zero on
+any plane. (2) `UserSettings.edge_*_sensitivity` (0.1) overwrote the camera's 1.5 on the sync's
+first run (first-run change detection), so the live crease threshold was ~46° or ~11° depending
+on timing. Removed from engine-api, **ABI 12**, and `EdgeStyle` is the single source. (3) The
+`dpdx` "AA" faded weak edges next to strong ones. (4) FXAA order was ambiguous; now
+`.before(fxaa)`. Tests: naga validation via import substitution, uniform size vs WGSL, plane/step
+geometry. `EdgeStyle` is persisted per user in `editor_settings.json` (user's choice over world.meta;
+`editor/ui/layout.rs` became `persist.rs`, entries parse independently). An *unrendered*
+`DockState` has infinite rects that JSON writes as null and can't read back — real saves are
+finite. Open: terrain skirt zero normals in the prepass.

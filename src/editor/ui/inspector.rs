@@ -16,6 +16,7 @@ use crate::editor::actions::EditorAction;
 use crate::editor::edits::{PlacedEdited, RespawnPlaced, ScriptEdit};
 use crate::editor::history::{Change, MergeKey};
 use crate::editor::prefab_edit::PrefabAction;
+use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -955,6 +956,8 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
         env.set_toon_curve(curve);
     });
 
+    edges(ui, &mut panels.edge_style);
+
     if env != before {
         // The curve is a display setting — the shaders read it straight from
         // the material uniform — so only a change to what the *bakers* read
@@ -987,6 +990,111 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
     if ui.button("Bake (Shift+B)").clicked() {
         panels.actions.write(EditorAction::Bake);
     }
+}
+
+/// The outline post-process (`EdgeStyle`). Knobs and failure modes:
+/// `docs/EDGE_DETECTION.md`.
+fn edges(ui: &mut egui::Ui, style: &mut ResMut<EdgeStyle>) {
+    ui.collapsing_header_default_open("Edges", |ui| {
+        ui.weak("Outline post-process (F2 toggles). Saved per user in editor_settings.json.");
+        let mut s = **style;
+        egui::Grid::new("edges").num_columns(2).show(ui, |ui| {
+            ui.label("Depth step").on_hover_text(
+                "Smallest jump in distance that draws a line, as 1 − near/far: \
+                 0.05 means the surface behind is 5% further away. Catches \
+                 silhouettes against surfaces facing the same way, like a table \
+                 top over the floor seen from above.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.depth_threshold)
+                    .speed(0.001)
+                    .range(0.001..=1.0),
+            );
+            ui.end_row();
+
+            ui.label("Grazing bias").on_hover_text(
+                "Raises the depth threshold by the surface's own depth slope, so \
+                 bumpy ground seen edge-on doesn't sprout lines. 0 = off.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.grazing_bias)
+                    .speed(0.01)
+                    .range(0.0..=10.0),
+            );
+            ui.end_row();
+
+            ui.label("Crease angle").on_hover_text(
+                "Smallest angle between neighbouring surface normals that draws a line.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.crease_angle)
+                    .speed(0.5)
+                    .range(1.0..=180.0)
+                    .suffix("°"),
+            );
+            ui.end_row();
+
+            ui.label("Softness").on_hover_text(
+                "How gradually a line fades in around the thresholds. 0 is a hard \
+                 cut, which pops as edges cross it.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.softness)
+                    .speed(0.005)
+                    .range(0.0..=0.99),
+            );
+            ui.end_row();
+
+            ui.label("Thickness").on_hover_text(
+                "Sample offset in pixels; lines are about twice this wide. Above \
+                 1, things thinner than the offset can be skipped.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.thickness)
+                    .speed(0.05)
+                    .fixed_decimals(0)
+                    .range(1.0..=8.0),
+            );
+            ui.end_row();
+
+            ui.label("Fade")
+                .on_hover_text("Lines fade out between these distances from the camera.");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut s.fade_start)
+                        .speed(1.0)
+                        .range(0.0..=2000.0)
+                        .suffix(" m"),
+                );
+                ui.label("to");
+                ui.add(
+                    egui::DragValue::new(&mut s.fade_end)
+                        .speed(1.0)
+                        .range(0.0..=2000.0)
+                        .suffix(" m"),
+                );
+            });
+            ui.end_row();
+
+            ui.label("Colour");
+            let [r, g, b, a] = s.color;
+            let mut rgba = egui::Rgba::from_rgba_unmultiplied(r, g, b, a);
+            if egui::color_picker::color_edit_button_rgba(
+                ui,
+                &mut rgba,
+                egui::color_picker::Alpha::OnlyBlend,
+            )
+            .changed()
+            {
+                s.color = rgba.to_rgba_unmultiplied();
+            }
+            ui.end_row();
+        });
+        if ui.button("Reset").clicked() {
+            s = EdgeStyle::default();
+        }
+        style.set_if_neq(s);
+    });
 }
 
 /// Direction *to* the sun as (azimuth, elevation) in degrees.

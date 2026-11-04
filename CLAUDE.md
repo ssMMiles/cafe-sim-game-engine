@@ -59,6 +59,7 @@ crates/engine-api/      # Shared crate linked by host AND plugin dylibs (stable 
 plugins/                # Dynamic plugin crates (dylibs): cafe-sim, example, example2
 projects/               # Project manifests: projects/{id}/project.toml (plugins, worlds, start_world)
 docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save system; EDITOR_UI_DESIGN.md — docked editor, phased;
+                        #   EDGE_DETECTION.md — outline post-process: the maths, knobs, symptoms;
                         #   WORLD_SHARING.md — zip bundles native → browser; BUILD_TIMES.md — why builds are slow
                         #   and a ranked, unmeasured list of trims/profile/flag changes to try)
 tools/                  # Dev tools: serve.py (no-cache static server for the web build), tint-check.mjs (WGSL through
@@ -88,14 +89,14 @@ src/
 │   ├── tool.rs             # EditorTool state (Select/Place/Terrain): 1/2/3, Shift+E, Shift+G, Esc cancels
 │   ├── ui/                 # egui chrome (EguiPrimaryContextPass, runs in PostUpdate)
 │   │   ├── mod.rs          #   EguiPlugin bootstrap, DockLayout, `Panels` SystemParam, status bar
-│   │   ├── layout.rs       #   Dock layout persistence: user-level editor_settings.json (cwd native /
-│   │   │                   #   OPFS key web), 1 s debounced save + flush on exit to menu; parse
-│   │   │                   #   failure falls back to the default layout
+│   │   ├── persist.rs      #   User-level editor_settings.json (dock layout + EdgeStyle; cwd native /
+│   │   │                   #   OPFS key web), 1 s debounced save + flush on exit to menu; each entry
+│   │   │                   #   parses on its own and falls back to its default
 │   │   ├── viewport.rs     #   TabViewer; viewport tab draws the render texture, fills ViewportInput
 │   │   ├── menu.rs         #   Menu bar (File/Edit/View/Tools/Plugins), toolbar (world dropdown),
 │   │   │                   #   New-world dialog
 │   │   ├── outliner.rs     #   Loaded placed entities: filter, select, focus, context menu
-│   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment when nothing selected
+│   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment + edges when nothing selected
 │   │   ├── tool_panel.rs   #   "Tool" tab: shows the active tool's settings (Select: none yet)
 │   │   ├── history_panel.rs #  "History" tab: undo/redo stacks, click an entry to jump
 │   │   ├── assets.rs       #   "Assets" tab: catalog by category (meshes/built-ins/prefabs/textures/audio),
@@ -146,7 +147,7 @@ src/
     │   │                #   resized to the viewport tab in the editor); Camera2d hosts PrimaryEguiContext
     │   ├── toon_material.rs  # Host side of ToonMaterial: shared resources, ToonLook (sun + toon curve)
     │   │                #   + sync systems for object and terrain materials
-    │   ├── post_process.rs   # Edge detection post-processing
+    │   ├── post_process.rs   # Edge detection post-process; `EdgeStyle` (inspector → Edges) → camera uniform
     │   ├── outline.rs
     │   └── crosshair.rs
     └── world/           # WorldPlugin - terrain, objects, baking, streaming
@@ -201,7 +202,7 @@ src/
 - A plugin can claim a *level* entity instead of spawning its own: register a script with `with_default_mesh(...)` and it appears in the editor's placement catalog as a one-click "mesh + binding" preset; the factory inserts a marker the plugin's systems look for. `cafe-sim`'s `cafe-shell` works this way, so the cafe shell is level geometry (collider + baked lightmaps + BVH occlusion in the editor) and the plugin only *reads* it, for the furniture-grid anchor. Materials ship inside `Cafe.gltf` — see `docs/PLUGIN_LEVEL_ENTITY_CONTRACT.md` for why a plugin must not dress level geometry at runtime (nothing unwinds it on unload).
 - **cafe-sim is anchored to the `cafe-shell` prefab** (`assets/prefabs/cafe-shell.prefab`: a group holding the shell mesh with the `cafe-shell` binding and a "Player Spawn" empty with the `spawn-point` binding). The plugin looks for the hydrated *markers*, not the prefab — it can't see prefab-ness and a hand-placed preset or an unpacked instance works the same. `CafeAnchor.shell` is `None` until a shell is loaded; the cafe main menu shows the state and New/Load Game refuse until it resolves, because saves store furniture as grid cells relative to the anchor. The player starts at the spawn point (position + yaw from its forward axis) or, without one, outside the shell's own door facing in. The cafe world has **no shell placed yet** — place the prefab and Shift+S.
 - **The furniture grid lives in the shell's local space**, so it follows the shell's rotation and scale: `CafeAnchor` holds the shell's `GlobalTransform` plus a `FloorPlan` (cell counts + centre, in shell-local units), and every coordinate goes through `to_world`/`to_local`/`place`/`above_floor`. Its *size* is measured from the shell, not hardcoded — `cafe_scene::measure_floor` walks the spawned glTF for the node named `Floor` (bevy names the node entity `Floor` and its mesh child `Floor.<material>`; the whole subtree counts) and `FloorPlan::fit` lays out as many whole cells as fit, rounding down so the grid never overhangs. No floor node → union of every mesh in the shell, sized from its *bottom*, with a warning. Cells are 1 shell-local unit, so cell indices (what saves store) keep meaning the same spot at any scale; `apply_save` skips cells a smaller shell doesn't have. Two height conventions, easy to mix up: `to_world` takes shell-local heights that **scale** (drinks on counters), `above_floor` lifts by world metres along the floor normal (customers and staff, who match the unscaled player). Characters walk with `step_along_floor`, which projects onto the floor plane instead of moving in world XZ.
-- `ENGINE_SCRIPTS_ABI_VERSION` (currently 11) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
+- `ENGINE_SCRIPTS_ABI_VERSION` (currently 12) gates loading; bump on any engine-api ABI change. WASM has no dylibs — everything degrades to a no-op.
 - Script schemas carry optional editor metadata: `ScriptSchema::with_display_name` (shown in the inspector's Scripts section, the attach picker and catalog presets; the machine `name` stays the stable id bindings store) and `PropDef::{with_label, with_doc, with_range, with_speed}` (row label, hover text, drag bounds/speed for Int/Float props). All `const`, all optional — the editor falls back to raw names and generic widgets.
 
 ## Level Persistence (see docs/LEVEL_SAVE_DESIGN.md)
@@ -238,7 +239,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | `toon_lighting.wesl` | Object fragment: samples baked HDR lightmap, hue-preserving toon bands (no runtime lights) |
 | `terrain_toon.wesl` | Terrain fragment: stochastic stone texture × the same baked toon shading |
 | `lightmap_bake.wgsl` | GPU compute terrain bake (sun + lights + AO + bounce; stack BVH traversal → packed f16 RGB) |
-| `edge_detection_post.wesl` | Post-process edge detection (a `Core3d` system after `tonemapping`, pipeline specialized on `ExtractedView::target_format`) |
+| `edge_detection_post.wesl` | Outline post-process: relative second difference of prepass depth + normal crease angle (a `Core3d` system after `tonemapping`, before `fxaa`; pipeline specialized on `ExtractedView::target_format`). **`docs/EDGE_DETECTION.md`** |
 
 **WebGPU is stricter than native about uniform control flow.** `textureSample`/`textureSampleBias` (implicit LOD) and `dpdx`/`fwidth` must sit in uniform control flow. Chrome's Tint enforces this; naga hard-codes `DISABLE_UNIFORMITY_REQ_FOR_FRAGMENT_STAGE = true`, so native compiles the shader fine and the web build dies at pipeline creation with `[Invalid ShaderModule]` and a black screen. A `var` initialised from fragment inputs (`pbr_input` from `pbr_input_from_vertex_output(in, is_front, …)`) stays non-uniform forever — partial assignments to its fields don't launder it — so branch on a `let` read straight from the uniform (`let flags = pbr_bindings::material.flags;`), the way `pbr_fragment.wesl` does, never on `pbr_input.material.flags`. The `naga` test can't catch this class; Chrome's Tint can — `node tools/tint-check.mjs file.wgsl` compiles WGSL through headless Chrome and exits non-zero on error. It takes WGSL, not WESL (our shaders only become WGSL inside bevy's resolver at runtime), so feed it a reduced repro of the construct in question. Background: `memory.md`, "WASM parity".
 
@@ -304,6 +305,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 - **The probe volume is read with a cubic B-spline, not trilinear filtering.** Trilinear is C0 but not C1 — its gradient jumps at every probe plane — and the toon quantiser draws a hard contour per band, so each contour *kinks* there. With a lamp pool only 2-3 cells across that is four visible corners: the cafe lamp read as a diamond with a sharp point along each axis on the tops of furniture. A B-spline is C2; the 4×4×4 kernel costs 8 *hardware* trilinear taps by pairing adjacent samples into one off-centre tap each (Sigg & Hadwiger). Measured on the cafe's own probes (`dump_probe_plane`): contour kink 1.34→0.09 / 4.04→1.10 / 1.64→0.03, anisotropy 0.896→0.989. Smoothstep-warped trilinear (a plateau at every plane instead of a kink) and Catmull-Rom (C1 only, negative lobes overshoot) were both measured and rejected. The price: a B-spline approximates, so a narrow pool's peak drops ~25% — raise lamp intensities. `bspline_axis` in probes.rs exists only so `bspline_two_tap_form_is_exact` can prove the pairing; an off-by-half silently shifts all dynamic lighting half a cell.
 - **Probe shadows are smooth because they are coarse, not blurred** (`docs/LIGHTING.md` §6.2): the probe stores one *binary* sun-visibility sample per lattice cell, so a probe-lit object's terminator cannot resolve anything smaller than `PROBE_CELL_SIZE`. The only lever is the lattice size, at cubic cost — halving it to 1 m made each chunk's probe file ~2.9 MB measured (a full 81-chunk ring would be ~230 MB in `ProbeStore`) and the runtime window was trimmed to ±96 m (`PROBE_VOLUME_DIMS` 192×48×192, 56.6 MB × 3 copies) rather than 100 MB per copy for the old ±128 m; probe-lit objects beyond the window sample wrapped texels.
 - **`docs/LIGHTING.md` is the reference for the whole lighting system** — units, the one shading equation, the four baker implementations, the toon curve in depth, a symptom→knob table, the invariants, and a reviewed list of current defects. Read it before changing anything here.
+- **Outlines are a screen-space post-process over the depth + normal prepasses** (`docs/EDGE_DETECTION.md`). Prepass depth is reverse-Z `near/distance` (near 0.1), so a *raw* depth difference is `~near·Δ/z²` and dies within metres. The shader thresholds the **relative second difference** `|a+b−2c|/max(a,b,c)` instead, which is exactly zero on any plane (`1/z` is affine in screen space) and reads `1 − z/z′` at a step. Plus a grazing bias, the crease angle between normals, a softness band and a distance fade. `EdgeStyle` (host resource, saved per user in `editor_settings.json`) is the single source; `sync_edge_detection_settings` derives the camera's uniform every frame (`set_if_neq`). Runs `.before(fxaa)`.
 - The camera uses `Tonemapping::Linear` (no tone curve, keeps the clamp). Bevy 0.20 made `None` a full passthrough that drops the negative-channel clamp — never put that in front of the 5-band quantiser
 - Camera renders to a float16 HDR image (`GameRenderTarget`): 1920x1080 displayed via sprite on layer 1 in gameplay; in the editor the image is resized to the egui viewport tab and drawn as an egui texture (bevy_egui binds any filterable float texture and does its own linear→sRGB, so colours match the sprite path)
 - Materials: `ExtendedMaterial<StandardMaterial, ToonMaterial>` for objects, `ExtendedMaterial<StandardMaterial, TerrainMaterial>` for terrain

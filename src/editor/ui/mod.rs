@@ -53,9 +53,9 @@ use crate::settings::UserSettings;
 mod assets;
 mod history_panel;
 mod inspector;
-mod layout;
 mod menu;
 mod outliner;
+mod persist;
 mod place;
 mod terrain;
 mod tool_panel;
@@ -80,7 +80,7 @@ impl Plugin for EditorUiPlugin {
             ..default()
         });
         app.init_resource::<DockLayout>();
-        app.init_resource::<layout::LayoutPersist>();
+        app.init_resource::<persist::SettingsPersist>();
         app.init_resource::<InspectorState>();
         app.init_resource::<AssetsBrowserState>();
         app.init_resource::<OutlinerState>();
@@ -90,18 +90,18 @@ impl Plugin for EditorUiPlugin {
             editor_ui.run_if(in_state(AppState::InGame).and_then(in_state(EditorMode::Editor))),
         );
 
-        // Dock layout persistence (user-level `editor_settings.json`): load
-        // once, save debounced while the editor shows (the only time the dock
-        // mutates), flush on the way out to the menu.
-        app.add_systems(Startup, layout::load_layout);
+        // User-level `editor_settings.json` (dock layout, edge style): load
+        // once, save debounced while the editor shows (the only time either
+        // is edited), flush on the way out to the menu.
+        app.add_systems(Startup, persist::load_settings);
         app.add_systems(
             Update,
-            layout::save_layout
+            persist::save_settings
                 .run_if(in_state(AppState::InGame).and_then(in_state(EditorMode::Editor))),
         );
-        app.add_systems(OnExit(AppState::InGame), layout::save_layout_now);
+        app.add_systems(OnExit(AppState::InGame), persist::save_settings_now);
         #[cfg(target_arch = "wasm32")]
-        app.add_systems(Update, layout::poll_layout);
+        app.add_systems(Update, persist::poll_settings);
     }
 }
 
@@ -196,6 +196,7 @@ pub struct Panels<'w, 's> {
     pub settings: ResMut<'w, UserSettings>,
     /// View-menu gizmo toggles (light markers).
     pub gizmo_store: ResMut<'w, GizmoConfigStore>,
+    pub edge_style: ResMut<'w, crate::game::gfx::post_process::EdgeStyle>,
     pub brush: ResMut<'w, BrushSettings>,
     pub lighting: ResMut<'w, LightingState>,
     pub history: ResMut<'w, History>,

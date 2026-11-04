@@ -1,0 +1,290 @@
+//! User-level editor settings: `editor_settings.json`.
+//!
+//! The dock layout and the outline look ([`EdgeStyle`]) are *user*
+//! preferences, not level or project data, so they live in their own file —
+//! the working directory on native, the same-named OPFS key on web
+//! (fire-and-forget writes, like project manifests and prefabs). The file is
+//! JSON and every top-level entry is parsed on its own, so an outdated or
+//! broken entry (an [`EditorTab`] variant renamed, say) falls back to its
+//! default without taking the others with it — never a crash.
+//!
+//! Saves are debounced: once a second, the settings are serialized and
+//! written only if they differ from what's already on disk. Exiting to the
+//! menu flushes immediately, so at worst a hard window close loses the final
+//! second of edits.
+
+use bevy::prelude::*;
+use serde::{Serialize, de::DeserializeOwned};
+
+use super::{DockLayout, EditorTab};
+use crate::game::gfx::post_process::EdgeStyle;
+use egui_dock::DockState;
+
+/// Native path (working directory) and OPFS key.
+const SETTINGS_KEY: &str = "editor_settings.json";
+
+/// On-disk shape, written whole. Read back entry by entry ([`apply`]), so a
+/// new setting is a new field here plus one line there, and older files —
+/// which simply lack it — keep loading.
+#[derive(Serialize)]
+struct EditorSettingsFile<'a> {
+    dock: &'a DockState<EditorTab>,
+    edges: &'a EdgeStyle,
+}
+
+#[derive(Resource)]
+pub struct SettingsPersist {
+    /// What's on disk, serialized — the change detector.
+    last_saved: Option<String>,
+    timer: Timer,
+    #[cfg(target_arch = "wasm32")]
+    pending: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+}
+
+impl Default for SettingsPersist {
+    fn default() -> Self {
+        Self {
+            last_saved: None,
+            timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            #[cfg(target_arch = "wasm32")]
+            pending: None,
+        }
+    }
+}
+
+/// One top-level entry, or `None` (with a warning) when it is missing or no
+/// longer parses.
+fn entry<T: DeserializeOwned>(file: &serde_json::Value, key: &str) -> Option<T> {
+    let value = file.get(key)?.clone();
+    serde_json::from_value(value)
+        .inspect_err(|e| warn!("{SETTINGS_KEY}: `{key}` didn't parse ({e}); using the default"))
+        .ok()
+}
+
+/// Apply whatever the file holds. Entries that are missing or broken leave
+/// the current (default) value alone.
+fn apply(text: &str, layout: &mut DockLayout, edges: &mut EdgeStyle, state: &mut SettingsPersist) {
+    let file: serde_json::Value = match serde_json::from_str(text) {
+        Ok(file) => file,
+        Err(e) => {
+            warn!("{SETTINGS_KEY} didn't parse ({e}); using the defaults");
+            return;
+        }
+    };
+    if let Some(dock) = entry(&file, "dock") {
+        layout.0 = dock;
+    }
+    if let Some(style) = entry(&file, "edges") {
+        *edges = style;
+    }
+    state.last_saved = Some(text.to_owned());
+}
+
+/// Serialize the current settings; write them when they differ from the disk
+/// copy.
+fn persist(layout: &DockLayout, edges: &EdgeStyle, state: &mut SettingsPersist) {
+    let text = match serde_json::to_string_pretty(&EditorSettingsFile {
+        dock: &layout.0,
+        edges,
+    }) {
+        Ok(text) => text,
+        Err(e) => {
+            warn!("Failed to serialize the editor settings: {e}");
+            return;
+        }
+    };
+    if state.last_saved.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(e) = std::fs::write(SETTINGS_KEY, &text) {
+        warn!("Failed to write {SETTINGS_KEY}: {e}");
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = text.clone().into_bytes();
+        wasm_bindgen_futures::spawn_local(async move {
+            let s = crate::storage::wasm::WasmStorage;
+            if let Err(e) = s.save(SETTINGS_KEY, &bytes).await {
+                log::error!("OPFS write of {SETTINGS_KEY} failed: {e}");
+            }
+        });
+    }
+    state.last_saved = Some(text);
+}
+
+/// Debounced save while the editor is in front (the only place either setting
+/// is edited).
+pub fn save_settings(
+    time: Res<Time>,
+    layout: Res<DockLayout>,
+    edges: Res<EdgeStyle>,
+    mut state: ResMut<SettingsPersist>,
+) {
+    if state.timer.tick(time.delta()).just_finished() {
+        persist(&layout, &edges, &mut state);
+    }
+}
+
+/// Flush on the way out to the menu, so quitting right after an edit keeps it.
+pub fn save_settings_now(
+    layout: Res<DockLayout>,
+    edges: Res<EdgeStyle>,
+    mut state: ResMut<SettingsPersist>,
+) {
+    persist(&layout, &edges, &mut state);
+}
+
+/// Native: read the file once at startup, before the first dock pass.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_settings(
+    mut layout: ResMut<DockLayout>,
+    mut edges: ResMut<EdgeStyle>,
+    mut state: ResMut<SettingsPersist>,
+) {
+    let Ok(text) = std::fs::read_to_string(SETTINGS_KEY) else {
+        return; // first run
+    };
+    apply(&text, &mut layout, &mut edges, &mut state);
+}
+
+/// Web: kick off the OPFS read; [`poll_settings`] applies it when it lands
+/// (a frame or two in — any edit made before then loses, which is the same
+/// trade every OPFS load here makes).
+#[cfg(target_arch = "wasm32")]
+pub fn load_settings(mut state: ResMut<SettingsPersist>) {
+    use std::sync::{Arc, Mutex};
+    let slot = Arc::new(Mutex::new(None));
+    state.pending = Some(slot.clone());
+    wasm_bindgen_futures::spawn_local(async move {
+        let s = crate::storage::wasm::WasmStorage;
+        match s.load(SETTINGS_KEY).await {
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(text) => *slot.lock().unwrap() = Some(text),
+                Err(e) => log::warn!("{SETTINGS_KEY} isn't UTF-8: {e}"),
+            },
+            Ok(None) => {} // first run
+            Err(e) => log::warn!("OPFS read of {SETTINGS_KEY} failed: {e}"),
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn poll_settings(
+    mut layout: ResMut<DockLayout>,
+    mut edges: ResMut<EdgeStyle>,
+    mut state: ResMut<SettingsPersist>,
+) {
+    let Some(slot) = state.pending.as_ref() else {
+        return;
+    };
+    let Some(text) = slot.lock().unwrap().take() else {
+        return;
+    };
+    state.pending = None;
+    apply(&text, &mut layout, &mut edges, &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default layout is transcribed from a hand-arranged
+    /// `editor_settings.json`. The stored `fraction` of a split node is the
+    /// *left/top* child's share (egui_dock renders `midpoint = min + size *
+    /// fraction`), which `split_left` et al. store verbatim — this test pins
+    /// both the semantics and the curated numbers, so a regression back to
+    /// "old node keeps the fraction" thinking (which once gave the outliner
+    /// 82% of the window) fails loudly.
+    #[test]
+    fn the_default_layout_matches_the_curated_one() {
+        let json = serde_json::to_value(&EditorSettingsFile {
+            dock: &DockLayout::default().0,
+            edges: &EdgeStyle::default(),
+        })
+        .unwrap();
+        let nodes = &json["dock"]["surfaces"][0]["Main"]["nodes"];
+
+        let fraction = |i: usize, kind: &str| {
+            nodes[i][kind]["fraction"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("node {i} is not a {kind} split"))
+        };
+        let tabs = |i: usize| nodes[i]["Leaf"]["tabs"].clone();
+
+        // Left strip: Outliner over History at 17.8% of the window.
+        assert!((fraction(0, "Horizontal") - 0.178).abs() < 1e-6);
+        assert_eq!(tabs(1), serde_json::json!(["Outliner", "History"]));
+        // The viewport column keeps 81.1% against the inspector column.
+        assert!((fraction(2, "Horizontal") - 0.811).abs() < 1e-6);
+        // Viewport over Assets; Inspector over Tool.
+        assert!((fraction(5, "Vertical") - 0.725).abs() < 1e-6);
+        assert!((fraction(6, "Vertical") - 0.528).abs() < 1e-6);
+        assert_eq!(tabs(11), serde_json::json!(["Viewport"]));
+        assert_eq!(tabs(12), serde_json::json!(["Assets"]));
+        assert_eq!(tabs(13), serde_json::json!(["Inspector"]));
+        assert_eq!(tabs(14), serde_json::json!(["Tool"]));
+    }
+
+    /// Files written before the edge style existed hold only `dock`; they
+    /// must keep their layout. A broken entry must not take the others down.
+    #[test]
+    fn entries_load_independently() {
+        let custom = EdgeStyle {
+            crease_angle: 12.0,
+            ..default()
+        };
+        let full = serde_json::to_string(&EditorSettingsFile {
+            dock: &DockLayout::default().0,
+            edges: &custom,
+        })
+        .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&full).unwrap();
+        // A never-drawn DockState holds infinite rects, whose `x`/`y` JSON
+        // writes as `null` and can't read back; every real save comes from a
+        // drawn layout, whose rects are finite. Make the fixture look like one.
+        fn finite(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Array(items) => items.iter_mut().for_each(finite),
+                serde_json::Value::Object(map) => {
+                    for (key, v) in map.iter_mut() {
+                        if v.is_null() && (key == "x" || key == "y") {
+                            *v = serde_json::json!(0.0);
+                        }
+                        finite(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        finite(&mut value["dock"]);
+
+        let load = |value: &serde_json::Value| {
+            let mut layout = DockLayout(DockState::new(vec![EditorTab::Viewport]));
+            let mut edges = EdgeStyle::default();
+            apply(
+                &value.to_string(),
+                &mut layout,
+                &mut edges,
+                &mut SettingsPersist::default(),
+            );
+            (layout.0.iter_all_tabs().count(), edges)
+        };
+        let default_tabs = DockLayout::default().0.iter_all_tabs().count();
+
+        assert_eq!(load(&value), (default_tabs, custom));
+
+        // Old file: no `edges`.
+        let dock_only = serde_json::json!({ "dock": value["dock"].clone() });
+        assert_eq!(load(&dock_only), (default_tabs, EdgeStyle::default()));
+
+        // Broken dock: edges still load, layout stays as it was.
+        value["dock"] = serde_json::json!("not a layout");
+        assert_eq!(load(&value), (1, custom));
+
+        // A field added to `EdgeStyle` later is simply absent: the rest load.
+        let partial = serde_json::json!({ "edges": { "crease_angle": 12.0 } });
+        assert_eq!(load(&partial).1, custom);
+    }
+}

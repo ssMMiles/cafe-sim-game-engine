@@ -97,8 +97,9 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
             // Enable depth and normal prepasses for edge detection
             DepthPrepass,
             NormalPrepass,
-            // Edge detection post-processing settings
-            EdgeDetectionSettings::new(),
+            // Filled from `EdgeStyle` by `sync_edge_detection_settings`
+            // before the first frame renders.
+            EdgeDetectionSettings::default(),
             Fxaa::default(),
         ))
         .insert((
