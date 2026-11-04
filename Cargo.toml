@@ -41,19 +41,23 @@ name = "game_engine_lib"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# Every feature below changes bevy's or avian's feature set and therefore
+# rebuilds them. Each has its own build configuration (alias + target dir)
+# in .cargo/config.toml — never pass them by hand. See docs/BUILD_TIMES.md §4.
 profiling = ["bevy/trace_chrome", "bevy/sysinfo_plugin", "bevy/debug"]
-tracy = ["bevy/trace_tracy", "bevy/debug"]
 physics_debug = ["avian3d/debug-plugin"]
 opfs = []
 # Web profiling: bevy's system/schedule spans become `performance.measure`
 # entries (tracing-wasm), so Chrome's Performance panel shows them on the
 # Timings track next to long tasks. Costs a few percent per system — measure
 # stutters with it, not steady-state frame time. `tools/web-trace.mjs`
-# records and summarises a run. Build:
-#   wasm-pack build --target web --release --features opfs,web-profile
+# records and summarises a run. Build: `tools/web.sh profile`.
 web-profile = ["bevy/trace"]
 
 # Build profiles — see docs/BUILD_TIMES.md for the reasoning behind each.
+# There are exactly four: dev (all native work), perf (benchmarks), web-dev
+# (browser iteration), release (deploys). Every build goes through one of the
+# configurations in .cargo/config.toml / tools/web.sh.
 [profile.dev]
 opt-level = 1
 # Cranelift was tried for our crates (2026-11-03) and aborts at runtime:
@@ -67,18 +71,15 @@ opt-level = 3
 # link of libbevy_dylib. Our own crates keep full debuginfo.
 debug = false
 
-# Deploy artifacts: fat LTO + one codegen unit. Slow by design — do not
-# iterate on this profile; use `web-dev` / `perf` below.
+# Deploy artifacts only (`tools/web.sh release`, CI): fat LTO + one codegen
+# unit. Slow by design — never iterate on this profile.
 [profile.release]
 lto = true
 codegen-units = 1
 debug = false
 strip = "debuginfo"
 
-# Iterating on the browser build: thin LTO, parallel codegen.
-#   cargo build --target wasm32-unknown-unknown --profile web-dev --features opfs
-#   wasm-bindgen --target web --out-dir pkg --out-name game_engine_lib \
-#       target/wasm32-unknown-unknown/web-dev/game_engine_lib.wasm
+# Iterating on the browser build (`tools/web.sh`): thin LTO, parallel codegen.
 [profile.web-dev]
 inherits = "release"
 lto = "thin"
@@ -86,25 +87,11 @@ codegen-units = 16
 opt-level = 2
 
 # Optimised but not LTO'd: the ignored benchmarks
-# (`cargo test --profile perf <name> -- --ignored --nocapture`).
+# (`cargo perf <name> -- --ignored --nocapture`).
 [profile.perf]
 inherits = "release"
 lto = false
 codegen-units = 16
-
-[profile.release-native]
-inherits = "release"
-opt-level = 3
-
-# wasm-pack runs wasm-opt over the 63 MB module after every `--release`
-# build: minutes, for a smaller/faster artifact. Off by default; turn it on
-# for a real deploy (`wasm-opt = ["-O"]`).
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = false
-[package.metadata.wasm-pack.profile.profiling]
-wasm-opt = false
-[package.metadata.wasm-pack.profile.dev]
-wasm-opt = false
 
 [package]
 name = "engine"

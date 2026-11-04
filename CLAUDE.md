@@ -13,9 +13,10 @@ NEVER guess or make assumptions about the codebase or external dependencies. Alw
 - **Check**: `cargo check`
 - **Format**: `cargo fmt`
 - **Lint**: `cargo clippy`
-- **Benchmarks** (ignored tests): `cargo test --profile perf <name> -- --ignored --nocapture` — never `--release`, which is fat LTO
-- **Web, iterating**: `cargo build --target wasm32-unknown-unknown --profile web-dev --features opfs` + `wasm-bindgen` (README); `wasm-pack build --release` only for a deploy
-- Builds use **sccache** and `-Zthreads` (`.cargo/config.toml`; cranelift was tried and aborts on glam's NEON intrinsics — `docs/BUILD_TIMES.md`); bevy, avian3d and bevy_egui have explicit feature lists instead of defaults — adding a feature is a bevy rebuild, so check `docs/BUILD_TIMES.md` first
+- **Benchmarks** (ignored tests): `cargo perf <name> -- --ignored --nocapture`
+- **Web**: `tools/web.sh` (iterate) / `tools/web.sh profile` (spans for `tools/web-trace.mjs`) / `tools/web.sh release` (deploy); `cargo web-check` type-checks wasm
+- **Feature builds**: `cargo run-physics-debug`, `cargo run-profiling`
+- **Only these build configurations exist** — the table at the top of `.cargo/config.toml`. Each feature set that touches bevy/avian has its own target dir so switching never evicts another's incremental build. **Never pass `--features`, `--profile`, `--target` or `--target-dir` by hand**, and never run two cargo builds against the same target dir at once. Builds use sccache and `-Zthreads`; cranelift was tried and aborts on glam's NEON intrinsics. bevy, avian3d and bevy_egui have explicit feature lists — adding a feature is a bevy rebuild, so check `docs/BUILD_TIMES.md` first.
 
 ## Development Notes
 

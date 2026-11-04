@@ -530,7 +530,7 @@ mod tests {
     /// Dev tool: export a real world from `./worlds/` into a temp dir (via a
     /// symlink, so nothing is copied or overwritten) and print the archive
     /// path — feed it to `node tools/bundle-check.mjs` to prove the page's
-    /// reader agrees with this writer. `WORLD=cafe cargo test --release
+    /// reader agrees with this writer. `WORLD=cafe cargo perf
     /// export_world_fixture -- --ignored --nocapture`.
     #[test]
     #[ignore]

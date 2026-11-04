@@ -9,7 +9,7 @@ and the tool for it is a Chrome performance trace with bevy's spans in it.
 ## Build and record
 
 ```
-wasm-pack build --target web --release --features opfs,web-profile
+tools/web.sh profile          # web-dev profile + bevy/trace, own target dir
 python3 tools/serve.py 8000
 node tools/web-trace.mjs --url 'http://localhost:8000/index.html?world=/worlds/cafe-bundle.zip&play' \
      --out /tmp/run.jsonl  wait:40 click:640,418 wait:25 click:640,300 focus key:F1 \

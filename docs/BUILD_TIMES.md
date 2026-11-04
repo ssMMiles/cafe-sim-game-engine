@@ -167,6 +167,18 @@ bevy = { version = "0.20", default-features = false, features = [
 
 ## 4. Stop rebuilding the same bevy over and over
 
+**Applied 2026-11-03 as fixed build configurations** (table at the top of
+`.cargo/config.toml`): four profiles only — dev, perf, web-dev, release —
+and one alias or `tools/web.sh` mode per feature set, each feature set in
+its own target directory (`target/web`, `target/web-profile`,
+`target/web-release`, `target/physics-debug`, `target/profiling`). Profiles
+already get their own subdirectory, so the separate dirs exist for
+*feature* changes, which is what re-hashes bevy. `tools/web.sh` replaces
+wasm-pack locally (cargo build + wasm-bindgen; wasm-opt only on request);
+CI still uses wasm-pack. `release-native`, the `tracy` feature and the
+wasm-pack metadata are gone. The `opfs` feature is set for every wasm build
+by the target's rustflags, so no command passes it.
+
 - **One target dir per configuration, kept warm.** Feature sets that
   change bevy's features (`web-profile`, `profiling`, `tracy`) should build
   into their own dir (`CARGO_TARGET_DIR=target-profile wasm-pack …`) so

@@ -12,7 +12,7 @@
 // exist only in a `web-profile` build (`bevy/trace` → tracing-wasm →
 // `performance.measure`):
 //
-//   wasm-pack build --target web --release --features opfs,web-profile
+//   tools/web.sh profile
 //   python3 tools/serve.py 8000
 //   node tools/web-trace.mjs --url 'http://localhost:8000/index.html?world=/worlds/cafe-bundle.zip&play' \
 //        --out /tmp/run.jsonl  wait:20 shot:/tmp/menu.png click:640,400 wait:15 \

@@ -1253,3 +1253,15 @@ the test binary aborted on `llvm.aarch64.neon.fmaxnmv.f32.v4f32 is not yet suppo
 everywhere. Validation: `cargo check`, `cargo check --workspace`, `cargo test --lib`,
 `cargo check --target wasm32 --features opfs` — no wasm-pack build was run (user builds
 on a faster machine).
+
+## Fixed build configurations — 3 November 2026
+
+The thrash was feature sets, not profiles: cargo keys artifacts on (profile × target ×
+features), and each of `web-profile` / `physics_debug` / `profiling` re-hashes bevy.
+Now: four profiles (dev, perf, web-dev, release) and one alias per feature set with its
+own `--target-dir` (`cargo perf`, `cargo web-check`, `cargo run-physics-debug`,
+`cargo run-profiling`, `tools/web.sh [dev|profile|release]` → target/web*, replacing
+wasm-pack locally; CI keeps wasm-pack). Table at the top of `.cargo/config.toml`. Rule
+for me: never pass `--features/--profile/--target/--target-dir` by hand. `opfs` is
+implied for wasm by the target rustflags. `wasm-bindgen-cli` must match Cargo.lock's
+wasm-bindgen (0.2.129 today; `tools/web.sh` checks and says what to install).

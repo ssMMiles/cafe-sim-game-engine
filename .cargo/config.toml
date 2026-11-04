@@ -1,9 +1,37 @@
+# Build configurations.
+#
+# Cargo keeps artifacts per (profile × target × feature set), and a change to
+# any of those for a shared dependency means recompiling it — with bevy that
+# is the whole ~20 minute cold build. The fixed configurations below give
+# every feature set that touches bevy/avian its own target directory, so
+# switching between them never evicts another's incremental state. Use these
+# and nothing else; never pass `--features`, `--profile`, `--target` or
+# `--target-dir` by hand. docs/BUILD_TIMES.md §4.
+#
+#   configuration     command                                   profile   dir
+#   dev (default)     cargo check | test | run | build          dev       target/
+#                     cargo build --workspace (plugins)         dev       target/
+#   perf              cargo perf <test> -- --ignored --nocapture  perf    target/perf
+#   web               tools/web.sh            (→ pkg/)          web-dev   target/web
+#   web-profile       tools/web.sh profile    (→ pkg/)          web-dev   target/web-profile
+#   web-release       tools/web.sh release    (→ pkg/)          release   target/web-release
+#   web-check         cargo web-check                           dev       target/web
+#   physics-debug     cargo run-physics-debug                   dev       target/physics-debug
+#   profiling         cargo run-profiling                       dev       target/profiling
+#
+# Profiles already get their own subdirectory, so `perf` shares `target/`
+# with dev without conflict; the separate dirs exist for *feature* changes.
+
 [alias]
 build-plugins = "build --workspace --exclude engine"
+perf = "test --profile perf"
+web-check = "check --target wasm32-unknown-unknown --target-dir target/web"
+run-physics-debug = "run --features physics_debug --target-dir target/physics-debug"
+run-profiling = "run --features profiling --target-dir target/profiling"
 
 # sccache: shares compiled dependency artifacts across target dirs and
-# worktrees, so a second worktree's cold build hits the cache for the ~680
-# dependency crates. Install: `brew install sccache`.
+# worktrees, so a new configuration or a second worktree hits the cache for
+# the ~600 dependency crates. Install: `brew install sccache`.
 [build]
 rustc-wrapper = "sccache"
 # Parallel rustc front end (nightly). Our crate is 44k lines in one unit.
@@ -13,7 +41,8 @@ rustflags = ["-Zthreads=8"]
 
 [target.wasm32-unknown-unknown]
 runner = "wasm-server-runner"
-# `--cfg feature="opfs"` keeps the OPFS storage paths on for every wasm build.
+# `--cfg feature="opfs"` keeps the OPFS storage paths on for every wasm
+# build, so no `--features opfs` is needed anywhere.
 rustflags = ["--cfg", "feature=\"opfs\"", "-Zthreads=8"]
 
 [profile.dev.package.objc2]
