@@ -1278,3 +1278,16 @@ this workspace (`.vscode/settings.json`) — the user doesn't hand-write code he
 Not possible: brew's mold 3.0.0 emits ELF only and rejects Mach-O input; the macOS fork
 (sold) is discontinued. Apple's ld-1167 is already the fast linker; wasm links via
 rust-lld. Don't re-investigate unless a Linux native target appears.
+
+## Editor view toggles, world dropdown, placement names — 4 November 2026
+
+- avian `debug-plugin` is **always on** now; the `physics_debug` feature, `cargo run-physics-debug`
+  and `target/physics-debug` are gone. Its draw systems are gated on `PhysicsGizmos` being enabled
+  (View ▸ Collision shapes / Shift+P), and the bevy features it asks for were already on, so
+  bevy_internal didn't re-hash — only the `bevy` facade's dependents rebuilt.
+- Light markers draw through their own `LightGizmos` group (objects.rs); View ▸ Light gizmos flips
+  its `GizmoConfigStore` entry (`Panels::gizmo_store`); F8 too (`toggle_light_gizmos`). Not persisted across sessions.
+- Toolbar "world:" is a ComboBox sharing `menu::world_list` with File ▸ Worlds.
+- Placement names come from `AssetCatalog::selected_index(&config)` (no extra field in
+  `PlacementConfig`, whose `kind` has four writers) and go through `PlacedObject::unique_name`
+  against loaded entities' display names. Duplicate uses it too. Prefab roots are left alone.

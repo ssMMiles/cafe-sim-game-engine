@@ -19,8 +19,8 @@ use chunk_assets::{
     WorldMetaLoader,
 };
 use objects::{
-    PlacedObjectRegistry, PlacementConfig, apply_auto_colliders, draw_light_gizmos,
-    save_placed_objects, seed_placed_ids,
+    LightGizmos, PlacedObjectRegistry, PlacementConfig, apply_auto_colliders, draw_light_gizmos,
+    light_gizmos_enabled, save_placed_objects, seed_placed_ids,
 };
 use streaming::{
     ChunkStreamingConfig, StreamingState, finalize_computed_chunks, launch_chunk_tasks,
@@ -85,11 +85,13 @@ impl Plugin for WorldPlugin {
         );
 
         // Light markers are an authoring aid, so they only draw in the editor.
+        app.init_gizmo_group::<LightGizmos>();
         app.add_systems(
             Update,
             draw_light_gizmos
                 .in_set(WorldSet::InGame)
-                .run_if(in_state(crate::editor::EditorMode::Editor)),
+                .run_if(in_state(crate::editor::EditorMode::Editor))
+                .run_if(light_gizmos_enabled),
         );
 
         app.init_resource::<PlacedObjectRegistry>();

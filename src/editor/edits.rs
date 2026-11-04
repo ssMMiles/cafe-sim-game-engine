@@ -469,6 +469,11 @@ pub fn respawn_placed(
             }
             // Nudge so the copy is visibly a copy and not a z-fighting twin.
             record.position[0] += 1.0;
+            // `rock` → `rock 1`; an instance root keeps the definition's name.
+            if record.prefab.is_none() {
+                record.name =
+                    PlacedObject::unique_name(&obj.display_name(), placed.iter().map(|p| p.0));
+            }
         } else {
             registry.by_id.remove(&obj.id);
             registry.mark_dirty(obj.chunk);

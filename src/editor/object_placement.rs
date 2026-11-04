@@ -12,6 +12,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings};
 use bevy::{log, prelude::*};
 use engine_api::{ScriptBinding, ScriptRegistry};
 
+use crate::editor::catalog::AssetCatalog;
 use crate::editor::history::{Change, History};
 use crate::editor::input::{ScrollMod, scroll_modifier, scroll_notches};
 use crate::editor::picking::{EditorRay, ViewportInput};
@@ -19,8 +20,8 @@ use crate::editor::selection::Selection;
 use crate::game::GameEntity;
 use crate::game::gltf_loading::PendingMaterial;
 use crate::game::world::objects::{
-    PlacedEntityRecord, PlacedKind, PlacedObjectRegistry, PlacementConfig, spawn_entity_record,
-    world_pos_to_chunk,
+    PlacedEntityRecord, PlacedKind, PlacedObject, PlacedObjectRegistry, PlacementConfig,
+    spawn_entity_record, world_pos_to_chunk,
 };
 use crate::game::world::prefabs::{PrefabInstanceData, PrefabLibrary};
 use crate::game::world::terrain::TerrainChunk;
@@ -49,6 +50,8 @@ pub fn handle_place_click(
     mut selection: ResMut<Selection>,
     mut history: ResMut<History>,
     prefabs: Res<PrefabLibrary>,
+    catalog: Res<AssetCatalog>,
+    placed: Query<&PlacedObject>,
 ) {
     if viewport.clicked_px.is_none() {
         return;
@@ -81,6 +84,15 @@ pub fn handle_place_click(
         .with_scale(config.effective_scale());
 
     let mut record = PlacedEntityRecord::new(id, config.kind.clone(), &transform);
+    // Named after what was picked in the catalog (the mesh's folder, a
+    // preset's title, "Point Light"), counted up past any loaded namesake.
+    // A prefab instance takes its name from the definition instead.
+    if config.prefab.is_none() {
+        let base = catalog
+            .selected_index(&config)
+            .map_or(config.kind.label(), |i| catalog.entries[i].name.as_str());
+        record.name = PlacedObject::unique_name(base, placed);
+    }
 
     // Prefab mode: the record becomes an instance root with fresh member
     // ids; the definition supplies kind/name/scripts at expansion.

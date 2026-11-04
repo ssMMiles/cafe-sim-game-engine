@@ -23,7 +23,8 @@ target dirs (a workflow choice, not a manifest change).
 
 Corrections found while applying: `mesh_picking` **is** used (the editor's
 ray casts are `MeshRayCast`), and the terrain collider carried an avian
-`DebugRender` component (now behind `physics_debug`). `bevy_clipboard` stays
+`DebugRender` component (behind `physics_debug` until 2026-11-03, when
+`debug-plugin` became always-on so the editor's collider view works in every build). `bevy_clipboard` stays
 via `bevy_text`'s default, `ruzstd`/`tiff` via `bevy_image`'s default
 (pulled by `bevy_ui`); both are sub-crate defaults we cannot reach from the
 top-level feature list.
@@ -176,7 +177,8 @@ bevy = { version = "0.20", default-features = false, features = [
 `.cargo/config.toml`): four profiles only — dev, perf, web-dev, release —
 and one alias or `tools/web.sh` mode per feature set, each feature set in
 its own target directory (`target/web`, `target/web-profile`,
-`target/web-release`, `target/physics-debug`, `target/profiling`). Profiles
+`target/web-release`, `target/profiling`; `target/physics-debug` went away
+with the feature). Profiles
 already get their own subdirectory, so the separate dirs exist for
 *feature* changes, which is what re-hashes bevy. `tools/web.sh` replaces
 wasm-pack locally (cargo build + wasm-bindgen; wasm-opt only on request);

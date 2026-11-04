@@ -18,7 +18,6 @@ use bevy::{
     window::PresentMode,
 };
 
-#[cfg(feature = "physics_debug")]
 use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 
 mod editor;
@@ -41,18 +40,16 @@ pub fn run() {
     let mut app = App::new();
     app.register_asset_source("world", AssetSourceBuilder::platform_default(".", None));
 
-    #[cfg(feature = "physics_debug")]
-    app.add_plugins(PhysicsDebugPlugin::default())
-        .insert_gizmo_config(
-            PhysicsGizmos {
-                collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
-                ..PhysicsGizmos::none()
-            },
-            GizmoConfig {
-                enabled: false,
-                ..default()
-            },
-        );
+    app.add_plugins(PhysicsDebugPlugin).insert_gizmo_config(
+        PhysicsGizmos {
+            collider_color: Some(Color::srgb(0.0, 0.9, 0.3)),
+            ..PhysicsGizmos::none()
+        },
+        GizmoConfig {
+            enabled: false,
+            ..default()
+        },
+    );
 
     app.add_plugins(
         DefaultPlugins

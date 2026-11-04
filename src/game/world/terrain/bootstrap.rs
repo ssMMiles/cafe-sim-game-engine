@@ -277,9 +277,7 @@ pub fn spawn_chunk_from_result(
             Transform::from_translation(result.collider_offset),
         ))
         .id();
-    // The heightfield would swamp the physics debug view (Shift+P); hide it
-    // there. The component only exists with avian's `debug-plugin`.
-    #[cfg(feature = "physics_debug")]
+    // The heightfield would swamp the collision view (Shift+P); hide it there.
     commands
         .entity(collider)
         .insert(avian3d::debug_render::DebugRender::none());

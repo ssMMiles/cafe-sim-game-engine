@@ -49,7 +49,6 @@ crate-type = ["cdylib", "rlib"]
 # rebuilds them. Each has its own build configuration (alias + target dir)
 # in .cargo/config.toml — never pass them by hand. See docs/BUILD_TIMES.md §4.
 profiling = ["bevy/trace_chrome", "bevy/sysinfo_plugin", "bevy/debug"]
-physics_debug = ["avian3d/debug-plugin"]
 opfs = []
 # Web profiling: bevy's system/schedule spans become `performance.measure`
 # entries (tracing-wasm), so Chrome's Performance panel shows them on the
@@ -114,9 +113,11 @@ log = "0.4.29"
 
 # No joints anywhere in the project (the default `xpbd_joints` still ran ~500
 # empty joint-solver systems per physics step), no avian picking.
-# `debug-plugin` only under the `physics_debug` feature.
+# `debug-plugin` draws the editor's collider view (View ▸ Collision shapes,
+# Shift+P); its systems only run while that gizmo group is enabled, and the
+# bevy features it asks for (`bevy_gizmos`, `bevy_render`) are already on.
 avian3d = { version = "0.8", default-features = false, features = [
-    "3d", "parry-f32", "parallel", "collider-from-mesh", "bevy_scene",
+    "3d", "parry-f32", "parallel", "collider-from-mesh", "bevy_scene", "debug-plugin",
 ] }
 # Editor chrome (docked viewport, outliner, inspector). 0.43 is the Bevy 0.20
 # line; egui_dock 0.21 is on the same egui (0.36). Both must always agree on

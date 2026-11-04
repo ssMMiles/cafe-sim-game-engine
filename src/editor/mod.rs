@@ -70,7 +70,7 @@ use object_placement::{
     handle_place_click, rebuild_preview_on_config_change, setup_placement_preview,
     teardown_placement_preview, update_placement_preview,
 };
-use physics_debug::{sync_physics_debug, toggle_physics_debug};
+use physics_debug::{sync_physics_debug, toggle_light_gizmos, toggle_physics_debug};
 use picking::{EditorRay, ViewportInput, compute_editor_ray, viewport_pointer_free};
 use prefab_edit::{PrefabAction, PrefabEditState, apply_prefab_actions};
 use selection::{
@@ -306,6 +306,7 @@ impl Plugin for EditorPlugin {
                 trigger_save_terrain,
                 trigger_bake,
                 toggle_physics_debug,
+                toggle_light_gizmos,
                 toggle_lightmap_mode,
                 crate::game::gfx::crosshair::toggle_crosshair,
                 crate::game::gfx::outline::toggle_outline,

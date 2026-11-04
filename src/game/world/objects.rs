@@ -638,6 +638,33 @@ impl PlacedObject {
         }
     }
 
+    /// A name for a new entity based on `base` that no live entity displays
+    /// already: `base` itself if it is free, else the first free `stem N`
+    /// (`rock`, `rock 1`, `rock 2`, …). The stem drops a trailing counter, so
+    /// duplicating `rock 1` gives `rock 2`, not `rock 1 1`. Only loaded
+    /// entities are seen — a world that hasn't streamed in can still hold one.
+    pub fn unique_name<'a>(
+        base: &str,
+        taken: impl IntoIterator<Item = &'a PlacedObject>,
+    ) -> String {
+        let taken: HashSet<String> = taken.into_iter().map(Self::display_name).collect();
+        if !taken.contains(base) {
+            return base.to_owned();
+        }
+        let stem = match base.rsplit_once(' ') {
+            Some((stem, n))
+                if !stem.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                stem
+            }
+            _ => base,
+        };
+        (1..)
+            .map(|n| format!("{stem} {n}"))
+            .find(|name| !taken.contains(name))
+            .expect("finitely many names are taken")
+    }
+
     /// Rebuild the on-disk record from live component state.
     ///
     /// Script bindings live in the separate [`ScriptBindings`] component (the
@@ -1026,13 +1053,26 @@ pub fn apply_auto_colliders(mut commands: Commands, q: Query<Entity, Added<AutoC
     }
 }
 
+/// Gizmo group for the placed-light markers, so the editor can hide them
+/// (View ▸ Light gizmos) without touching any other gizmo.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct LightGizmos;
+
+/// Run condition: the light markers are switched on.
+pub fn light_gizmos_enabled(store: Res<GizmoConfigStore>) -> bool {
+    store.config::<LightGizmos>().0.enabled
+}
+
 /// Draw editor-only wireframe markers for placed lights, which otherwise have
 /// no visual representation.
 ///
 /// Deliberately immediate-mode [`Gizmos`] rather than child mesh entities: a
 /// gizmo never appears in the mesh queries the lightmap baker walks, so light
 /// markers can't accidentally cast baked shadows or get a lightmap atlas.
-pub fn draw_light_gizmos(mut gizmos: Gizmos, placed: Query<(&PlacedObject, &GlobalTransform)>) {
+pub fn draw_light_gizmos(
+    mut gizmos: Gizmos<LightGizmos>,
+    placed: Query<(&PlacedObject, &GlobalTransform)>,
+) {
     for (obj, gt) in placed.iter() {
         let pos = gt.translation();
         match &obj.kind {
@@ -1278,6 +1318,37 @@ pub fn parse_chunk_objects_from_bytes(bytes: &[u8]) -> Result<ChunkObjectsFile, 
 mod tests {
     use super::*;
     use engine_api::{PropValue, ScriptProp};
+
+    #[test]
+    fn unique_name_counts_up_past_live_namesakes() {
+        let live = |names: &[&str]| -> Vec<PlacedObject> {
+            names
+                .iter()
+                .map(|n| PlacedObject {
+                    id: 0,
+                    chunk: (0, 0),
+                    name: (*n).into(),
+                    kind: PlacedKind::point_light(),
+                    parent: None,
+                    prefab: None,
+                })
+                .collect()
+        };
+        let name = |base, names: &[&str]| PlacedObject::unique_name(base, &live(names));
+
+        assert_eq!(name("rock", &[]), "rock");
+        assert_eq!(name("rock", &["tree"]), "rock");
+        assert_eq!(name("rock", &["rock"]), "rock 1");
+        assert_eq!(name("rock", &["rock", "rock 1"]), "rock 2");
+        // A renamed one doesn't count, and a gap is reused.
+        assert_eq!(name("rock", &["big rock", "rock 2"]), "rock");
+        assert_eq!(name("rock", &["rock", "rock 2"]), "rock 1");
+        // Duplicating a counted name counts on from its stem.
+        assert_eq!(name("rock 1", &["rock", "rock 1"]), "rock 2");
+        assert_eq!(name("Room 101", &["Room 101"]), "Room 1");
+        // Unnamed entities count under the kind label they display.
+        assert_eq!(name("Point Light", &[""]), "Point Light 1");
+    }
 
     fn sample_current() -> ChunkObjectsFile {
         ChunkObjectsFile {

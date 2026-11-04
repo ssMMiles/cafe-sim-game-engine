@@ -1,8 +1,7 @@
+use avian3d::debug_render::PhysicsGizmos;
 use bevy::prelude::*;
 
-#[cfg(feature = "physics_debug")]
-use avian3d::debug_render::PhysicsGizmos;
-
+use crate::game::world::objects::LightGizmos;
 use crate::settings::UserSettings;
 
 pub fn toggle_physics_debug(input: Res<ButtonInput<KeyCode>>, mut settings: ResMut<UserSettings>) {
@@ -12,12 +11,16 @@ pub fn toggle_physics_debug(input: Res<ButtonInput<KeyCode>>, mut settings: ResM
     }
 }
 
-#[cfg(feature = "physics_debug")]
 pub fn sync_physics_debug(settings: Res<UserSettings>, mut store: ResMut<GizmoConfigStore>) {
     if settings.is_changed() {
         store.config_mut::<PhysicsGizmos>().0.enabled = settings.physics_debug;
     }
 }
 
-#[cfg(not(feature = "physics_debug"))]
-pub fn sync_physics_debug(_settings: Res<UserSettings>, _store: ResMut<GizmoConfigStore>) {}
+/// F8: show / hide the placed-light markers (also View ▸ Light gizmos).
+pub fn toggle_light_gizmos(input: Res<ButtonInput<KeyCode>>, mut store: ResMut<GizmoConfigStore>) {
+    if input.just_pressed(KeyCode::F8) {
+        let enabled = &mut store.config_mut::<LightGizmos>().0.enabled;
+        *enabled = !*enabled;
+    }
+}

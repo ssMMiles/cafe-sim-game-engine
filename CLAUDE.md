@@ -15,7 +15,7 @@ NEVER guess or make assumptions about the codebase or external dependencies. Alw
 - **Lint**: `cargo clippy`
 - **Benchmarks** (ignored tests): `cargo perf <name> -- --ignored --nocapture`
 - **Web**: `tools/web.sh` (iterate) / `tools/web.sh profile` (spans for `tools/web-trace.mjs`) / `tools/web.sh release` (deploy); `cargo web-check` type-checks wasm
-- **Feature builds**: `cargo run-physics-debug`, `cargo run-profiling`
+- **Feature builds**: `cargo run-profiling` (avian's `debug-plugin` is always on — the collider view is a runtime toggle)
 - **Only these build configurations exist** — the table at the top of `.cargo/config.toml`. Each feature set that touches bevy/avian has its own target dir so switching never evicts another's incremental build. **Never pass `--features`, `--profile`, `--target` or `--target-dir` by hand**, and never run two cargo builds against the same target dir at once. Builds use sccache and `-Zthreads`; cranelift was tried and aborts on glam's NEON intrinsics. bevy, avian3d and bevy_egui have explicit feature lists — adding a feature is a bevy rebuild, so check `docs/BUILD_TIMES.md` first.
 
 ## Development Notes
@@ -92,7 +92,8 @@ src/
 │   │   │                   #   OPFS key web), 1 s debounced save + flush on exit to menu; parse
 │   │   │                   #   failure falls back to the default layout
 │   │   ├── viewport.rs     #   TabViewer; viewport tab draws the render texture, fills ViewportInput
-│   │   ├── menu.rs         #   Menu bar (File/Edit/View/Tools/Plugins), toolbar, New-world dialog
+│   │   ├── menu.rs         #   Menu bar (File/Edit/View/Tools/Plugins), toolbar (world dropdown),
+│   │   │                   #   New-world dialog
 │   │   ├── outliner.rs     #   Loaded placed entities: filter, select, focus, context menu
 │   │   ├── inspector.rs    #   Name/transform/kind/light params, script props, lighting; environment when nothing selected
 │   │   ├── tool_panel.rs   #   "Tool" tab: shows the active tool's settings (Select: none yet)
@@ -129,7 +130,8 @@ src/
 │   ├── terrain_save.rs     # Shift+S save trigger
 │   ├── baking_trigger.rs   # Shift+B bake trigger
 │   ├── lightmap_toggle.rs  # Shift+L: baked lighting vs flat unlit debug view
-│   ├── physics_debug.rs    # Gizmo toggle (Shift+P)
+│   ├── physics_debug.rs    # Collision-shape gizmo toggle (Shift+P, View menu); light markers are
+│                           #   `LightGizmos` (objects.rs), F8 / View ▸ Light gizmos
 │   └── world_export.rs     # File ▸ Export world as zip: current-version world files + referenced prefabs
 │                           #   + narrowed project manifest → worlds/{id}.zip (docs/WORLD_SHARING.md)
 └── game/               # Core simulation (SimulationPlugin)
@@ -248,6 +250,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 - **Cursor**: free in the editor; `CursorGrabMode::Locked` + hidden only while looking, restored to where the drag began. `simulation::setup` only locks in Gameplay mode.
 - **`EditorTool` state** (Select / Place / Terrain) replaced `UserSettings.edit_mode` / `terrain_edit_mode` (ABI 5). `OnExit(Place)` releases a grab, tears down the preview and closes the catalog; `OnExit(Terrain)` removes the brush disc.
 - **`Selection { primary, hovered }`** is what the inspector, Delete, F and the outliner act on. Viewport click (Select tool) or an outliner row sets it; `validate_selection` drops dead entities each frame; placement/drop/duplicate select the new entity. A **transform gizmo** (`gizmo.rs`) draws XYZ arrows (Ctrl: rotation arcs) at the selection origin; dragging a handle writes `Transform` + `PlacedEdited` per frame (so group deltas stay correct) and suppresses click-select via `gizmo_pointer_free`. Drag state is a resource (`GizmoInteraction`), never `ViewportInput` (rebuilt every egui pass).
+- **New entities are named after their catalog entry** (mesh folder, preset title, "Point Light"), and `PlacedObject::unique_name` counts past any *loaded* entity displaying the same name (`rock`, `rock 1`, `rock 2`; lowest free; Duplicate counts on from the source's stem). Prefab instances take the definition's name.
 - **Every level-data mutation goes through `edits.rs`.** Panels write components directly and send `PlacedEdited { entity, what }`; `commit_placed_edits` re-derives `PlacedObject.chunk` from the transform (dirtying both chunks on a boundary crossing), syncs `Interactable.name` to the mesh children, and sets `LightingState.stale`. Script props are *drafted* in the inspector and committed as one `ScriptEdit::SetProps` when the user lets go, because applying = `detach_binding` + `NeedsHydration` (the host skips already-hydrated pairs), which rebuilds the plugin's components. Mesh asset / collider changes go through `RespawnPlaced::InPlace` (same id).
 - **Menu/toolbar commands are `EditorAction` messages** applied in `Update` (`actions.rs`): save, bake, world switch/create (with the editor camera re-seated), plugin add/remove/reload (`ReloadRequested` in script_host), exit to menu, selection ops. Panels never touch those systems directly.
 - **The engine has no pause menu any more.** `pause_menu.rs`, `PauseMenuState`, `UiAnchors` and the bevy_ui slider are gone. In the editor, Escape backs out one level (put a carried entity back → Select tool → deselect). `SimulationState::Paused` still exists for plugins. The engine never pauses on its own.
@@ -282,7 +285,8 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | Shift+S | Save terrain |
 | Shift+B | Bake lightmaps (3×3 chunks around the player by default; `BakeConfig::bake_radius`) |
 | Shift+L | Toggle baked lighting / flat unlit debug view |
-| Shift+P | Toggle physics debug gizmos |
+| Shift+P | Toggle collision-shape gizmos (also View menu) |
+| F8 | Toggle placed-light gizmos (also View menu) |
 
 ## Terrain Streaming Pipeline
 
@@ -316,7 +320,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 - Object lightmap UVs are generated by `uv_unwrap`: **every triangle gets its own cell** in a grid atlas, with a gutter, and the mesh is de-indexed so corners are unshared. Cell size is budgeted by **world-space** triangle size (`BakeConfig::mesh_texels_per_metre`, floored by `mesh_texels_per_triangle`, capped by `mesh_resolution_max`) and computed per *placed instance*, not per mesh asset — triangle count alone gave the cafe's 20×12 m two-triangle floor a 32 px atlas (~0.5 texels/m vs the terrain's 16), which the 5-band toon quantiser turned into staircased shadow edges. Dilation passes are derived from the cell size (`dilate_passes_for_atlas`), since the gutter is a fraction of the cell and grows with resolution. Objects are blurred with `LightmapBuffer::blur_cells` (confined to each triangle's cell, masked to shaded texels) rather than the plain `blur` terrain uses — atlas neighbours are not surface neighbours. **Each triangle is rasterised with a `blur_radius` margin of extrapolated surface** (`rasterize_geometry`'s `margin`, `Raster { geometry, covered }`), the object-atlas counterpart of `ChunkBakeGrid`: without it the kernel clamped at every triangle edge and biased it by ~5% of the lighting range in opposite directions across a shared edge, which the quantiser drew as band contours jumping along triangle seams (`docs/LIGHTING.md` §7.13). Overlapping UVs are the one thing a lightmap cannot tolerate — the previous triplanar projection bucketed by *unsigned* dominant axis, so a cube's top and bottom shared texels and faces wore each other's lighting.
 - Object texels are positioned with **each sub-mesh entity's own `GlobalTransform`** (`ToonMeshEntry::transform`), never the placed root's: glTF nodes carry their own scale/offset (the rock is scaled 2.5× inside its file), and a texel placed by the root transform alone sits inside the real mesh, where self-shadowing bakes it black.
 - The one `DirectionalLight` (`BakedSun`, shadows off) and `GlobalAmbientLight` exist only for meshes still on `StandardMaterial` (editor previews and thumbnails; the player is toon + probe-lit now); `world/mod.rs` derives their PBR values from the lightmap-unit intensities
-- Placed `PointLight`/`SpotLight` entities are **bake inputs only** — `spawn_placed_entity` never attaches a bevy light component, so they cost nothing at runtime and are visualised by `draw_light_gizmos` in the editor. They reach dynamic objects through the probe bake (as peak-preserving L1 lobes, so the side of a character facing *away* from a bright lamp loses some ambient to the lobe's negative tail), at lattice resolution.
+- Placed `PointLight`/`SpotLight` entities are **bake inputs only** — `spawn_placed_entity` never attaches a bevy light component, so they cost nothing at runtime and are visualised by `draw_light_gizmos` in the editor (`LightGizmos` group, View ▸ Light gizmos). They reach dynamic objects through the probe bake (as peak-preserving L1 lobes, so the side of a character facing *away* from a bright lamp loses some ambient to the lobe's negative tail), at lattice resolution.
 - **Shadow casting uses real triangles**, not convex hulls: `baking/bvh.rs` builds one flat BVH per bake over every toon-shaded mesh whose ancestry includes a `PlacedObject` or a `RigidBody::Static` and no `DynamicLit` (so editor props and plugin scenery like the cafe shell occlude, but a plugin's moving toon mesh — or a placed entity a script animates, which marks itself `DynamicLit` — does not). The CPU bakers traverse it and the GPU bake traverses the same uploaded nodes. Objects shadow themselves; acne is avoided by offsetting ray origins along the *face* normal, and terrain rays use two origins (0.5 up for the coarse DDA, at the surface for the exact triangle test). AO rays also test the BVH, which yields contact shadows under furniture; **AO is distance-weighted** (a hit at `t` counts `1 − t/ao_radius`, via the BVH's closest-hit query `nearest_hit`/`bvh_nearest`), so a 20 m radius can do sky-visibility duty without a canopy overhead reading as contact-dark. Terrain *and* scenery re-emit bounce (v10), carrying sun, placed lights and sky (v11/v12); terrain and object texels both receive it (objects per texel, no coarse grid — atlas cells aren't spatially coherent *between* cells, though they are within one, which `docs/GPU_OBJECT_BAKE_PLAN.md` argues is the cheap speed-up nobody has taken).
 - Volumetric fog + distance fog for atmosphere; sky dome follows camera
 

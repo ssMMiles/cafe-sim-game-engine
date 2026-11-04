@@ -16,7 +16,6 @@
 #   web-profile       tools/web.sh profile    (→ pkg/)          web-dev   target/web-profile
 #   web-release       tools/web.sh release    (→ pkg/)          release   target/web-release
 #   web-check         cargo web-check                           dev       target/web
-#   physics-debug     cargo run-physics-debug                   dev       target/physics-debug
 #   profiling         cargo run-profiling                       dev       target/profiling
 #
 # Profiles already get their own subdirectory, so `perf` shares `target/`
@@ -26,7 +25,6 @@
 build-plugins = "build --workspace --exclude engine"
 perf = "test --profile perf"
 web-check = "check --target wasm32-unknown-unknown --target-dir target/web"
-run-physics-debug = "run --features physics_debug --target-dir target/physics-debug"
 run-profiling = "run --features profiling --target-dir target/profiling"
 
 # sccache: shares compiled dependency artifacts across target dirs and

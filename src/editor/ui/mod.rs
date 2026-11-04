@@ -194,6 +194,8 @@ pub struct Panels<'w, 's> {
     pub config: ResMut<'w, PlacementConfig>,
     pub tool: Res<'w, State<EditorTool>>,
     pub settings: ResMut<'w, UserSettings>,
+    /// View-menu gizmo toggles (light markers).
+    pub gizmo_store: ResMut<'w, GizmoConfigStore>,
     pub brush: ResMut<'w, BrushSettings>,
     pub lighting: ResMut<'w, LightingState>,
     pub history: ResMut<'w, History>,

@@ -9,6 +9,7 @@ use bevy_egui::egui;
 use super::Panels;
 use crate::editor::actions::EditorAction;
 use crate::editor::tool::EditorTool;
+use crate::game::world::objects::LightGizmos;
 use crate::projects;
 
 #[derive(Resource, Default)]
@@ -50,31 +51,7 @@ pub fn menu_bar(ui: &mut egui::Ui, panels: &mut Panels) {
                 ui.close();
             }
             ui.separator();
-            let current = panels
-                .world_config
-                .as_deref()
-                .map(|c| c.world_id.clone())
-                .unwrap_or_default();
-            ui.menu_button("Worlds", |ui| {
-                let worlds: Vec<String> = panels
-                    .active
-                    .as_deref()
-                    .map(|a| a.0.worlds.clone())
-                    .unwrap_or_default();
-                for world in worlds {
-                    let is_current = world == current;
-                    if ui.selectable_label(is_current, &world).clicked() && !is_current {
-                        panels.actions.write(EditorAction::SwitchWorld(world));
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if ui.button("New world…").clicked() {
-                    panels.menu.new_world_open = true;
-                    panels.menu.new_world_error = None;
-                    ui.close();
-                }
-            });
+            ui.menu_button("Worlds", |ui| world_list(ui, panels));
             ui.separator();
             if ui.button("Exit to main menu").clicked() {
                 panels.actions.write(EditorAction::ExitToMenu);
@@ -157,11 +134,13 @@ pub fn menu_bar(ui: &mut egui::Ui, panels: &mut Panels) {
             }
             let mut physics = s.physics_debug;
             if ui
-                .checkbox(&mut physics, "Physics gizmos\tShift+P")
+                .checkbox(&mut physics, "Collision shapes\tShift+P")
                 .changed()
             {
                 s.physics_debug = physics;
             }
+            let lights = &mut panels.gizmo_store.config_mut::<LightGizmos>().0.enabled;
+            ui.checkbox(lights, "Light gizmos\tF8");
             ui.separator();
             if ui.button("Reset layout").clicked() {
                 panels.menu.reset_layout = true;
@@ -250,14 +229,45 @@ pub fn toolbar(ui: &mut egui::Ui, panels: &mut Panels) {
             panels.actions.write(EditorAction::Bake);
         }
         ui.separator();
-        if let Some(cfg) = panels.world_config.as_deref() {
-            ui.label(format!("world: {}", cfg.world_id));
+        if let Some(current) = current_world(panels) {
+            ui.label("world:");
+            egui::ComboBox::from_id_salt("toolbar_world")
+                .selected_text(current)
+                .show_ui(ui, |ui| world_list(ui, panels));
             ui.separator();
         }
         ui.label(format!("fly {:.0} m/s", panels.cam_settings.fly_speed));
         ui.separator();
         ui.weak("RMB drag: look · WASD/QE: fly · scroll: dolly · F: focus · Esc: cancel");
     });
+}
+
+fn current_world(panels: &Panels) -> Option<String> {
+    panels.world_config.as_deref().map(|c| c.world_id.clone())
+}
+
+/// The project's worlds, current one highlighted, plus "New world…". Shared by
+/// File ▸ Worlds and the toolbar's world dropdown.
+fn world_list(ui: &mut egui::Ui, panels: &mut Panels) {
+    let current = current_world(panels).unwrap_or_default();
+    let worlds: Vec<String> = panels
+        .active
+        .as_deref()
+        .map(|a| a.0.worlds.clone())
+        .unwrap_or_default();
+    for world in worlds {
+        let is_current = world == current;
+        if ui.selectable_label(is_current, &world).clicked() && !is_current {
+            panels.actions.write(EditorAction::SwitchWorld(world));
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui.button("New world…").clicked() {
+        panels.menu.new_world_open = true;
+        panels.menu.new_world_error = None;
+        ui.close();
+    }
 }
 
 /// Modal-ish windows (only "New world" for now).
