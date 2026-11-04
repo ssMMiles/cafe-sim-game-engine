@@ -1120,3 +1120,121 @@ the cafe has no spot lights.)
   one writer): 3.0 ms. `rebuild_cost` (ignored) is the measurement. The real
   fix, if it ever matters again, is to fill only the slab a move exposes
   rather than the whole window.
+
+## World sharing: zip bundles from the native editor into the browser — 3 November 2026
+
+The OPFS keys the web build uses are byte-for-byte the native repo-relative paths
+(`worlds/{id}/…`, `projects/{id}/project.toml`, `assets/prefabs/{name}.prefab`), so a
+"world bundle" is a plain zip of those files and `index.html` unpacks it into OPFS
+with its own JavaScript before `init()` — no engine import code at all.
+`docs/WORLD_SHARING.md` is the reference.
+
+- `editor/world_export.rs` (File ▸ Export world as zip, `EditorAction::ExportWorld`)
+  packs only *current-version* lightmaps/probes: the cafe world was 115 MB on disk /
+  563 files; the bundle is 92 files, 45 MB raw, 26 MB zipped (469 stale `.v{n}` files
+  skipped). The `zip` crate is native-only with `default-features = false,
+  features = ["deflate-flate2"]` — the bare `deflate` feature silently pulls zopfli.
+- The page's zip reader / layout mapping / manifest parse+serialise are pure functions
+  between `@bundle-logic-start/end` markers; `tools/bundle-check.mjs` evaluates that
+  slice (via `new Function`) so the logic is tested without a browser and never
+  duplicated. It also accepts a hand-zipped `{id}/world.meta` folder (synthesising a
+  project), which is what the user's `worlds/cafe.zip` was.
+- Manifests are merged, not replaced (worlds union; existing name/plugins/start kept);
+  removing a world on the page prunes it from manifests. Importing while the engine
+  runs reloads the page — project discovery only happens at startup.
+- Landing page now needs an **Enter** click (user gesture; also where the world list
+  and import live); `?play` restores the old auto-start, `?world=<url>` imports first.
+- `export_world_fixture` (ignored test) exports a real world into a temp dir through a
+  symlink so nothing under `worlds/` is overwritten; `unzip -t` and the node checker
+  both read its output.
+
+## Web: "shader uses 144 bytes, layout minBindingSize 128" was a stale cached wasm — 3 November 2026
+
+Reported right after the start-page rewrite, so it looked like a regression. It was not:
+`BakeUniformsData` and the WGSL `BakeUniforms` are both 144 bytes (36 × 4) and have been
+since 2026-10-28 (`bake_uniforms_match_the_shader_struct` pins them), and every wasm on
+disk was built today. A 128-byte *layout* can only come from a pre-Oct-28 binary, i.e.
+the browser's HTTP cache: `python -m http.server` sends no `Cache-Control`, so Chrome
+applies heuristic freshness (10 % of the file's age) — long for a wasm whose
+`Last-Modified` is weeks old — while the shader, touched by the latest commit, was
+refetched. Proven by loading the same server in a fresh headless Chrome profile (empty
+cache): clean boot, pipeline created. Hard reload fixes a hit browser.
+
+Guards added: `index.html` HEADs the wasm with `cache: 'no-cache'` and keys both engine
+files on its `Last-Modified` (`?v=`); `tools/serve.py` serves with `Cache-Control:
+no-cache` for everything bevy fetches itself. The headless-console harness was a scratch
+script (CDP: Runtime/Log enable → Page.navigate → collect `consoleAPICalled`); the pattern
+lives in `tools/tint-check.mjs` if it is needed again.
+
+## Web profiling harness + the walking stutter is the probe volume — 3 November 2026
+
+`web-profile` feature (= `bevy/trace`) + `tools/web-trace.mjs` (headless Chrome via CDP:
+navigate, click the bevy_ui menu by coordinate, `focus` the canvas, send keys, record
+`toplevel`+`blink.user_timing`, summarise longest tasks with their enclosing bevy spans).
+`docs/WEB_PROFILING.md` has the recipe and the measured table.
+
+Lessons that cost time:
+- A synthetic CDP click does not focus the canvas for winit's key listeners; one run
+  measured a standing player (no rebuilds, no streaming) and looked clean. `focus` step
+  + before/after screenshots now guard it.
+- Chrome's trace ring buffer kept only the last 5 s of a 30 s run at this build's
+  ~80k spans/s (`recordContinuously`); `recordAsMuchAsPossible` + 1.5 GB buffer works,
+  a 4 GB request hung collection. A full run is ~5.5 M events → the harness filters
+  `check_conditions`/`system_commands` at collection and writes JSON Lines (one
+  JSON.stringify / readFileSync of the whole thing overflows V8's string limit).
+- Span names from tracing-wasm look like `"system" bevy_ecs::system::function_system
+  name = "path::fn";` — note the spaces around `=`.
+- Tracing overhead is the dominant cost in a traced wasm frame (~2000 measures/frame;
+  avian's substep schedule is ~500 spans per physics step), so a traced headless run
+  sits at ~20 fps regardless. Only hitches and relative costs are meaningful.
+
+Result: walking the cafe world, `update_probe_volume` ran 7× in 9 s at 47–101 ms each
+(store-dirty rebuilds every 0.5 s cooldown while chunk probe grids stream in, plus
+re-centres every ~32 m), with `extract/prepare_assets<GpuImage>` 9–20 ms behind each
+(56.6 MB re-upload). Standing still there are no hitches. Secondary: fixed-timestep
+catch-up turns each hitch into 2–3 long frames (`run_fixed_main_schedule` 77–82 ms).
+Unattributed one-off: a 990 ms task at level load with 743 ms in `PreUpdate` before its
+first system — a flush/observer, suspect the shell's scene-ready toon conversion + UV
+unwrap. `worlds/cafe-bundle.zip` (gitignored) is the import fixture the runs use.
+
+## Probe volume made incremental; web validation — 3 November 2026
+
+Replaced the full-window rebuild + whole-`Image` re-upload with: window follows the
+focus cell by cell (slab = `CellBox::minus`), per-chunk dirty refills
+(`ProbeStore::take_dirty`), direct f16 copy (`ChunkProbes::bits_clamped_y`), a
+131k-cell per-frame budget, and region `write_texture` from the render world
+(`ProbeVolume.uploads` → `ProbeUploadQueue`; images are `RENDER_WORLD` only now).
+`update_probe_volume` on web: 101 ms max → 4.7 ms max / 0.2 ms mean. Native full fill
+12.8 ms single-threaded (faster than the old rayon rebuild). `Time<Virtual>` max_delta 50 ms.
+
+Validation caveats: a second Claude session (`elm` worktree) ran the same harness at the
+same time — same DevTools port (now per-pid), same /tmp log names, and it `pkill`ed my
+run; load average 7 during my trace, so frame medians are useless, per-system maxima
+are fine. `worlds/cafe.zip` is now the user's own native export (shell placed), used as
+the import fixture; `cafe-bundle.zip` is gone.
+
+Next targets (all level-load, not walking): time *outside every span* in the longest
+frames = the OPFS `spawn_local` chunk pipeline (EXR/probe decode + meshing) — needs
+`info_span!`s to even show up; a 106 ms `FixedMain` step (avian trimesh collider for the
+shell); `apply_object_lightmaps` 71 ms; `extract_render_asset<RenderMesh>` 62 ms.
+`pkg/` holds the `web-profile` build; a plain `opfs` build needs a full ~18 min rebuild
+(different bevy feature set), left for the user to run.
+
+## Build-time research (no measurements) — 3 November 2026
+
+`docs/BUILD_TIMES.md`. Facts found: 689 crates native / 640 wasm; target/ is 68 GB with
+**42 distinct `engine` build units** (every profile × target × feature-set × crate-type
+combo lives on forever); each worktree has its own cold target dir; `[profile.release]`
+is fat LTO + cgu=1 and is what both `wasm-pack --release` and `cargo test --release`
+use, and wasm-pack runs `wasm-opt` on the 63 MB result every time; dev deps are
+opt-level 3 **with full debuginfo**. Biggest single suspect: the direct
+`image = "0.25.6"` dependency is unused (all `image::` hits are `bevy::image`) but its
+default features force **avif → ravif → rav1e** (an AV1 encoder) and tiff/webp/gif onto
+bevy_image's `image`. Also unused: bevy `audio` (rodio/cpal/lewton), `bevy_gilrs`,
+`sysinfo_plugin`, clipboard ×2 (arboard + bevy_clipboard), `webgl2`, ktx2/zstd/luts,
+mesh/sprite picking, morph, reflect_auto_register; avian3d `xpbd_joints` (0 joints in
+code, yet ~500 joint-solver spans per physics step in the web trace), avian
+`bevy_picking`; bevy_egui `open_url`/`picking`; direct `winit`/`argh`/`env_logger`/
+`rand`/`getrandom 0.2`. Cranelift component is installed but unused (no wasm32 support
+→ needs per-target override). The user measures on a faster machine; do not time builds
+here.

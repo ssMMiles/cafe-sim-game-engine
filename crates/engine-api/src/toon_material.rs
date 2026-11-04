@@ -117,9 +117,11 @@ impl ProbeVolumeImages {
 }
 
 /// Allocate the probe volume textures, black. [`PROBE_VOLUME_DIMS`]
-/// `Rgba16Float`, kept in the main world too so the host can rewrite them,
-/// and sampled linearly with **repeat** addressing — the lattice is
-/// toroidal, so the shader never wraps coordinates itself.
+/// `Rgba16Float`, render-world only — the host never rewrites the `Image`,
+/// it writes regions straight into the GPU textures (`world::probe_volume`),
+/// so bevy may drop the CPU copy after the first upload — and sampled
+/// linearly with **repeat** addressing: the lattice is toroidal, so the
+/// shader never wraps coordinates itself.
 pub fn create_probe_volume_images(images: &mut Assets<Image>) -> ProbeVolumeImages {
     let [w, h, d] = PROBE_VOLUME_DIMS;
     let mut make = || {
@@ -132,7 +134,7 @@ pub fn create_probe_volume_images(images: &mut Assets<Image>) -> ProbeVolumeImag
             TextureDimension::D3,
             vec![0u8; (w * h * d * 8) as usize],
             TextureFormat::Rgba16Float,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            RenderAssetUsages::RENDER_WORLD,
         );
         image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
             address_mode_u: ImageAddressMode::Repeat,

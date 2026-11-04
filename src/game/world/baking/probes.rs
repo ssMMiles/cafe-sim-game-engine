@@ -360,6 +360,19 @@ impl ChunkProbes {
         self.get(cx, y, cz)
     }
 
+    /// The stored `f16` bit patterns of the probe at `(cx, cy, cz)`, `cy`
+    /// clamped into the grid, if the grid covers that column. What the
+    /// volume texture fill copies straight into texels — no decode.
+    pub fn bits_clamped_y(&self, cx: i32, cy: i32, cz: i32) -> Option<&[u16; PROBE_CHANNELS]> {
+        let y = cy.clamp(self.y0, self.y0 + self.ny as i32 - 1);
+        let (x, y, z) = (cx - self.x0, y - self.y0, cz - self.z0);
+        if x < 0 || z < 0 || x >= self.nx as i32 || z >= self.nz as i32 {
+            return None;
+        }
+        let i = self.index(x as u32, y as u32, z as u32);
+        self.data[i..i + PROBE_CHANNELS].try_into().ok()
+    }
+
     /// Inclusive lattice range on Y.
     pub fn y_range(&self) -> (i32, i32) {
         (self.y0, self.y0 + self.ny as i32 - 1)

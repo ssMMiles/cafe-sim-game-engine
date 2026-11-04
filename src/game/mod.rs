@@ -82,6 +82,16 @@ impl Plugin for SimulationPlugin {
 
         app.add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default());
 
+        // After a long frame the fixed-timestep loop catches up by running
+        // every 64 Hz step it missed in the next frame; with bevy's default
+        // 250 ms cap that is up to 16 physics steps (measured 77–82 ms on
+        // the web after a single hitch — one hitch became three long
+        // frames). 50 ms is at most three steps: game time slips a little
+        // during a hitch instead of the frame after it stalling too.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(std::time::Duration::from_millis(50));
+
         app.add_plugins(WorldPlugin);
         app.add_plugins(GfxPlugin);
         app.add_message::<InteractableClicked>();

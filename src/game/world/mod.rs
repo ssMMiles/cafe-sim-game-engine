@@ -102,6 +102,7 @@ impl Plugin for WorldPlugin {
                 .after(finalize_computed_chunks)
                 .in_set(WorldSet::InGame),
         );
+        probe_volume::build_render_app(app);
     }
 }
 
