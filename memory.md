@@ -1272,3 +1272,9 @@ Dropping it (build-time trims) made every glTF spawn panic in
 `bevy_world_serialization::world_asset_spawner`: "world contains the unregistered type
 Transform". Restored in the bevy feature list. rust-analyzer is told not to run cargo in
 this workspace (`.vscode/settings.json`) — the user doesn't hand-write code here.
+
+## mold on macOS — 4 November 2026
+
+Not possible: brew's mold 3.0.0 emits ELF only and rejects Mach-O input; the macOS fork
+(sold) is discontinued. Apple's ld-1167 is already the fast linker; wasm links via
+rust-lld. Don't re-investigate unless a Linux native target appears.

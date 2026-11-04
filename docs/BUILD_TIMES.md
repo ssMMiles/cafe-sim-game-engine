@@ -162,7 +162,12 @@ bevy = { version = "0.20", default-features = false, features = [
   build time — move it to a `dev` feature or `cargo run --features
   bevy/dynamic_linking` when a release native binary matters.
 - Linker: macOS already uses Apple's new `ld` (ld-1167), which is the fast
-  one; `lld`/`mold` gain little here. `split-debuginfo = "unpacked"` is the
+  one. **mold cannot be used on macOS at all** (checked 2026-11-04 with
+  brew's mold 3.0.0: it only emits ELF, rejects Mach-O objects as "unknown
+  file type"; its macOS fork `sold` was discontinued). The wasm build links
+  with rustc's bundled `rust-lld` regardless. mold only matters if a Linux
+  native target appears (then a `[target.x86_64-unknown-linux-gnu]`
+  `-C link-arg=-fuse-ld=mold` rustflag). `split-debuginfo = "unpacked"` is the
   macOS default already.
 
 ## 4. Stop rebuilding the same bevy over and over
