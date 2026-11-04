@@ -7,6 +7,7 @@
 //! one [`ScriptEdit::SetProps`] when the user stops interacting, because a
 //! commit re-hydrates the binding and resets the plugin's runtime state.
 
+use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
 use bevy_egui::egui;
 use engine_api::{PropDef, PropValue, ScriptBinding, ScriptProp};
@@ -16,6 +17,7 @@ use crate::editor::actions::EditorAction;
 use crate::editor::edits::{PlacedEdited, RespawnPlaced, ScriptEdit};
 use crate::editor::history::{Change, MergeKey};
 use crate::editor::prefab_edit::PrefabAction;
+use crate::game::gfx::atmosphere::{AtmosphereStyle, MAX_RAY_SAMPLES};
 use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
@@ -957,6 +959,8 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
     });
 
     edges(ui, &mut panels.edge_style);
+    atmosphere(ui, &mut panels.atmosphere);
+    gpu_timings(ui, &panels.diagnostics);
 
     if env != before {
         // The curve is a display setting — the shaders read it straight from
@@ -1095,6 +1099,234 @@ fn edges(ui: &mut egui::Ui, style: &mut ResMut<EdgeStyle>) {
         }
         style.set_if_neq(s);
     });
+}
+
+/// Fog and god rays (`AtmosphereStyle`). The model and the knobs:
+/// `docs/ATMOSPHERE.md`.
+fn atmosphere(ui: &mut egui::Ui, style: &mut ResMut<AtmosphereStyle>) {
+    let mut s = **style;
+
+    ui.collapsing_header_default_open("Fog", |ui| {
+        ui.checkbox(&mut s.fog_enabled, "Enabled");
+        ui.weak("Applied after shading, from the depth buffer. The sky is left alone.");
+        egui::Grid::new("fog").num_columns(2).show(ui, |ui| {
+            ui.label("Colour");
+            ui.color_edit_button_rgb(&mut s.fog_color);
+            ui.end_row();
+
+            ui.label("Density").on_hover_text(
+                "Extinction per metre. At 0.001 a surface 1 km away is almost \
+                 fully fogged; at 0.01, 100 m is.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.fog_density)
+                    .speed(0.0001)
+                    .range(0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{v:.4}")),
+            );
+            ui.end_row();
+
+            ui.label("Start").on_hover_text(
+                "Distance before any fog accumulates, so nearby geometry stays crisp.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.fog_start)
+                    .speed(0.5)
+                    .range(0.0..=1000.0)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Max opacity").on_hover_text(
+                "Ceiling on the fog, so the far distance never flattens completely.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.fog_max)
+                    .speed(0.01)
+                    .range(0.0..=1.0),
+            );
+            ui.end_row();
+
+            ui.label("Height falloff").on_hover_text(
+                "Height over which the density falls by 1/e, for mist that pools \
+                 in valleys. 0 = the same fog at every height.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.fog_height_falloff)
+                    .speed(0.25)
+                    .range(0.0..=500.0)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.add_enabled_ui(s.fog_height_falloff > 0.0, |ui| {
+                ui.label("Height base")
+                    .on_hover_text("World height at which the density equals the value above.");
+            });
+            ui.add_enabled(
+                s.fog_height_falloff > 0.0,
+                egui::DragValue::new(&mut s.fog_height_base)
+                    .speed(0.5)
+                    .suffix(" m"),
+            );
+            ui.end_row();
+
+            ui.label("Sun tint").on_hover_text(
+                "How much of the sun's colour the fog picks up when you look into it.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.fog_sun_tint)
+                    .speed(0.01)
+                    .range(0.0..=4.0),
+            );
+            ui.end_row();
+
+            ui.label("Sun tightness")
+                .on_hover_text("Higher keeps that tint in a tighter halo around the sun.");
+            ui.add(
+                egui::DragValue::new(&mut s.fog_sun_exponent)
+                    .speed(0.1)
+                    .range(0.01..=64.0),
+            );
+            ui.end_row();
+
+            ui.label("Steps").on_hover_text(
+                "Quantise the fog amount into this many flat steps, the way the \
+                 toon curve quantises brightness. 0 leaves it smooth.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.fog_steps)
+                    .speed(0.25)
+                    .range(0..=16),
+            );
+            ui.end_row();
+        });
+    });
+
+    ui.collapsing_header_default_open("God rays", |ui| {
+        ui.checkbox(&mut s.rays_enabled, "Enabled");
+        ui.weak("Light shafts marched through the depth buffer. Experimental.");
+        egui::Grid::new("rays").num_columns(2).show(ui, |ui| {
+            ui.label("Intensity")
+                .on_hover_text("Brightness of the shafts, as a multiple of the sun's colour.");
+            ui.add(
+                egui::DragValue::new(&mut s.rays_intensity)
+                    .speed(0.01)
+                    .range(0.0..=5.0),
+            );
+            ui.end_row();
+
+            ui.label("Decay").on_hover_text(
+                "Falloff per sample along the march. Below ~0.9 the shafts stay short.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.rays_decay)
+                    .speed(0.002)
+                    .range(0.0..=1.0),
+            );
+            ui.end_row();
+
+            ui.label("Spread").on_hover_text(
+                "How far towards the sun each pixel marches, as a fraction of the distance.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.rays_spread)
+                    .speed(0.01)
+                    .range(0.0..=2.0),
+            );
+            ui.end_row();
+
+            ui.label("Samples").on_hover_text(
+                "Depth taps per pixel — the whole cost of the effect. Halving it \
+                 halves the pass; watch the GPU timings below.",
+            );
+            ui.add(
+                egui::DragValue::new(&mut s.rays_samples)
+                    .speed(0.5)
+                    .range(1..=MAX_RAY_SAMPLES),
+            );
+            ui.end_row();
+        });
+    });
+
+    if ui.button("Reset atmosphere").clicked() {
+        s = AtmosphereStyle::default();
+    }
+    style.set_if_neq(s);
+}
+
+/// Per-pass GPU time, straight from bevy's render diagnostics.
+///
+/// This is how to price an effect: note the number, toggle the effect, look
+/// again. Each pass is timed on the GPU with timestamp queries; where the
+/// adapter has none, bevy falls back to CPU *encode* time, which is not the
+/// same thing — the heading says which is on show.
+fn gpu_timings(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
+    egui::CollapsingHeader::new("GPU timings")
+        .default_open(false)
+        .show(ui, |ui| {
+            // `render/<pass>/elapsed_gpu`, as recorded by `pass_span`.
+            let mut rows: Vec<(String, f64, bool)> = diagnostics
+                .iter()
+                .filter_map(|d| {
+                    let path = d.path().as_str();
+                    let rest = path.strip_prefix("render/")?;
+                    let (name, field) = rest.rsplit_once('/')?;
+                    let gpu = match field {
+                        "elapsed_gpu" => true,
+                        "elapsed_cpu" => false,
+                        _ => return None,
+                    };
+                    Some((name.replace('/', " › "), d.smoothed()?, gpu))
+                })
+                .collect();
+
+            if rows.is_empty() {
+                ui.weak("No render diagnostics yet — they land a few frames in.");
+                return;
+            }
+
+            // A pass that reports GPU time has a CPU row too; the GPU one is
+            // what anyone pricing an effect wants, so drop the duplicate.
+            let timed_on_gpu: std::collections::HashSet<String> = rows
+                .iter()
+                .filter(|(_, _, gpu)| *gpu)
+                .map(|(name, _, _)| name.clone())
+                .collect();
+            rows.retain(|(name, _, gpu)| *gpu || !timed_on_gpu.contains(name));
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+            let any_cpu = rows.iter().any(|(_, _, gpu)| !gpu);
+            ui.weak(if any_cpu {
+                "ms per pass. ᶜ = CPU encode time (no GPU timer on this adapter)."
+            } else {
+                "ms per pass, measured on the GPU."
+            });
+            egui::Grid::new("gpu_timings")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    let total: f64 = rows
+                        .iter()
+                        .filter(|(_, _, gpu)| *gpu)
+                        .map(|(_, v, _)| v)
+                        .sum();
+                    for (name, value, gpu) in &rows {
+                        ui.label(if *gpu {
+                            name.clone()
+                        } else {
+                            format!("{name} ᶜ")
+                        });
+                        ui.monospace(format!("{value:.3}"));
+                        ui.end_row();
+                    }
+                    if total > 0.0 {
+                        ui.strong("total (GPU)");
+                        ui.monospace(format!("{total:.3}"));
+                        ui.end_row();
+                    }
+                });
+        });
 }
 
 /// Direction *to* the sun as (azimuth, elevation) in degrees.

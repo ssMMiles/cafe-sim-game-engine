@@ -1,7 +1,8 @@
 //! User-level editor settings: `editor_settings.json`.
 //!
-//! The dock layout and the outline look ([`EdgeStyle`]) are *user*
-//! preferences, not level or project data, so they live in their own file —
+//! The dock layout, the outline look ([`EdgeStyle`]) and the atmosphere
+//! ([`AtmosphereStyle`]) are *user* preferences, not level or project data,
+//! so they live in their own file —
 //! the working directory on native, the same-named OPFS key on web
 //! (fire-and-forget writes, like project manifests and prefabs). The file is
 //! JSON and every top-level entry is parsed on its own, so an outdated or
@@ -17,6 +18,7 @@ use bevy::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{DockLayout, EditorTab};
+use crate::game::gfx::atmosphere::AtmosphereStyle;
 use crate::game::gfx::post_process::EdgeStyle;
 use egui_dock::DockState;
 
@@ -30,6 +32,7 @@ const SETTINGS_KEY: &str = "editor_settings.json";
 struct EditorSettingsFile<'a> {
     dock: &'a DockState<EditorTab>,
     edges: &'a EdgeStyle,
+    atmosphere: &'a AtmosphereStyle,
 }
 
 #[derive(Resource)]
@@ -63,7 +66,13 @@ fn entry<T: DeserializeOwned>(file: &serde_json::Value, key: &str) -> Option<T> 
 
 /// Apply whatever the file holds. Entries that are missing or broken leave
 /// the current (default) value alone.
-fn apply(text: &str, layout: &mut DockLayout, edges: &mut EdgeStyle, state: &mut SettingsPersist) {
+fn apply(
+    text: &str,
+    layout: &mut DockLayout,
+    edges: &mut EdgeStyle,
+    atmosphere: &mut AtmosphereStyle,
+    state: &mut SettingsPersist,
+) {
     let file: serde_json::Value = match serde_json::from_str(text) {
         Ok(file) => file,
         Err(e) => {
@@ -77,15 +86,24 @@ fn apply(text: &str, layout: &mut DockLayout, edges: &mut EdgeStyle, state: &mut
     if let Some(style) = entry(&file, "edges") {
         *edges = style;
     }
+    if let Some(style) = entry(&file, "atmosphere") {
+        *atmosphere = style;
+    }
     state.last_saved = Some(text.to_owned());
 }
 
 /// Serialize the current settings; write them when they differ from the disk
 /// copy.
-fn persist(layout: &DockLayout, edges: &EdgeStyle, state: &mut SettingsPersist) {
+fn persist(
+    layout: &DockLayout,
+    edges: &EdgeStyle,
+    atmosphere: &AtmosphereStyle,
+    state: &mut SettingsPersist,
+) {
     let text = match serde_json::to_string_pretty(&EditorSettingsFile {
         dock: &layout.0,
         edges,
+        atmosphere,
     }) {
         Ok(text) => text,
         Err(e) => {
@@ -120,10 +138,11 @@ pub fn save_settings(
     time: Res<Time>,
     layout: Res<DockLayout>,
     edges: Res<EdgeStyle>,
+    atmosphere: Res<AtmosphereStyle>,
     mut state: ResMut<SettingsPersist>,
 ) {
     if state.timer.tick(time.delta()).just_finished() {
-        persist(&layout, &edges, &mut state);
+        persist(&layout, &edges, &atmosphere, &mut state);
     }
 }
 
@@ -131,9 +150,10 @@ pub fn save_settings(
 pub fn save_settings_now(
     layout: Res<DockLayout>,
     edges: Res<EdgeStyle>,
+    atmosphere: Res<AtmosphereStyle>,
     mut state: ResMut<SettingsPersist>,
 ) {
-    persist(&layout, &edges, &mut state);
+    persist(&layout, &edges, &atmosphere, &mut state);
 }
 
 /// Native: read the file once at startup, before the first dock pass.
@@ -141,12 +161,13 @@ pub fn save_settings_now(
 pub fn load_settings(
     mut layout: ResMut<DockLayout>,
     mut edges: ResMut<EdgeStyle>,
+    mut atmosphere: ResMut<AtmosphereStyle>,
     mut state: ResMut<SettingsPersist>,
 ) {
     let Ok(text) = std::fs::read_to_string(SETTINGS_KEY) else {
         return; // first run
     };
-    apply(&text, &mut layout, &mut edges, &mut state);
+    apply(&text, &mut layout, &mut edges, &mut atmosphere, &mut state);
 }
 
 /// Web: kick off the OPFS read; [`poll_settings`] applies it when it lands
@@ -174,6 +195,7 @@ pub fn load_settings(mut state: ResMut<SettingsPersist>) {
 pub fn poll_settings(
     mut layout: ResMut<DockLayout>,
     mut edges: ResMut<EdgeStyle>,
+    mut atmosphere: ResMut<AtmosphereStyle>,
     mut state: ResMut<SettingsPersist>,
 ) {
     let Some(slot) = state.pending.as_ref() else {
@@ -183,7 +205,7 @@ pub fn poll_settings(
         return;
     };
     state.pending = None;
-    apply(&text, &mut layout, &mut edges, &mut state);
+    apply(&text, &mut layout, &mut edges, &mut atmosphere, &mut state);
 }
 
 #[cfg(test)]
@@ -202,6 +224,7 @@ mod tests {
         let json = serde_json::to_value(&EditorSettingsFile {
             dock: &DockLayout::default().0,
             edges: &EdgeStyle::default(),
+            atmosphere: &AtmosphereStyle::default(),
         })
         .unwrap();
         let nodes = &json["dock"]["surfaces"][0]["Main"]["nodes"];
@@ -235,9 +258,14 @@ mod tests {
             crease_angle: 12.0,
             ..default()
         };
+        let air = AtmosphereStyle {
+            fog_density: 0.042,
+            ..default()
+        };
         let full = serde_json::to_string(&EditorSettingsFile {
             dock: &DockLayout::default().0,
             edges: &custom,
+            atmosphere: &air,
         })
         .unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -263,28 +291,41 @@ mod tests {
         let load = |value: &serde_json::Value| {
             let mut layout = DockLayout(DockState::new(vec![EditorTab::Viewport]));
             let mut edges = EdgeStyle::default();
+            let mut atmosphere = AtmosphereStyle::default();
             apply(
                 &value.to_string(),
                 &mut layout,
                 &mut edges,
+                &mut atmosphere,
                 &mut SettingsPersist::default(),
             );
-            (layout.0.iter_all_tabs().count(), edges)
+            (layout.0.iter_all_tabs().count(), edges, atmosphere)
         };
         let default_tabs = DockLayout::default().0.iter_all_tabs().count();
 
-        assert_eq!(load(&value), (default_tabs, custom));
+        assert_eq!(load(&value), (default_tabs, custom, air));
 
-        // Old file: no `edges`.
+        // An older file holds only `dock`; the rest fall back to defaults.
         let dock_only = serde_json::json!({ "dock": value["dock"].clone() });
-        assert_eq!(load(&dock_only), (default_tabs, EdgeStyle::default()));
+        assert_eq!(
+            load(&dock_only),
+            (
+                default_tabs,
+                EdgeStyle::default(),
+                AtmosphereStyle::default()
+            )
+        );
 
-        // Broken dock: edges still load, layout stays as it was.
+        // Broken dock: the other entries still load, the layout stays put.
         value["dock"] = serde_json::json!("not a layout");
-        assert_eq!(load(&value), (1, custom));
+        assert_eq!(load(&value), (1, custom, air));
 
-        // A field added to `EdgeStyle` later is simply absent: the rest load.
-        let partial = serde_json::json!({ "edges": { "crease_angle": 12.0 } });
-        assert_eq!(load(&partial).1, custom);
+        // A field added to a style later is simply absent: the rest load.
+        let partial = serde_json::json!({
+            "edges": { "crease_angle": 12.0 },
+            "atmosphere": { "fog_density": 0.042 },
+        });
+        let (_, edges, atmosphere) = load(&partial);
+        assert_eq!((edges, atmosphere), (custom, air));
     }
 }

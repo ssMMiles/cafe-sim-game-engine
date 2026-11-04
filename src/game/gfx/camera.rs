@@ -18,8 +18,6 @@ use bevy::{
     },
     image::ImageSampler,
     input::mouse::{MouseMotion, MouseWheel},
-    light::VolumetricFog,
-    pbr::{DistanceFog, FogFalloff},
     prelude::*,
     render::render_resource::{
         Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -97,32 +95,27 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
             // Enable depth and normal prepasses for edge detection
             DepthPrepass,
             NormalPrepass,
-            // Filled from `EdgeStyle` by `sync_edge_detection_settings`
-            // before the first frame renders.
+            // Both filled by their sync systems before the first frame
+            // renders — from `EdgeStyle` and `AtmosphereStyle`.
             EdgeDetectionSettings::default(),
+            crate::game::gfx::atmosphere::AtmosphereSettings::default(),
             Fxaa::default(),
         ))
         .insert((
-            // HDR intermediate render target — required by VolumetricFog
+            // HDR intermediate render target: the toon bands are quantised
+            // from unclamped radiance.
             Hdr,
             // Toon shaders already map HDR→display; skip the filmic LUT to avoid double-compression
             // 0.20 made `None` a full passthrough (no `DebandDither`, no clamp of negative
             // channels). `Linear` is the new name for "no tone curve, keep the clamp" — the
             // behaviour this camera had before, and the safe input to the 5-band quantiser.
             Tonemapping::Linear,
-            // Distance fog fading distant terrain into the warm horizon haze
-            DistanceFog {
-                color: Color::srgba(0.85, 0.80, 0.72, 1.0),
-                directional_light_color: Color::srgba(1.0, 0.85, 0.65, 0.5),
-                directional_light_exponent: 6.0,
-                falloff: FogFalloff::Exponential { density: 0.0003 },
-            },
-            // Volumetric fog enables light-shaft rendering through cloud FogVolumes
-            VolumetricFog {
-                step_count: 64,
-                ambient_intensity: 0.1,
-                ..default()
-            },
+            // No `DistanceFog` / `VolumetricFog`: fog is our own post-process
+            // (`gfx::atmosphere`), which reaches every surface that wrote
+            // depth rather than only `StandardMaterial` ones, and leaves the
+            // sky alone. Bevy's volumetric fog needs a real-time directional
+            // shadow map, which `BakedSun` deliberately has not — see
+            // `docs/ATMOSPHERE.md` §5.
         ))
         .id();
 

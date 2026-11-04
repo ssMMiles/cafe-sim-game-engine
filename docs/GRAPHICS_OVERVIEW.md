@@ -35,11 +35,19 @@ is the whole cartoon look. It's set per world in the inspector (click empty
 space → Shading): how many bands, how dark the darkest is, the exposure,
 and how the bands are spaced.
 
-**3. Outlines come from the picture, not the models.** After the scene is
-drawn, one pass looks at two hidden by-products of drawing: how far away
-each pixel is, and which way its surface faces. Wherever neighbouring pixels
-disagree sharply, it draws a line. It's tuned in the inspector → Edges, and
-explained in [`EDGE_DETECTION.md`](EDGE_DETECTION.md).
+**3. Fog and outlines come from the picture, not the models.** Once the
+scene is drawn, two passes work from a hidden by-product of drawing it: a
+record of how far away each pixel is, and which way its surface faces.
+
+- **Outlines**: wherever neighbouring pixels disagree sharply about either,
+  draw a line. Inspector → Edges, and [`EDGE_DETECTION.md`](EDGE_DETECTION.md).
+- **Fog and god rays**: distance tells you how much haze to add, and how
+  much open sky lies between a pixel and the sun. Inspector → Fog / God
+  rays, and [`ATMOSPHERE.md`](ATMOSPHERE.md). God rays are off by default —
+  they're an experiment.
+
+Doing it this way means neither effect cares what an object is made of, and
+the sky is skipped automatically, since nothing was "drawn" there.
 
 ## One frame, step by step
 
@@ -56,6 +64,7 @@ explained in [`EDGE_DETECTION.md`](EDGE_DETECTION.md).
    - Clip any negative colours (there's no film-style tone curve, because
      the toon curve already decided the brightness).
    - Draw the outlines.
+   - Add haze with distance, and light shafts from the sun if they're on.
    - Smooth jagged edges (FXAA).
 4. **Show it.** In play mode the picture is a fixed 1920×1080 image
    stretched to the window. In the editor it's resized to fit the viewport
@@ -78,6 +87,9 @@ explained in [`EDGE_DETECTION.md`](EDGE_DETECTION.md).
   below the world.
 - Shift+L switches baked light off, to check colours flat. F2 turns the
   outlines off.
+- A **GPU timings** list (inspector, with nothing selected) shows how long
+  each drawing step takes, so you can price an effect by switching it off
+  and watching the number.
 
 ## Native vs browser
 
@@ -91,14 +103,6 @@ Same picture, same shaders. The differences are about *when* work happens:
 
 These were found while writing this up. Details are in `GRAPHICS.md` §17.
 
-- **The "volumetric fog" setting does nothing.** The fog clouds it was for
-  were removed long ago.
-- **The distance fog doesn't fog the world.** It only affects editor helper
-  objects, because our own shaders don't apply it. The haze on the horizon,
-  if you see one, is the sky's colour, not fog. Neither fog setting costs
-  anything while it's doing nothing; adding real distance fog would be
-  nearly free, but Bevy's volumetric fog would need real-time sun shadows
-  we deliberately don't have (`GRAPHICS.md` §9.1).
 - **Shift+L can miss things that load while it's on.** They come in lit
   until you toggle again.
 - **Far terrain almost never switches to its lower-detail versions.** The
@@ -112,5 +116,6 @@ These were found while writing this up. Details are in `GRAPHICS.md` §17.
 |-----------------|------|
 | Change how light looks, or understand a bake | [`LIGHTING.md`](LIGHTING.md) |
 | Tune outlines | [`EDGE_DETECTION.md`](EDGE_DETECTION.md) |
+| Tune fog or god rays, or price an effect | [`ATMOSPHERE.md`](ATMOSPHERE.md) |
 | Find which file draws what | [`GRAPHICS.md`](GRAPHICS.md) |
 | Chase a web stutter | [`WEB_PROFILING.md`](WEB_PROFILING.md) |

@@ -66,6 +66,11 @@ pub fn run() {
                 ..default()
             }),
     )
+    // Per-pass GPU timings, surfaced in the editor (inspector → nothing
+    // selected → GPU timings). Bevy only adds this itself under
+    // `tracing-tracy`; it costs two timestamps per recorded span and falls
+    // back to CPU encode times where `TIMESTAMP_QUERY` is unavailable.
+    .add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin)
     .add_plugins(PhysicsPlugins::default())
     .add_plugins(storage::StoragePlugin)
     .add_plugins(settings::SettingsPlugin)

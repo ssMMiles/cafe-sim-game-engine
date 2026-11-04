@@ -37,6 +37,7 @@ the date above. Line numbers drift, but the names don't.
 |-------|-----------|--------|
 | Everything lighting: units, the bake equation, the toon curve, knobs, invariants, defects | [`LIGHTING.md`](LIGHTING.md) | As-built. Parts of §2/§6.2 predate the incremental probe fill (§18) |
 | Outline pass | [`EDGE_DETECTION.md`](EDGE_DETECTION.md) | As-built |
+| Fog + god rays | [`ATMOSPHERE.md`](ATMOSPHERE.md) | As-built |
 | Probe volume + blob shadows design | [`DYNAMIC_LIGHTING_PLAN.md`](DYNAMIC_LIGHTING_PLAN.md) | §8 was as-built on 2026-10-28; its numbers are stale (§18) |
 | Plugin-spawned objects' lighting | [`PLUGIN_LIGHTING_PLAN.md`](PLUGIN_LIGHTING_PLAN.md) | Header current, body historical |
 | Moving the object bake to the GPU | [`GPU_OBJECT_BAKE_PLAN.md`](GPU_OBJECT_BAKE_PLAN.md) | Plan; stage 1 done |
@@ -63,8 +64,7 @@ RENDER WORLD, gameplay Camera3d → GameRenderTarget (Rgba16Float, MSAA ×4)
     Prepass        depth + world normals    (every opaque mesh; sky dome writes normals, no depth)
     MainPass       opaque: terrain, toon objects, sky dome, StandardMaterial bits
                    transparent: blob shadows, placement preview, brush disc, gizmos
-    (volumetric fog: scheduled, but a no-op, §9)
-    PostProcess    tonemapping (Linear) → edge detection → FXAA
+    PostProcess    tonemapping (Linear) → edge detection → atmosphere → FXAA
     upscaling
         ▼
 RENDER WORLD, Camera2d → window
@@ -84,7 +84,7 @@ prepass.
 
 | Camera | Where | Target | Layers | Notable components |
 |--------|-------|--------|--------|--------------------|
-| Gameplay `Camera3d` (`PlayerCamera`) | `src/game/gfx/camera.rs:84-127`, spawned `OnEnter(InGame)` | `GameRenderTarget` image | 0 | `Hdr`, `Msaa::Sample4` (default), `DepthPrepass`, `NormalPrepass`, `Tonemapping::Linear`, `Fxaa`, `EdgeDetectionSettings`, `DistanceFog`, `VolumetricFog` |
+| Gameplay `Camera3d` (`PlayerCamera`) | `src/game/gfx/camera.rs:84-127`, spawned `OnEnter(InGame)` | `GameRenderTarget` image | 0 | `Hdr`, `Msaa::Sample4` (default), `DepthPrepass`, `NormalPrepass`, `Tonemapping::Linear`, `Fxaa`, `EdgeDetectionSettings`, `AtmosphereSettings` |
 | Presentation `Camera2d` | `camera.rs:140-155` | window | 1 | `PrimaryEguiContext`, `IsDefaultUiCamera`, `Fxaa` |
 | Main-menu `Camera2d` | `src/menu/mod.rs:58` | window | 0 (default) | despawned on leaving the menu |
 | Editor thumbnail rig | `src/editor/thumbnails.rs:186-221` | 128 px `Rgba8UnormSrgb` per job | 7 | `is_active: false` until a job; `Tonemapping::Linear`; own `DirectionalLight` (12 000 lux) |
@@ -361,8 +361,12 @@ There are no shadow maps and no clustered lights.
 2. **Edge detection.** Relative second difference of prepass depth, plus the
    crease angle between prepass normals. Its own doc is
    [`EDGE_DETECTION.md`](EDGE_DETECTION.md). `.after(tonemapping).before(fxaa)`.
-3. **`fxaa`.** Bevy defaults (High/High); it also smooths the outlines.
-4. Then `upscaling` to the target.
+3. **Atmosphere.** Distance fog, then god rays, from the depth prepass.
+   Its own doc is [`ATMOSPHERE.md`](ATMOSPHERE.md). Ordered after the edge
+   pass through the `PostProcessPass` set, so outlines fog with the
+   geometry they trace; skipped entirely when both effects are off.
+4. **`fxaa`.** Bevy defaults (High/High); it also smooths the outlines.
+5. Then `upscaling` to the target.
 
 The presentation `Camera2d` runs its own Linear tonemapping and FXAA over
 the sprite and UI.
@@ -376,77 +380,24 @@ environment maps, skybox, and shadow maps. `bevy_post_process` and
 ## 9. Atmosphere
 
 - **Sky dome** (§5.3).
-- **`DistanceFog`** on the gameplay camera: exponential, density 0.0003,
-  warm colour, with a sun-direction tint. **It only reaches
-  `StandardMaterial` meshes.** None of our shaders (toon, terrain, sky) call
-  Bevy's fog function, so the world itself is unfogged (§17).
-- **`VolumetricFog`** (`step_count` 64). **A no-op, and free.**
-  `extract_volumetric_fog` returns early and strips `VolumetricFog` off the
-  render-world views when no `VolumetricLight` exists, and nothing spawns one
-  or any `FogVolume`. Every downstream system then filters on a component
-  that isn't there: the three `prepare_*` systems and the `volumetric_fog`
-  pass all match nothing, no pipeline is ever specialised, and
-  `prepare_view_depth_textures_for_volumetric_fog` doesn't even reach its
-  depth-usage bump (it queries the *render* world, which extract already
-  cleared). What remains is five empty system dispatches a frame plus two
-  meshes and an embedded shader registered at startup. The comment at
-  `camera.rs:120` about "cloud FogVolumes" is history (`git log -S FogVolume`).
-  Cost of *using* it, and cheaper alternatives: §9.1.
+- **Distance fog and god rays** are one fullscreen pass of our own,
+  `gfx::atmosphere`, driven from the depth prepass and ordered
+  `.after(edge detection).before(fxaa)` through the `PostProcessPass` set.
+  Fog is Beer–Lambert with an optional exponential height profile, a sun
+  tint and optional quantisation into flat bands; god rays march the depth
+  buffer towards the sun's screen position. Both are switched on
+  independently by `AtmosphereStyle` (inspector → nothing selected), and
+  the pass is skipped entirely when both are off. The sky writes no depth,
+  so it is excluded for free. Full reference: **`docs/ATMOSPHERE.md`**.
+- **Bevy's `DistanceFog` and `VolumetricFog` are gone** from the camera
+  (2026-11-04). Neither was doing anything: the volumetric one is stripped
+  by bevy whenever no `VolumetricLight` exists, and `DistanceFog` only
+  reached `StandardMaterial` meshes because our shaders never called bevy's
+  fog function. Bevy's volumetric fog also needs a real-time cascaded
+  shadow map from the sun, which `BakedSun` deliberately does not have —
+  `docs/ATMOSPHERE.md` §5.
 
 ---
-
-### 9.1 What fog would cost
-
-Read from the code, not measured on a GPU.
-
-**Distance fog in our shaders — effectively free.** Bevy's `apply_fog` is
-`length()`, an `exp()` and a `mix()`, plus a loop over directional lights
-for the sun-scattering tint (we have one, and its shadow branch is skipped
-because `BakedSun` has shadows off). Tens of ALU per fragment against a
-toon shader that already does a B-spline probe read. The uniform is already
-bound and `DISTANCE_FOG` is already defined, so applying it is a few lines
-in `toon_lighting.wesl` and `terrain_toon.wesl` behind `@if(DISTANCE_FOG)`.
-
-Two design questions come with it, neither of them about cost:
-- **Before or after the toon curve.** After, fog is a smooth gradient laid
-  over flat bands. Before (fog as a radiance term), the bands stay crisp
-  and distance reads as desaturation. The second suits the look; the first
-  is what every PBR engine does.
-- **The sky dome is a 900 m sphere.** At density 0.0003 it would come out
-  ~24% fog colour if fogged like geometry. Normally you exclude the sky and
-  let `SkyColors` carry the horizon instead — which is what happens today.
-
-Note the outline pass runs *after* tonemapping and reads depth, not colour,
-so fogged-out geometry still gets full-strength outlines. That is what
-`EdgeStyle`'s own distance fade exists for; the two fades want to be set to
-roughly the same range.
-
-**Bevy's volumetric fog — expensive, and against the grain here.** The
-shader raymarches `step_count` steps per pixel (64 by default) and samples
-a directional light's *cascaded shadow map* at every step. That shadow map
-is the problem: `BakedSun` is `shadow_maps_enabled: false` because
-everything is baked, so switching it on means adding real-time shadow
-passes over the whole visible world — geometry re-rendered per cascade,
-every frame — purely to feed the fog. The raymarch on top is ~130 M shadow
-samples per frame at 1080p. On the web build, where the whole renderer
-shares one thread with the game, that is not a trade worth making.
-
-**Cheaper routes to the same look**, roughly in order of effort:
-1. **Analytic height fog** in the toon and terrain shaders: `exp()` on the
-   fragment's world Y and distance. Gives valley mist and aerial
-   perspective for a handful of ALU. No new passes, no shadow maps.
-2. **Radial god rays as a post-process**: a fullscreen pass that blurs
-   outward from the sun's screen position, masked by the depth buffer we
-   already render for the outlines. ~16 taps, one pass, no shadow maps.
-   This is the classic cheap light-shaft effect and would sit next to the
-   edge pass.
-3. **Baked shafts.** We already bake sun visibility into the probe grid
-   (`c0.a`). A volumetric term could be baked alongside it and read for
-   free at runtime, at probe resolution (1 m) — coarse, but consistent with
-   how everything else here is lit.
-
-If volumetric fog is wanted, (2) is the one to build: it reuses the depth
-prepass, costs one pass, and needs nothing from the lighting model.
 
 ## 10. Editor-only visuals
 
@@ -479,6 +430,10 @@ checkboxes.
 | Shift+P | collision shapes | `sync_physics_debug` |
 | F8 | light markers | `toggle_light_gizmos` (the gizmo config directly) |
 | Shift+T | 4 px white crosshair (bevy_ui node) | `update_crosshair_display` |
+
+Fog and god rays have no keybind; they are checkboxes in the inspector
+(`docs/ATMOSPHERE.md` §6). Per-pass GPU timings are in the same panel —
+§16 and `ATMOSPHERE.md` §7 explain how to read them.
 
 ---
 
@@ -590,18 +545,23 @@ Mac ([`WEB_PROFILING.md`](WEB_PROFILING.md)).
 
 `Time<Virtual>::set_max_delta(50 ms)` caps fixed-step catch-up after a hitch.
 
+**For live numbers, don't guess from this table**: the inspector's *GPU
+timings* section (nothing selected) lists every render pass in milliseconds
+from bevy's `RenderDiagnosticsPlugin`, which `src/lib.rs` adds explicitly.
+Note a value, toggle the effect, look again. Rows marked `ᶜ` are CPU encode
+times, which happens only where the adapter has no `TIMESTAMP_QUERY`.
+
 ---
 
 ## 17. Things that don't do what they look like
 
 Each item was read from the code; none was observed on screen.
 
-1. **Volumetric fog is a no-op**, as is the "cloud FogVolumes" comment
-   (§9). Either remove the component or add a `VolumetricLight` and
-   `FogVolume`s.
-2. **Distance fog doesn't touch the world.** Only `StandardMaterial` meshes
-   get it (§9). If the horizon is meant to haze, the toon and terrain
-   shaders would have to apply it.
+1. ~~Volumetric fog is a no-op.~~ **Fixed 2026-11-04**: removed from the
+   camera, along with `DistanceFog` (§9).
+2. ~~Distance fog doesn't touch the world.~~ **Fixed 2026-11-04**: fog is
+   our own post-process now and reaches everything that wrote depth
+   (`docs/ATMOSPHERE.md`).
 3. ~~`outline.rs` is inert.~~ **Fixed 2026-11-04**: the module, its
    `GfxSet::Running` system, the Shift+O binding and `UserSettings
    .outline_visible` are deleted (engine-api ABI 13). The screen-space edge
@@ -629,10 +589,9 @@ Each item was read from the code; none was observed on screen.
 9. **The gameplay image is a fixed 1920×1080 with a nearest sampler**,
    stretched to the window. On a window of a different size or aspect
    ratio, that re-quantises pixels (deliberate; flagged for a revisit).
-10. **The depth prepass is rendered for the outlines alone.** Nothing else
-    reads it: the fog that would have is inert (item 1), and the toon
-    shaders don't sample depth. Turning edge detection off with F2 skips
-    the pass but still pays for the prepass.
+10. **The depth prepass is read by the outline and atmosphere passes
+    only** — the toon shaders never sample depth. Turning both off skips
+    both passes but still pays for the prepass itself.
 
 ---
 
@@ -665,4 +624,3 @@ Each item was read from the code; none was observed on screen.
 | `terrain_toon.wesl:194` | "terrain has no UV0" | it has an all-zero UV0 |
 | `baking/gpu.rs:27` | `BakeComputeNode` render-graph node | a `RenderGraph`-schedule system |
 | `baking/gpu.rs:359` | "only on non-wasm targets" | called unconditionally |
-| `camera.rs:120` | volumetric fog for cloud `FogVolume`s | none exist (§17.1) |

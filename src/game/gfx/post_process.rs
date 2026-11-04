@@ -34,6 +34,7 @@ use bevy::{
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         camera::ExtractedCamera,
+        diagnostic::RecordDiagnostics,
         extract_component::{
             ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
             UniformComponentPlugin,
@@ -80,6 +81,7 @@ impl Plugin for EdgeDetectionPlugin {
                 // which left their order to the scheduler.
                 edge_detection_pass
                     .in_set(Core3dSystems::PostProcess)
+                    .in_set(super::PostProcessPass::EdgeDetection)
                     .after(tonemapping)
                     .before(fxaa),
             );
@@ -253,6 +255,8 @@ fn edge_detection_pass(
         )),
     );
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("edge_detection_pass"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -267,9 +271,12 @@ fn edge_detection_pass(
         multiview_mask: None,
     });
 
+    // Named span so the editor's GPU timings panel can show what this costs.
+    let span = diagnostics.pass_span(&mut render_pass, "edge detection");
     render_pass.set_render_pipeline(render_pipeline);
     render_pass.set_bind_group(0, &bind_group, &[settings_index.index()]);
     render_pass.draw(0..3, 0..1);
+    span.end(&mut render_pass);
 }
 
 // ---------------------------------------------------------------------------

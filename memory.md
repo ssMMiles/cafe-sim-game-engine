@@ -1334,3 +1334,26 @@ raymarches 64 steps sampling a **directional shadow map**, which `BakedSun` does
 (`shadow_maps_enabled: false`); enabling it means real-time cascade passes over a fully baked
 world. If we want shafts: depth-buffer radial god rays as a post-process next to the edge pass.
 See `docs/GRAPHICS.md` §9.1.
+
+## Atmosphere pass: fog + god rays, and in-editor GPU timings — 4 November 2026
+
+`gfx/atmosphere.rs` + `assets/shaders/atmosphere_post.wesl`, `docs/ATMOSPHERE.md`. One fullscreen
+pass after the edge pass (ordered by the new `PostProcessPass` set, so outlines fog too), skipped
+when both effects are off. Chose a **post-process over material shaders**: no engine-api ABI bump,
+no third copy of a duplicated shader block, covers everything that wrote depth, and the sky is
+excluded for free. Confirmed in bevy source that the prepass runs the material's own `specialize`
+(`prepass/mod.rs` `user_specialize`), so the sky dome's `depth_write_enabled = false` applies
+there too — depth stays 0 for sky. World position comes from a full `world_from_clip` unprojection
+(not fov/aspect/near), so it can't drift from the real projection. Everything uses `textureLoad`,
+so no WebGPU uniformity risk even in the ray loop; verified with `tools/tint-check.mjs`.
+Height fog's closed form `ρ(y0)·(1−e^−k)/k·len` is mirrored in Rust and tested against numerical
+integration. Removed bevy's `DistanceFog`/`VolumetricFog` from the camera.
+
+**GPU timings in the editor** (inspector → nothing selected): `src/lib.rs` adds
+`RenderDiagnosticsPlugin` — bevy only adds it under `tracing-tracy` — and our passes use
+`pass_span`. `ctx.diagnostic_recorder()` returns `Option<Res<_>>`; you need `.as_deref()` before
+`pass_span` (the impls are on `Option<&T>`/`Option<Arc<T>>`). Timestamps work because bevy's
+default `WgpuSettingsPriority::Functionality` requests every adapter feature; without
+`TIMESTAMP_QUERY` it silently reports CPU *encode* time instead, which the panel marks `ᶜ`.
+`AtmosphereStyle` is persisted per user next to `EdgeStyle`; fog arguably belongs in
+`EnvironmentData` (world.meta v7) once the look settles.

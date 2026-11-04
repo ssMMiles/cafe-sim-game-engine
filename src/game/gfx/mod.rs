@@ -1,10 +1,12 @@
 use bevy::{pbr::ExtendedMaterial, prelude::*};
 
+pub mod atmosphere;
 pub mod camera;
 pub mod crosshair;
 pub mod post_process;
 pub mod toon_material;
 
+use atmosphere::{AtmospherePlugin, sync_atmosphere_settings};
 use camera::{
     adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input,
     resize_render_texture_sprite,
@@ -27,6 +29,19 @@ pub enum GfxSet {
 }
 
 pub struct GfxPlugin;
+
+/// Ordering for our own `Core3d` post-process passes. Both sit inside
+/// `Core3dSystems::PostProcess`, after `tonemapping` and before `fxaa`;
+/// this fixes their order against each other without either module having
+/// to expose its pass or pipeline types.
+///
+/// Edges are drawn first so the atmosphere fogs the outlines along with the
+/// geometry they trace.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PostProcessPass {
+    EdgeDetection,
+    Atmosphere,
+}
 
 impl Plugin for GfxPlugin {
     fn build(&self, app: &mut App) {
@@ -74,7 +89,11 @@ impl Plugin for GfxPlugin {
             ExtendedMaterial<StandardMaterial, ToonMaterial>,
         >::default());
         app.add_plugins(EdgeDetectionPlugin);
+        app.add_plugins(AtmospherePlugin);
 
-        app.add_systems(Update, sync_edge_detection_settings.in_set(GfxSet::InGame));
+        app.add_systems(
+            Update,
+            (sync_edge_detection_settings, sync_atmosphere_settings).in_set(GfxSet::InGame),
+        );
     }
 }

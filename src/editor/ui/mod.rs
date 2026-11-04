@@ -197,6 +197,10 @@ pub struct Panels<'w, 's> {
     /// View-menu gizmo toggles (light markers).
     pub gizmo_store: ResMut<'w, GizmoConfigStore>,
     pub edge_style: ResMut<'w, crate::game::gfx::post_process::EdgeStyle>,
+    pub atmosphere: ResMut<'w, crate::game::gfx::atmosphere::AtmosphereStyle>,
+    /// Frame rate for the status line, and the render app's per-pass GPU
+    /// timings for the inspector's readout.
+    pub diagnostics: Res<'w, DiagnosticsStore>,
     pub brush: ResMut<'w, BrushSettings>,
     pub lighting: ResMut<'w, LightingState>,
     pub history: ResMut<'w, History>,
@@ -251,7 +255,6 @@ fn install_fonts(ctx: &egui::Context) {
 /// word "Viewport".
 fn viewport_title(
     panels: &Panels,
-    diagnostics: &DiagnosticsStore,
     camera: Option<&Transform>,
     style: &egui::Style,
 ) -> egui::WidgetText {
@@ -264,7 +267,8 @@ fn viewport_title(
     let mut append = |text: String, color: egui::Color32| {
         job.append(&text, 0.0, egui::TextFormat::simple(font.clone(), color));
     };
-    let fps = diagnostics
+    let fps = panels
+        .diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
         .unwrap_or(0.0);
@@ -299,7 +303,6 @@ pub(super) fn editor_ui(
     target: Option<Res<GameRenderTarget>>,
     mut panels: Panels,
     controls: ActiveControls,
-    diagnostics: Res<DiagnosticsStore>,
     camera: Query<&Transform, (With<PlayerCamera>, Without<PlacedObject>)>,
 ) {
     // Register (idempotently) the render texture with egui before borrowing
@@ -417,12 +420,7 @@ pub(super) fn editor_ui(
         }
     });
 
-    let title = viewport_title(
-        &panels,
-        &diagnostics,
-        camera.single().ok(),
-        root.style().as_ref(),
-    );
+    let title = viewport_title(&panels, camera.single().ok(), root.style().as_ref());
     let mut tabs = EditorTabs::new(
         &mut current,
         previous.look_active,
