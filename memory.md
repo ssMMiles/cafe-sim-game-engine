@@ -1265,3 +1265,10 @@ wasm-pack locally; CI keeps wasm-pack). Table at the top of `.cargo/config.toml`
 for me: never pass `--features/--profile/--target/--target-dir` by hand. `opfs` is
 implied for wasm by the target rustflags. `wasm-bindgen-cli` must match Cargo.lock's
 wasm-bindgen (0.2.129 today; `tools/web.sh` checks and says what to install).
+
+## reflect_auto_register is required — 4 November 2026
+
+Dropping it (build-time trims) made every glTF spawn panic in
+`bevy_world_serialization::world_asset_spawner`: "world contains the unregistered type
+Transform". Restored in the bevy feature list. rust-analyzer is told not to run cargo in
+this workspace (`.vscode/settings.json`) — the user doesn't hand-write code here.

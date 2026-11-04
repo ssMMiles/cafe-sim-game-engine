@@ -1,0 +1,8 @@
+{
+  "// why": "rust-analyzer's cargo check / build-script / proc-macro runs compete with real builds for the CPU and keep a private target-dir unit warm; nobody writes code by hand in this workspace. To silence it fully, also disable the extension for this workspace (Extensions > rust-analyzer > Disable (Workspace)).",
+  "rust-analyzer.checkOnSave": false,
+  "rust-analyzer.cargo.buildScripts.enable": false,
+  "rust-analyzer.procMacro.enable": false,
+  "rust-analyzer.cargo.autoreload": false,
+  "rust-analyzer.diagnostics.enable": false
+}

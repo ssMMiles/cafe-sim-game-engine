@@ -7,13 +7,17 @@ resolver = "3"
 # Explicit feature list instead of bevy's defaults: the defaults pull audio
 # (rodio/cpal/vorbis), gamepads (gilrs), sysinfo, a second clipboard stack,
 # webgl2 shader variants, ktx2/zstd/LUTs, sprite picking, morph targets,
-# bevy_post_process and auto type registration — none of which this project
+# and bevy_post_process — none of which this project
 # uses. Each is a bevy rebuild to add back; see docs/BUILD_TIMES.md.
 bevy = { version = "0.20", default-features = false, features = [
     # platform / app
     "std", "async_executor", "multi_threaded",
     "bevy_asset", "bevy_log", "bevy_state", "bevy_winit",
     "keyboard", "mouse",
+    # glTF scenes spawn through bevy_world_serialization, which panics on any
+    # unregistered component type (Transform was the first). Auto-registration
+    # covers bevy's own types; dropping it would mean registering them by hand.
+    "reflect_auto_register",
     # rendering: pbr + the pieces the camera uses (Fxaa, volumetric/distance fog)
     "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_light", "bevy_anti_alias",
     "bevy_gltf", "gltf_animation", "bevy_scene",
