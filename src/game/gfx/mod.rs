@@ -3,6 +3,7 @@ use bevy::{pbr::ExtendedMaterial, prelude::*};
 pub mod atmosphere;
 pub mod camera;
 pub mod crosshair;
+pub mod frame_pacing;
 pub mod post_process;
 pub mod profiling;
 pub mod toon_material;
@@ -93,6 +94,7 @@ impl Plugin for GfxPlugin {
         app.add_plugins(EdgeDetectionPlugin);
         app.add_plugins(AtmospherePlugin);
         app.add_plugins(GfxProfilingPlugin);
+        app.add_plugins(frame_pacing::FramePacingPlugin);
 
         // The benchmark's override has to be set before the uniforms that
         // read it are built, or it would take effect a frame late — on the

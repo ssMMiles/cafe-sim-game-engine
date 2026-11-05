@@ -60,7 +60,9 @@ pub fn run() {
             .set(ImagePlugin::default_nearest())
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    present_mode: PresentMode::Immediate,
+                    // Overwritten from `DisplaySettings` once the user's
+                    // settings load; this is only the first frame's mode.
+                    present_mode: PresentMode::AutoNoVsync,
                     ..default()
                 }),
                 ..default()

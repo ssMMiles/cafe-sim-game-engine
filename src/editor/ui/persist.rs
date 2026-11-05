@@ -1,9 +1,9 @@
 //! User-level editor settings: `editor_settings.json`.
 //!
-//! The dock layout, the outline look ([`EdgeStyle`]) and the atmosphere
-//! ([`AtmosphereStyle`]) are *user* preferences, not level or project data,
-//! so they live in their own file —
-//! the working directory on native, the same-named OPFS key on web
+//! The dock layout, the outline look ([`EdgeStyle`]), the atmosphere
+//! ([`AtmosphereStyle`]) and vsync / the frame cap ([`DisplaySettings`]) are
+//! *user* preferences, not level or project data, so they live in their own
+//! file — the working directory on native, the same-named OPFS key on web
 //! (fire-and-forget writes, like project manifests and prefabs). The file is
 //! JSON and every top-level entry is parsed on its own, so an outdated or
 //! broken entry (an [`EditorTab`] variant renamed, say) falls back to its
@@ -13,26 +13,81 @@
 //! written only if they differ from what's already on disk. Exiting to the
 //! menu flushes immediately, so at worst a hard window close loses the final
 //! second of edits.
+//!
+//! **Adding a setting** touches three places in this file, all next to each
+//! other: a field on [`EditorSettingsFile`], the matching field on
+//! [`Persisted`]/[`PersistedMut`]/[`Targets`], and one `entry` line in
+//! [`apply`]. The systems never change.
 
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{DockLayout, EditorTab};
 use crate::game::gfx::atmosphere::AtmosphereStyle;
+use crate::game::gfx::frame_pacing::DisplaySettings;
 use crate::game::gfx::post_process::EdgeStyle;
 use egui_dock::DockState;
 
 /// Native path (working directory) and OPFS key.
 const SETTINGS_KEY: &str = "editor_settings.json";
 
-/// On-disk shape, written whole. Read back entry by entry ([`apply`]), so a
-/// new setting is a new field here plus one line there, and older files —
-/// which simply lack it — keep loading.
+/// On-disk shape, written whole. Read back entry by entry ([`apply`]), so
+/// older files — which simply lack a newer entry — keep loading.
 #[derive(Serialize)]
 struct EditorSettingsFile<'a> {
     dock: &'a DockState<EditorTab>,
     edges: &'a EdgeStyle,
     atmosphere: &'a AtmosphereStyle,
+    display: &'a DisplaySettings,
+}
+
+/// Every persisted setting, read-only: what a save serializes.
+#[derive(SystemParam)]
+pub struct Persisted<'w> {
+    layout: Res<'w, DockLayout>,
+    edges: Res<'w, EdgeStyle>,
+    atmosphere: Res<'w, AtmosphereStyle>,
+    display: Res<'w, DisplaySettings>,
+}
+
+impl Persisted<'_> {
+    fn file(&self) -> EditorSettingsFile<'_> {
+        EditorSettingsFile {
+            dock: &self.layout.0,
+            edges: &self.edges,
+            atmosphere: &self.atmosphere,
+            display: &self.display,
+        }
+    }
+}
+
+/// Every persisted setting, writable: where a load lands.
+#[derive(SystemParam)]
+pub struct PersistedMut<'w> {
+    layout: ResMut<'w, DockLayout>,
+    edges: ResMut<'w, EdgeStyle>,
+    atmosphere: ResMut<'w, AtmosphereStyle>,
+    display: ResMut<'w, DisplaySettings>,
+}
+
+impl PersistedMut<'_> {
+    fn targets(&mut self) -> Targets<'_> {
+        Targets {
+            layout: &mut self.layout,
+            edges: &mut self.edges,
+            atmosphere: &mut self.atmosphere,
+            display: &mut self.display,
+        }
+    }
+}
+
+/// Plain references to the settings a load writes — the form [`apply`]
+/// takes, so the tests can drive it without a `World`.
+struct Targets<'a> {
+    layout: &'a mut DockLayout,
+    edges: &'a mut EdgeStyle,
+    atmosphere: &'a mut AtmosphereStyle,
+    display: &'a mut DisplaySettings,
 }
 
 #[derive(Resource)]
@@ -66,13 +121,7 @@ fn entry<T: DeserializeOwned>(file: &serde_json::Value, key: &str) -> Option<T> 
 
 /// Apply whatever the file holds. Entries that are missing or broken leave
 /// the current (default) value alone.
-fn apply(
-    text: &str,
-    layout: &mut DockLayout,
-    edges: &mut EdgeStyle,
-    atmosphere: &mut AtmosphereStyle,
-    state: &mut SettingsPersist,
-) {
+fn apply(text: &str, targets: Targets, state: &mut SettingsPersist) {
     let file: serde_json::Value = match serde_json::from_str(text) {
         Ok(file) => file,
         Err(e) => {
@@ -81,30 +130,24 @@ fn apply(
         }
     };
     if let Some(dock) = entry(&file, "dock") {
-        layout.0 = dock;
+        targets.layout.0 = dock;
     }
     if let Some(style) = entry(&file, "edges") {
-        *edges = style;
+        *targets.edges = style;
     }
     if let Some(style) = entry(&file, "atmosphere") {
-        *atmosphere = style;
+        *targets.atmosphere = style;
+    }
+    if let Some(display) = entry(&file, "display") {
+        *targets.display = display;
     }
     state.last_saved = Some(text.to_owned());
 }
 
 /// Serialize the current settings; write them when they differ from the disk
 /// copy.
-fn persist(
-    layout: &DockLayout,
-    edges: &EdgeStyle,
-    atmosphere: &AtmosphereStyle,
-    state: &mut SettingsPersist,
-) {
-    let text = match serde_json::to_string_pretty(&EditorSettingsFile {
-        dock: &layout.0,
-        edges,
-        atmosphere,
-    }) {
+fn persist(file: &EditorSettingsFile, state: &mut SettingsPersist) {
+    let text = match serde_json::to_string_pretty(file) {
         Ok(text) => text,
         Err(e) => {
             warn!("Failed to serialize the editor settings: {e}");
@@ -132,42 +175,26 @@ fn persist(
     state.last_saved = Some(text);
 }
 
-/// Debounced save while the editor is in front (the only place either setting
-/// is edited).
-pub fn save_settings(
-    time: Res<Time>,
-    layout: Res<DockLayout>,
-    edges: Res<EdgeStyle>,
-    atmosphere: Res<AtmosphereStyle>,
-    mut state: ResMut<SettingsPersist>,
-) {
+/// Debounced save while the editor is in front (the only place any of these
+/// settings is edited).
+pub fn save_settings(time: Res<Time>, settings: Persisted, mut state: ResMut<SettingsPersist>) {
     if state.timer.tick(time.delta()).just_finished() {
-        persist(&layout, &edges, &atmosphere, &mut state);
+        persist(&settings.file(), &mut state);
     }
 }
 
 /// Flush on the way out to the menu, so quitting right after an edit keeps it.
-pub fn save_settings_now(
-    layout: Res<DockLayout>,
-    edges: Res<EdgeStyle>,
-    atmosphere: Res<AtmosphereStyle>,
-    mut state: ResMut<SettingsPersist>,
-) {
-    persist(&layout, &edges, &atmosphere, &mut state);
+pub fn save_settings_now(settings: Persisted, mut state: ResMut<SettingsPersist>) {
+    persist(&settings.file(), &mut state);
 }
 
 /// Native: read the file once at startup, before the first dock pass.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_settings(
-    mut layout: ResMut<DockLayout>,
-    mut edges: ResMut<EdgeStyle>,
-    mut atmosphere: ResMut<AtmosphereStyle>,
-    mut state: ResMut<SettingsPersist>,
-) {
+pub fn load_settings(mut settings: PersistedMut, mut state: ResMut<SettingsPersist>) {
     let Ok(text) = std::fs::read_to_string(SETTINGS_KEY) else {
         return; // first run
     };
-    apply(&text, &mut layout, &mut edges, &mut atmosphere, &mut state);
+    apply(&text, settings.targets(), &mut state);
 }
 
 /// Web: kick off the OPFS read; [`poll_settings`] applies it when it lands
@@ -192,12 +219,7 @@ pub fn load_settings(mut state: ResMut<SettingsPersist>) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn poll_settings(
-    mut layout: ResMut<DockLayout>,
-    mut edges: ResMut<EdgeStyle>,
-    mut atmosphere: ResMut<AtmosphereStyle>,
-    mut state: ResMut<SettingsPersist>,
-) {
+pub fn poll_settings(mut settings: PersistedMut, mut state: ResMut<SettingsPersist>) {
     let Some(slot) = state.pending.as_ref() else {
         return;
     };
@@ -205,7 +227,7 @@ pub fn poll_settings(
         return;
     };
     state.pending = None;
-    apply(&text, &mut layout, &mut edges, &mut atmosphere, &mut state);
+    apply(&text, settings.targets(), &mut state);
 }
 
 #[cfg(test)]
@@ -225,6 +247,7 @@ mod tests {
             dock: &DockLayout::default().0,
             edges: &EdgeStyle::default(),
             atmosphere: &AtmosphereStyle::default(),
+            display: &DisplaySettings::default(),
         })
         .unwrap();
         let nodes = &json["dock"]["surfaces"][0]["Main"]["nodes"];
@@ -250,11 +273,32 @@ mod tests {
         assert_eq!(tabs(14), serde_json::json!(["Tool"]));
     }
 
-    /// Files written before the edge style existed hold only `dock`; they
-    /// must keep their layout. A broken entry must not take the others down.
+    /// Everything a load produces, compared as one value.
+    type Loaded = (usize, EdgeStyle, AtmosphereStyle, DisplaySettings);
+
+    fn load(value: &serde_json::Value) -> Loaded {
+        let mut layout = DockLayout(DockState::new(vec![EditorTab::Viewport]));
+        let mut edges = EdgeStyle::default();
+        let mut atmosphere = AtmosphereStyle::default();
+        let mut display = DisplaySettings::default();
+        apply(
+            &value.to_string(),
+            Targets {
+                layout: &mut layout,
+                edges: &mut edges,
+                atmosphere: &mut atmosphere,
+                display: &mut display,
+            },
+            &mut SettingsPersist::default(),
+        );
+        (layout.0.iter_all_tabs().count(), edges, atmosphere, display)
+    }
+
+    /// Files written before a setting existed hold only the older entries;
+    /// they must keep those. A broken entry must not take the others down.
     #[test]
     fn entries_load_independently() {
-        let custom = EdgeStyle {
+        let edges = EdgeStyle {
             crease_angle: 12.0,
             ..default()
         };
@@ -262,10 +306,15 @@ mod tests {
             fog_density: 0.042,
             ..default()
         };
+        let display = DisplaySettings {
+            vsync: true,
+            frame_cap: 90,
+        };
         let full = serde_json::to_string(&EditorSettingsFile {
             dock: &DockLayout::default().0,
-            edges: &custom,
+            edges: &edges,
             atmosphere: &air,
+            display: &display,
         })
         .unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -287,23 +336,9 @@ mod tests {
             }
         }
         finite(&mut value["dock"]);
-
-        let load = |value: &serde_json::Value| {
-            let mut layout = DockLayout(DockState::new(vec![EditorTab::Viewport]));
-            let mut edges = EdgeStyle::default();
-            let mut atmosphere = AtmosphereStyle::default();
-            apply(
-                &value.to_string(),
-                &mut layout,
-                &mut edges,
-                &mut atmosphere,
-                &mut SettingsPersist::default(),
-            );
-            (layout.0.iter_all_tabs().count(), edges, atmosphere)
-        };
         let default_tabs = DockLayout::default().0.iter_all_tabs().count();
 
-        assert_eq!(load(&value), (default_tabs, custom, air));
+        assert_eq!(load(&value), (default_tabs, edges, air, display));
 
         // An older file holds only `dock`; the rest fall back to defaults.
         let dock_only = serde_json::json!({ "dock": value["dock"].clone() });
@@ -312,20 +347,22 @@ mod tests {
             (
                 default_tabs,
                 EdgeStyle::default(),
-                AtmosphereStyle::default()
+                AtmosphereStyle::default(),
+                DisplaySettings::default()
             )
         );
 
         // Broken dock: the other entries still load, the layout stays put.
         value["dock"] = serde_json::json!("not a layout");
-        assert_eq!(load(&value), (1, custom, air));
+        assert_eq!(load(&value), (1, edges, air, display));
 
         // A field added to a style later is simply absent: the rest load.
         let partial = serde_json::json!({
             "edges": { "crease_angle": 12.0 },
             "atmosphere": { "fog_density": 0.042 },
+            "display": { "vsync": true, "frame_cap": 90 },
         });
-        let (_, edges, atmosphere) = load(&partial);
-        assert_eq!((edges, atmosphere), (custom, air));
+        let (_, e, a, d) = load(&partial);
+        assert_eq!((e, a, d), (edges, air, display));
     }
 }

@@ -200,6 +200,17 @@ pub struct Panels<'w, 's> {
     pub atmosphere: ResMut<'w, crate::game::gfx::atmosphere::AtmosphereStyle>,
     pub bench: ResMut<'w, crate::game::gfx::profiling::EffectBench>,
     pub gpu_timing: Res<'w, crate::game::gfx::profiling::GpuTimingSupport>,
+    pub display: ResMut<'w, crate::game::gfx::frame_pacing::DisplaySettings>,
+    pub frame_breakdown: Res<'w, crate::game::gfx::frame_pacing::FrameBreakdown>,
+    /// Refresh rates for the Performance panel's vsync readout.
+    pub monitors: Query<
+        'w,
+        's,
+        (
+            &'static bevy::window::Monitor,
+            Has<bevy::window::PrimaryMonitor>,
+        ),
+    >,
     /// Frame rate for the status line, and the render app's per-pass GPU
     /// timings for the inspector's readout.
     pub diagnostics: Res<'w, DiagnosticsStore>,

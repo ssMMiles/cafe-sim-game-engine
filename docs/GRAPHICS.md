@@ -550,8 +550,10 @@ Mac ([`WEB_PROFILING.md`](WEB_PROFILING.md)).
 measurement that prices one effect by switching it off and on, and per-pass
 GPU times where the adapter can produce them. Per-pass timings are empty on
 macOS — Metal has no `TIMESTAMP_QUERY_INSIDE_PASSES`, which is what bevy's
-spans need — so the A/B measurement is the one to use there.
-`docs/ATMOSPHERE.md` §7.
+spans need — so the A/B measurement is the one to use there. It also
+splits each frame into main-thread work, render-thread work and time spent
+waiting for a swapchain image, which is how to tell a slow frame from one
+pinned to the display. `docs/PERFORMANCE.md`.
 
 ---
 

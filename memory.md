@@ -1386,3 +1386,24 @@ by feeding synthetic frame times: recovers an injected 1.25 ms to within 0.05 ms
 periodic 25 ms spikes. Caveat documented: only sees cost while GPU-bound. Real per-pass GPU
 timing on macOS would need our own query set via `RenderPassDescriptor::timestamp_writes`
 (stage boundaries, which Metal does support) — noted as future work.
+
+## 60 fps "lock" investigation; frame pacing + breakdown — 4 November 2026
+
+User saw 16-18 ms frames, "used to be pinned 120, now 60". Read through the suspects in source:
+bevy's RenderDiagnosticsPlugin readback is `map_async` with no blocking poll (not a stall);
+Metal supports Fifo + Immediate (`OsFeatures::display_sync`, macOS ≥ 10.13) so our Immediate
+was honoured; bevy falls back gracefully for unsupported modes (`present_mode()` in
+`view/window/mod.rs`). Most likely: vsync/compositor pacing + frames just over 8.3 ms at 120 Hz
+→ exact halving, or the display really at 60 Hz (Low Power Mode). Can't tell from code, so built
+the tool to tell: `gfx/frame_pacing.rs` times main thread (FrameStart/FrameEnd schedules via
+`MainScheduleOrder::insert_before(First)/insert_after(Last)`) and render thread split into busy vs
+swapchain-acquire wait (systems `.before/.after(prepare_windows)` in `RenderSystems::PrepareViews`;
+`bevy::render::view::prepare_windows` is public). Per-field medians over 120 frames,
+`FrameSample::limit()` verdict, `vsync_divisor()` spots 1/k-of-refresh. `DisplaySettings`
+{vsync, frame_cap} persisted under `display`; refresh rate from `bevy::window::Monitor`
+(`refresh_rate_millihertz`, primary only). Frame cap: sleep + 1.5 ms spin, native only, after the
+main-thread measurement. **egui trap caught before shipping**: `DragValue` defaults to
+`clamp_existing_to_range(true)` and writes back every frame even disabled — the cap field over
+0 (=off) would have become a 1 fps cap. Also refactored persist.rs to `Persisted`/`PersistedMut`
+SystemParams + a plain `Targets` struct, so adding a setting no longer threads a parameter
+through six functions. `docs/PERFORMANCE.md` is the reference (ATMOSPHERE.md §7 now points there).

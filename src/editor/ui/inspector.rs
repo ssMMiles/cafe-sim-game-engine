@@ -18,6 +18,11 @@ use crate::editor::edits::{PlacedEdited, RespawnPlaced, ScriptEdit};
 use crate::editor::history::{Change, MergeKey};
 use crate::editor::prefab_edit::PrefabAction;
 use crate::game::gfx::atmosphere::{AtmosphereStyle, MAX_RAY_SAMPLES};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::game::gfx::frame_pacing::FRAME_CAP_MAX;
+use crate::game::gfx::frame_pacing::{
+    DisplaySettings, FrameBreakdown, FrameLimit, FrameSample, vsync_divisor,
+};
 use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::gfx::profiling::{BenchEffect, EffectBench, GpuTimingSupport};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
@@ -961,11 +966,17 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
 
     edges(ui, &mut panels.edge_style);
     atmosphere(ui, &mut panels.atmosphere);
+    let display = primary_display(&panels.monitors);
     performance(
         ui,
-        &panels.diagnostics,
-        &mut panels.bench,
-        &panels.gpu_timing,
+        Perf {
+            diagnostics: &panels.diagnostics,
+            bench: panels.bench.reborrow(),
+            gpu_timing: &panels.gpu_timing,
+            settings: panels.display.reborrow(),
+            breakdown: &panels.frame_breakdown,
+            display,
+        },
     );
 
     if env != before {
@@ -1265,21 +1276,222 @@ fn atmosphere(ui: &mut egui::Ui, style: &mut ResMut<AtmosphereStyle>) {
 /// per-pass GPU times where the adapter can produce them.
 ///
 /// `docs/ATMOSPHERE.md` §7 explains which of these to trust when.
-fn performance(
-    ui: &mut egui::Ui,
-    diagnostics: &DiagnosticsStore,
-    bench: &mut ResMut<EffectBench>,
-    support: &GpuTimingSupport,
-) {
+/// What the Performance section reads and edits. Gathered at the call site
+/// because `environment` already holds a mutable borrow of another
+/// `Panels` field, so the panel can't take `Panels` whole.
+struct Perf<'a> {
+    diagnostics: &'a DiagnosticsStore,
+    // `Mut` rather than `&mut T`, so an untouched setting isn't marked
+    // changed just by drawing the panel.
+    bench: Mut<'a, EffectBench>,
+    gpu_timing: &'a GpuTimingSupport,
+    settings: Mut<'a, DisplaySettings>,
+    breakdown: &'a FrameBreakdown,
+    display: Option<Display>,
+}
+
+/// The display the editor is most likely on, as the OS reports it.
+struct Display {
+    name: Option<String>,
+    refresh_hz: Option<f32>,
+}
+
+/// The primary monitor (bevy can't say which monitor a window is on, and on
+/// a laptop the built-in panel is the primary).
+fn primary_display(
+    monitors: &Query<(&bevy::window::Monitor, Has<bevy::window::PrimaryMonitor>)>,
+) -> Option<Display> {
+    let (monitor, _) = monitors
+        .iter()
+        .find(|(_, primary)| *primary)
+        .or_else(|| monitors.iter().next())?;
+    Some(Display {
+        name: monitor.name.clone(),
+        refresh_hz: monitor
+            .refresh_rate_millihertz
+            .filter(|mhz| *mhz > 0)
+            .map(|mhz| mhz as f32 / 1000.0),
+    })
+}
+
+fn performance(ui: &mut egui::Ui, mut p: Perf) {
     egui::CollapsingHeader::new("Performance")
         .default_open(false)
         .show(ui, |ui| {
-            frame_time_chart(ui, diagnostics);
+            frame_time_chart(ui, p.diagnostics);
             ui.add_space(4.0);
-            ab_measurement(ui, bench);
+            let refresh = p.display.as_ref().and_then(|d| d.refresh_hz);
+            frame_breakdown(ui, p.breakdown, refresh, &p.settings);
             ui.add_space(4.0);
-            gpu_timings(ui, diagnostics, support);
+            display_controls(ui, &mut p.settings, p.display.as_ref());
+            ui.add_space(4.0);
+            let vsync = p.settings.vsync;
+            ab_measurement(ui, &mut p.bench, vsync);
+            ui.add_space(4.0);
+            gpu_timings(ui, p.diagnostics, p.gpu_timing);
         });
+}
+
+/// Where the frame goes: one bar per thread, each the width of the frame.
+///
+/// The threads run side by side (bevy renders frame N while the game builds
+/// frame N+1), so they aren't stacked — each bar answers "how much of the
+/// frame was this thread busy?" and the render bar splits off the time spent
+/// waiting for a swapchain image, which is where vsync and a GPU bottleneck
+/// both land.
+fn frame_breakdown(
+    ui: &mut egui::Ui,
+    breakdown: &FrameBreakdown,
+    refresh_hz: Option<f32>,
+    settings: &DisplaySettings,
+) {
+    let Some(m) = breakdown.median() else {
+        return;
+    };
+    let frame = m.frame.max(1e-3);
+
+    let busy = egui::Color32::from_rgb(120, 180, 240);
+    let waiting = egui::Color32::from_rgb(110, 110, 120);
+
+    let bar = |ui: &mut egui::Ui, label: &str, parts: &[(f32, egui::Color32)], text: String| {
+        ui.horizontal(|ui| {
+            ui.add_sized([86.0, 14.0], egui::Label::new(label));
+            let width = (ui.available_width() - 4.0).max(40.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+            let mut x = rect.left();
+            for (ms, colour) in parts {
+                let w = rect.width() * (ms / frame).clamp(0.0, 1.0);
+                let segment = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.top()),
+                    egui::vec2(w.min(rect.right() - x), rect.height()),
+                );
+                painter.rect_filled(segment, 2.0, *colour);
+                x += w;
+            }
+        })
+        .response
+        .on_hover_text(text);
+    };
+
+    bar(
+        ui,
+        "Main thread",
+        &[(m.main, busy)],
+        format!("{:.2} ms busy: game + editor systems", m.main),
+    );
+    bar(
+        ui,
+        "Render thread",
+        &[(m.render_busy, busy), (m.render_wait, waiting)],
+        format!(
+            "{:.2} ms busy building GPU work · {:.2} ms waiting for a swapchain image",
+            m.render_busy, m.render_wait
+        ),
+    );
+    ui.weak(format!(
+        "main {:.1} · render {:.1} + {:.1} waiting · of {:.1} ms",
+        m.main, m.render_busy, m.render_wait, m.frame
+    ));
+    ui.label(verdict(&m, refresh_hz, settings));
+}
+
+/// One sentence on what is holding the frame rate down.
+fn verdict(m: &FrameSample, refresh_hz: Option<f32>, settings: &DisplaySettings) -> String {
+    let divisor = refresh_hz.and_then(|hz| vsync_divisor(m.frame, hz));
+    match m.limit() {
+        FrameLimit::Presentation => match (divisor.zip(refresh_hz), settings.vsync) {
+            (Some((k, hz)), _) => format!(
+                "Running at 1/{k} of the display's {hz:.0} Hz: each frame takes longer than \
+                 one refresh ({:.1} ms), so presentation waits for the next. With both threads \
+                 mostly idle that points at the GPU — or at the display actually running at \
+                 {:.0} Hz (on a MacBook, Low Power Mode caps it).",
+                1000.0 / hz,
+                hz / k as f32
+            ),
+            (None, true) => {
+                "Waiting for the display: vsync holds the frame to the refresh rate. That's \
+                 idle time, not cost."
+                    .into()
+            }
+            (None, false) => {
+                "Waiting for a swapchain image with vsync off: the GPU is the limit, or — in \
+                 a window on macOS — the compositor, which paces to the display regardless."
+                    .into()
+            }
+        },
+        FrameLimit::MainThread => "CPU-bound on the main thread (game + editor systems).".into(),
+        FrameLimit::RenderThread => {
+            "CPU-bound on the render thread (extracting and building GPU commands).".into()
+        }
+        FrameLimit::Headroom if settings.frame_cap > 0 => {
+            format!("Held by the {} fps frame cap.", settings.frame_cap)
+        }
+        FrameLimit::Headroom => "Neither thread is near the frame time.".into(),
+    }
+}
+
+/// Vsync and the frame cap. Both persist per user.
+fn display_controls(
+    ui: &mut egui::Ui,
+    settings: &mut Mut<DisplaySettings>,
+    display: Option<&Display>,
+) {
+    match display.and_then(|d| d.refresh_hz.map(|hz| (hz, d.name.as_deref()))) {
+        Some((hz, name)) => ui.weak(format!(
+            "Display: {hz:.0} Hz{} (as the OS reports it)",
+            name.map(|n| format!(" · {n}")).unwrap_or_default()
+        )),
+        None => ui.weak("Display refresh rate: not reported."),
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut s = **settings;
+        ui.checkbox(&mut s.vsync, "Vsync").on_hover_text(
+            "On: present in step with the display. Off: as fast as possible — what you \
+             want for measuring, since vsync turns any cost below a refresh into idle time.",
+        );
+        ui.horizontal(|ui| {
+            let mut capped = s.frame_cap > 0;
+            if ui
+                .checkbox(&mut capped, "Frame cap")
+                .on_hover_text(
+                    "Hold the main loop to a frame rate — saves battery with vsync off. \
+                     Sleeps after the frame's work is measured, so it never reads as cost.",
+                )
+                .changed()
+            {
+                s.frame_cap = if capped {
+                    display
+                        .and_then(|d| d.refresh_hz)
+                        .map_or(60, |hz| hz.round() as u32)
+                } else {
+                    0
+                };
+            }
+            // Only built while capped: `DragValue` clamps the *existing*
+            // value into its range every frame, even disabled, so showing it
+            // over the 0 that means "off" would silently become a 1 fps cap.
+            if capped {
+                ui.add(
+                    egui::DragValue::new(&mut s.frame_cap)
+                        .speed(1.0)
+                        .range(1..=FRAME_CAP_MAX)
+                        .suffix(" fps"),
+                );
+            } else {
+                ui.weak("off");
+            }
+        });
+        settings.set_if_neq(s);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = settings;
+        ui.weak("The browser paces frames to the display; vsync and the cap are native-only.");
+    }
 }
 
 /// The last ~120 frames as a filled trace, with the median marked.
@@ -1344,7 +1556,7 @@ fn frame_time_chart(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
 
 /// Switch one effect off and on for a few hundred frames and compare the
 /// frame times. Works without GPU timers, which is the point.
-fn ab_measurement(ui: &mut egui::Ui, bench: &mut ResMut<EffectBench>) {
+fn ab_measurement(ui: &mut egui::Ui, bench: &mut Mut<EffectBench>, vsync: bool) {
     if let Some(run) = bench.running() {
         let effect = run.effect();
         let progress = run.progress();
@@ -1359,6 +1571,13 @@ fn ab_measurement(ui: &mut egui::Ui, bench: &mut ResMut<EffectBench>) {
         return;
     }
 
+    if vsync {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 200, 80),
+            "Vsync is on: frame time is pinned to the display, so an A/B only sees a \
+             cost big enough to drop a whole refresh. Turn vsync off first.",
+        );
+    }
     ui.horizontal(|ui| {
         ui.label("A/B measure").on_hover_text(
             "Switches the effect off and on for a few hundred frames and \
