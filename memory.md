@@ -1407,3 +1407,22 @@ main-thread measurement. **egui trap caught before shipping**: `DragValue` defau
 0 (=off) would have become a 1 fps cap. Also refactored persist.rs to `Persisted`/`PersistedMut`
 SystemParams + a plain `Targets` struct, so adding a setting no longer threads a parameter
 through six functions. `docs/PERFORMANCE.md` is the reference (ATMOSPHERE.md §7 now points there).
+
+## Per-system CPU timing: not built yet — 4 November 2026 (pick up next session)
+
+User sees ~16 ms main thread / ~5 ms render thread in the Performance panel → main-thread systems
+are the bottleneck. Asked for per-system times in the panel; deferred as not-quick. Facts verified:
+- Bevy only emits per-system spans with the `trace` feature (bevy_ecs `function_system.rs`
+  `system_span`). Top-level `bevy/trace_chrome = ["trace", "bevy_internal/trace_chrome", "debug"]`,
+  so our existing `profiling` feature (`cargo run-profiling`) *does* record every system; output is
+  `./trace-<timestamp>.json` (or `$TRACE_CHROME`), finalised on clean exit → open in Perfetto.
+- In the profiling build plugins don't load: `script_host::plugin_dll_path` looks next to
+  `current_exe()` (target/profiling/debug/), and nothing builds plugins there. Irrelevant for editor
+  perf (plugin schedules only tick in Gameplay).
+- Our crate's `profile.dev opt-level = 1` predates the 11-03 build trims (unchanged context in
+  49e4144), so it is not why 120 fps became 60.
+Plan options for the in-editor version: (a) a tracing layer via `LogPlugin::custom_layer`
+(`fn(&mut App) -> Option<BoxedLayer>`, bevy_log 0.20) aggregating span durations by name into a
+shared map → "top N systems" table; recommend gating it to the profiling build so normal builds
+don't pay `trace` overhead. (b) Cheap, no `trace`: per-schedule timing using the same marker-schedule
+trick as `frame_pacing.rs` FrameStart/FrameEnd (Update vs PostUpdate/egui etc.), ~1 h.
