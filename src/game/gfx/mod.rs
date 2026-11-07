@@ -6,6 +6,7 @@ pub mod crosshair;
 pub mod frame_pacing;
 pub mod post_process;
 pub mod profiling;
+pub mod scene_pass;
 #[cfg(test)]
 mod shader_check;
 pub mod system_timing;
@@ -92,6 +93,7 @@ impl Plugin for GfxPlugin {
         );
 
         app.add_plugins(MaterialPlugin::<ToonMaterial>::default());
+        app.add_plugins(scene_pass::ScenePassPlugin);
         app.add_plugins(EdgeDetectionPlugin);
         app.add_plugins(AtmospherePlugin);
         app.add_plugins(GfxProfilingPlugin);

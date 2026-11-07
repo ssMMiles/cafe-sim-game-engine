@@ -206,11 +206,11 @@ at the border.
   so every world shares it and a world zip doesn't carry it. If worlds ever
   need their own outline style, it moves into `EnvironmentData` next to the
   toon curve (`world.meta` v7 plus a legacy reader).
-- **Terrain skirts** have zero-length normals in the mesh. The main pass
-  fixes them up in `terrain.wesl`, but the prepass uses bevy's own vertex
-  shader, which normalises a zero vector. Skirts are only visible through
-  LOD cracks, but a NaN normal there would make that pixel's normal test
-  undefined.
+- ~~**Terrain skirts** have zero-length normals in the mesh.~~ Fixed
+  2026-11-07. Terrain draws through our own scene pass now
+  (`docs/SCENE_PASS_PLAN.md` Phase 1) and both of its passes share one vertex
+  shader, so the skirt fix-up reaches the prepass. Nothing can hand the
+  normal test a normalised zero vector any more.
 - **Thickness above 1** skips pixels between taps rather than dilating the
   line. A proper thick line would dilate the 1-px result instead.
 - **One-sided lines.** The sign of the second difference says which side of

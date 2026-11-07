@@ -1503,7 +1503,7 @@ upgrades. Not yet run visually by the user at time of writing.
 Also: profiling builds set `TRACE_CHROME` to `$TMPDIR/trace-<µs>.json` in `lib.rs::run` (cfg
 `profiling`) unless already set.
 
-## Scene pass replacement: plan written, not started — 6 November 2026
+## Scene pass replacement: plan written, not started — 6 November 2026 (Phase 1 landed; see the entry below)
 
 `docs/SCENE_PASS_PLAN.md`. Key verified facts it rests on: bevy 0.20's per-view graph is the
 **Core3d schedule** (sets Prepass→MainPass→EarlyPostProcess→PostProcess; passes are `ViewQuery` +
@@ -1520,3 +1520,43 @@ refactor (ABI 15, kills sync_toon_look's write-every-material), then toon wholes
 there). Open verification items V1–V7 in the doc, most importantly who clears the prepass/colour
 attachments when bevy's phases are empty (V2/V3). Phase 0 = capture the Systems-table baseline
 before any code.
+
+## Scene pass Phase 1: terrain is off MaterialPlugin — 7 November 2026
+
+`src/game/gfx/scene_pass/` (mod/pipeline/terrain/pass) + `assets/shaders/scene/`. Terrain draws
+through our own extract → instance buffer → two `Core3d` pass systems; `MaterialPlugin::<TerrainMaterial>`
+replaced by a hand-written `init_asset` + `register_type`. Measurements live in
+**`docs/SCENE_PASS_BASELINE.md`**, not here (they get re-taken every phase); the Performance panel
+grew a **Save snapshot** button that writes `perf-snapshot-<secs>.md`. Phase 0's tables still need a
+`cargo run-profiling` session, and nobody has *run* Phase 1 yet — it compiles, tests and
+`web-check` pass, the visual checklist in SCENE_PASS_BASELINE.md §4 is unticked.
+
+V1–V6 all resolved (details in SCENE_PASS_PLAN.md §5). The ones worth remembering:
+
+- **Bevy's `early_prepass` and `main_opaque_pass_3d` early-return on the view's binned phases being
+  *absent*, not empty**, and those phases come from bevy_core_pipeline — so they keep running with
+  nothing of bevy's to draw. `early_prepass` renders depth into the view's *main* depth texture and
+  `copy_texture_to_texture`s it into `ViewPrepassTextures.depth` **at the end of its pass**. So our
+  passes run `.before` bevy's: attachments clear on first use (an `AtomicBool` per attachment), we
+  clear, bevy loads, and the depth copy sees our geometry. Running after would have been silently
+  wrong in two different ways.
+- **Asset WESL shaders can import each other** (V4, and Phase 1 depends on it): the module path is
+  the asset path (`assets/shaders/scene/terrain_io.wesl` → `package::shaders::scene::terrain_io`)
+  and `ShaderLoader` loads every `ShaderImport::AssetPath` as a file dependency, so nothing needs to
+  hold a handle. `shader_check.rs`'s resolver now mirrors the asset layout and only stubs bevy's
+  modules. The shared toon-curve module is therefore available whenever Phase 2/3 wants it.
+- **Per-view visibility without bevy_pbr is `RenderVisibleEntities`**, filled by
+  `collect_visible_cpu_culled_entities` (bevy_render `ViewPlugin`, `PrepareAssets`), keyed by
+  visibility class — `Mesh3d`'s class is registered by *bevy_camera*. Entities that aren't synced to
+  the render world get `Entity::PLACEHOLDER` there but a correct `MainEntity`, which is all we key on.
+- **The instance buffer must go through `encase` (`BufferVec`), not `bytemuck`**: glam `Mat3` is 36
+  bytes, WGSL `mat3x3<f32>` is 48. Pod would shear every instance past the first.
+- `@builtin(instance_index)` is `firstInstance + i` by WebGPU spec, so a draw's instance range *is*
+  its slice of the buffer — no per-draw uniform.
+- **Two unordered `RenderStartup` systems with a resource between them is a coin flip the loser never
+  retries** (the schedule runs once; a missing `Res` just skips the system). The scene bind group
+  layout is inserted at plugin build time for that reason. Conversely `chain_weak` *does* insert
+  sync points for command-producing systems, so Prepare→Render command visibility is fine.
+- Bevy's prepass leaves back-face culling **off** while its opaque pass turns it on; ours culls in
+  both. Fixed in passing: the terrain skirt-normal fix-up now reaches the prepass (one vertex shader
+  for both passes), closing the open end in GRAPHICS.md §17 / EDGE_DETECTION.md §7.

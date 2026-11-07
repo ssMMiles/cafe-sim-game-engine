@@ -184,8 +184,11 @@ Fragment logic (`toon_lighting.wesl`, `fn fragment`):
 
 ### 5.2 `TerrainMaterial`
 
-`src/game/world/terrain/material.rs`; vertex `terrain.wesl`, fragment
-`terrain_toon.wesl`.
+`src/game/world/terrain/material.rs`. **Not drawn by `MaterialPlugin`** —
+terrain goes through our own scene pass since 2026-11-07
+(`src/game/gfx/scene_pass/`, `docs/SCENE_PASS_PLAN.md` Phase 1). Vertex
+`scene/terrain_vertex.wesl`, prepass fragment `scene/terrain_prepass.wesl`,
+colour fragment `terrain_toon.wesl`; bind group **1**, not 3.
 
 | Binding | What |
 |---------|------|
@@ -543,7 +546,10 @@ All are WESL except the compute bake.
 |------|-------|---------|-----------|
 | `toon_lighting.wesl` | fragment | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block); `shader_check` (every variant) |
 | `toon_prepass.wesl` | prepass fragment | `ToonMaterial` | `shader_check`; `both_passes_flip_normals_the_same_way` |
-| `terrain.wesl` | vertex | `TerrainMaterial` | — |
+| `scene/bindings.wesl` | module | scene pass (view + instance bind group) | `shader_check` (via its importers) |
+| `scene/terrain_io.wesl` | module | terrain vertex/fragment varyings | `shader_check` (via its importers) |
+| `scene/terrain_vertex.wesl` | vertex | `TerrainMaterial`, both passes | `shader_check` |
+| `scene/terrain_prepass.wesl` | prepass fragment | `TerrainMaterial` | `shader_check` |
 | `terrain_toon.wesl` | fragment | `TerrainMaterial` | `toon_curve_matches_the_shaders`; `shader_check` |
 | `sky_dome.wesl` | fragment | `SkyDomeMaterial` | — |
 | `edge_detection_post.wesl` | fragment (Bevy fullscreen vertex) | `EdgeDetectionPlugin` | naga validation via import substitution; uniform size; plane/step geometry (`post_process.rs` tests) |
@@ -555,8 +561,11 @@ bevy does against verbatim stand-ins for those modules and naga-validates
 every combination of the defs each shader branches on, so a broken material
 fragment shader fails `cargo test`. naga skips WebGPU's uniformity rule:
 `DUMP_WGSL=<dir> cargo test shader_check` writes each variant out for
-`tools/tint-check.mjs`. `terrain.wesl` (vertex) isn't covered — it imports
-more of bevy's vertex modules than it was worth stubbing.
+`tools/tint-check.mjs`. Module paths in the test resolver mirror the asset
+layout (`package::shaders::scene::terrain_io` and so on), because that is how
+the runtime derives them — so our shaders' imports of *each other* are real,
+and only bevy's modules are stubbed. Terrain's vertex shader is covered now
+that it imports our modules instead of bevy's.
 
 ---
 
@@ -611,10 +620,9 @@ Each item was read from the code; none was observed on screen.
    load ring's corner is about 400 m away and unloading starts past
    ~6.5 chunks (about 586 m diagonally). So only chunks lingering near the
    unload edge ever drop a level.
-6. **Skirt normals in the prepass.** The mesh stores zero-length normals,
-   which `terrain.wesl` fixes up, but the prepass uses Bevy's vertex shader,
-   which normalises them. Possible NaN normals where skirts show through
-   LOD cracks (`EDGE_DETECTION.md` §7).
+6. ~~**Skirt normals in the prepass.**~~ Fixed 2026-11-07: the scene pass
+   uses one vertex shader for both passes, so the skirt fix-up
+   (`scene/terrain_vertex.wesl`) applies to the prepass too.
 7. **The blob shadow doesn't check its caster's visibility.** The player's
    disc stays under the camera in first person, where the player mesh is
    hidden.

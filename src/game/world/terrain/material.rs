@@ -1,7 +1,6 @@
 use bevy::{
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
-    shader::ShaderRef,
 };
 use engine_api::toon_curve::ToonCurve;
 
@@ -52,18 +51,20 @@ pub struct TerrainMaterial {
     pub shading: TerrainShading,
 }
 
-/// A standalone material, like `ToonMaterial`: opaque, back faces culled
-/// (the mesh pipeline's default), and the default prepass — terrain is never
-/// double-sided, so bevy's plain world-normal output is exactly right.
+/// Terrain is **not** drawn by `MaterialPlugin` any more: `gfx::scene_pass`
+/// owns its extraction, pipelines and passes (docs/SCENE_PASS_PLAN.md,
+/// Phase 1). This impl survives only because `MeshMaterial3d<M>` — the
+/// authoring component, which deliberately did not change — is bounded on
+/// `M: Material`. Nothing reads it.
+///
+/// The shaders live in `assets/shaders/scene/terrain_vertex.wesl`,
+/// `assets/shaders/scene/terrain_prepass.wesl` and
+/// `assets/shaders/terrain_toon.wesl`, and are named by
+/// `scene_pass::pipeline::init_terrain_scene_pipeline`. They are *not* usable
+/// through bevy's mesh pipeline: they read our bind group 0, not
+/// `mesh_view` + `mesh`. Naming them here would be a trap, so the defaults
+/// stand.
 impl Material for TerrainMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/terrain.wesl".into()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        "shaders/terrain_toon.wesl".into()
-    }
-
     /// See `ToonMaterial::enable_shadows`: nothing casts real-time shadows.
     fn enable_shadows() -> bool {
         false

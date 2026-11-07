@@ -7,12 +7,18 @@
 //! `bevy_pbr` modules they import, and validates the result with naga for
 //! **every combination** of the shader defs each shader branches on.
 //!
-//! The stand-ins copy the declarations we use verbatim from bevy_pbr 0.20
-//! (`render/forward_io.wesl`, `prepass/io.wesl`, `render/mesh_types.wesl`,
-//! `render/mesh_bindings.wesl`); if a bevy upgrade changes those, update them
-//! here. What this can't catch: WebGPU's uniformity rule (naga skips it for
-//! fragment shaders — set `DUMP_WGSL=<dir>` and run the output through
-//! `tools/tint-check.mjs`), and a stand-in that no longer matches bevy.
+//! The stand-ins copy the declarations we use verbatim from bevy 0.20
+//! (bevy_pbr's `render/forward_io.wesl`, `prepass/io.wesl`,
+//! `render/mesh_types.wesl`, `render/mesh_bindings.wesl`; bevy_render's
+//! `view.wesl`); if a bevy upgrade changes those, update them here. What this
+//! can't catch: WebGPU's uniformity rule (naga skips it for fragment shaders —
+//! set `DUMP_WGSL=<dir>` and run the output through `tools/tint-check.mjs`),
+//! and a stand-in that no longer matches bevy.
+//!
+//! Module paths mirror the asset layout, because that is what the runtime
+//! resolver derives them from: `assets/shaders/scene/terrain_io.wesl` is
+//! `package::shaders::scene::terrain_io`, and our shaders import each other by
+//! that name. Only bevy's own modules are stubbed.
 
 use std::borrow::Cow;
 
@@ -25,6 +31,21 @@ use wesl::{
 const TOON: &str = include_str!("../../../assets/shaders/toon_lighting.wesl");
 const TOON_PREPASS: &str = include_str!("../../../assets/shaders/toon_prepass.wesl");
 const TERRAIN: &str = include_str!("../../../assets/shaders/terrain_toon.wesl");
+const SCENE_BINDINGS: &str = include_str!("../../../assets/shaders/scene/bindings.wesl");
+const TERRAIN_IO: &str = include_str!("../../../assets/shaders/scene/terrain_io.wesl");
+const TERRAIN_VERTEX: &str = include_str!("../../../assets/shaders/scene/terrain_vertex.wesl");
+const TERRAIN_PREPASS: &str = include_str!("../../../assets/shaders/scene/terrain_prepass.wesl");
+
+/// bevy_render's `view.wesl`, cut down to the fields the scene pass reads.
+/// The *layout* can't drift unnoticed: the bind group entry is built from the
+/// Rust `ViewUniform` and the runtime shader imports bevy's real module, so
+/// only this test sees the short version.
+const RENDER_VIEW: &str = "
+struct View {
+    clip_from_world: mat4x4<f32>,
+    world_position: vec3<f32>,
+}
+";
 
 const FORWARD_IO: &str = "
 struct VertexOutput {
@@ -113,8 +134,11 @@ import bevy_pbr::render::mesh_types::Mesh;
 @group(2) @binding(0) var<storage> mesh: array<Mesh>;
 ";
 
-/// bevy's `constants` package: one `const` per integer shader def. The
-/// material bind group is 3 (CLAUDE.md, "Rendering Pipeline").
+/// bevy's `constants` package: one `const` per integer shader def, built by
+/// the runtime resolver from the pipeline's `ShaderDefVal::UInt`s. The value
+/// is 3 under bevy's mesh pipeline (toon) and 1 under ours (terrain,
+/// `scene_pass::pipeline`); which one it is changes nothing a compile can
+/// check, so the stub picks one.
 const CONSTANTS: &str = "const MATERIAL_BIND_GROUP = 3;\n";
 
 struct Stubs;
@@ -122,13 +146,18 @@ struct Stubs;
 impl Resolver for Stubs {
     fn resolve_source<'a>(&'a self, path: &ModulePath) -> Result<Cow<'a, str>, ResolveError> {
         let source = match path.to_string().as_str() {
-            "package::toon_lighting" => TOON,
-            "package::toon_prepass" => TOON_PREPASS,
-            "package::terrain_toon" => TERRAIN,
+            "package::shaders::toon_lighting" => TOON,
+            "package::shaders::toon_prepass" => TOON_PREPASS,
+            "package::shaders::terrain_toon" => TERRAIN,
+            "package::shaders::scene::bindings" => SCENE_BINDINGS,
+            "package::shaders::scene::terrain_io" => TERRAIN_IO,
+            "package::shaders::scene::terrain_vertex" => TERRAIN_VERTEX,
+            "package::shaders::scene::terrain_prepass" => TERRAIN_PREPASS,
             "bevy_pbr::render::forward_io" => FORWARD_IO,
             "bevy_pbr::prepass::io" => PREPASS_IO,
             "bevy_pbr::render::mesh_types" => MESH_TYPES,
             "bevy_pbr::render::mesh_bindings" => MESH_BINDINGS,
+            "bevy_render::view" => RENDER_VIEW,
             "constants" => CONSTANTS,
             other => {
                 return Err(ResolveError::ModuleNotFound(
@@ -155,7 +184,10 @@ fn check(module: &str, defs: &[&str]) -> Result<String, String> {
             .flags
             .insert(def.to_string(), Feature::Enable);
     }
-    let path = ModulePath::new(PathOrigin::Absolute, vec![module.to_string()]);
+    let path = ModulePath::new(
+        PathOrigin::Absolute,
+        module.split("::").map(str::to_string).collect(),
+    );
     let wgsl = wesl::compile(&path, &options, &Stubs)
         .map_err(|e| format!("WESL: {}", e.diagnostic().render_plain()))?
         .to_string();
@@ -184,7 +216,11 @@ fn check_all(module: &str, always: &[&str], toggled: &[&str]) {
         match check(module, &defs) {
             Ok(wgsl) => {
                 if let Some(dir) = std::env::var_os("DUMP_WGSL") {
-                    let name = format!("{module}-{}.wgsl", defs.join("-").to_lowercase());
+                    let name = format!(
+                        "{}-{}.wgsl",
+                        module.replace("::", "-"),
+                        defs.join("-").to_lowercase()
+                    );
                     std::fs::write(std::path::Path::new(&dir).join(name), wgsl).unwrap();
                 }
             }
@@ -200,7 +236,7 @@ const MESH_PIPELINE: &[&str] = &["MESH_PIPELINE", "VERTEX_OUTPUT_INSTANCE_INDEX"
 #[test]
 fn toon_colour_pass_compiles_for_every_variant() {
     check_all(
-        "toon_lighting",
+        "shaders::toon_lighting",
         MESH_PIPELINE,
         &[
             "VERTEX_UVS_A",
@@ -225,7 +261,7 @@ fn toon_prepass_compiles_for_every_variant() {
         defs
     };
     check_all(
-        "toon_prepass",
+        "shaders::toon_prepass",
         &with(&["NORMAL_PREPASS", "NORMAL_PREPASS_OR_DEFERRED_PREPASS"]),
         &[
             double_sided,
@@ -234,24 +270,30 @@ fn toon_prepass_compiles_for_every_variant() {
         ],
     );
     check_all(
-        "toon_prepass",
+        "shaders::toon_prepass",
         &with(&["UNCLIPPED_DEPTH_ORTHO_EMULATION"]),
         &[double_sided, "MOTION_VECTOR_PREPASS"],
     );
     check_all(
-        "toon_prepass",
+        "shaders::toon_prepass",
         &with(&["MOTION_VECTOR_PREPASS"]),
         &[double_sided],
     );
 }
 
+/// Terrain's three stages, as the scene pass compiles them: one `const` def
+/// for the material bind group and nothing else. Every variant *is* the one
+/// variant — dropping bevy's mesh pipeline took the whole def matrix with it,
+/// which is half the point of owning the pass.
 #[test]
-fn terrain_colour_pass_compiles_for_every_variant() {
-    check_all(
-        "terrain_toon",
-        MESH_PIPELINE,
-        &["VERTEX_UVS_A", "VERTEX_UVS_B"],
-    );
+fn terrain_scene_pass_shaders_compile() {
+    for module in [
+        "shaders::scene::terrain_vertex",
+        "shaders::scene::terrain_prepass",
+        "shaders::terrain_toon",
+    ] {
+        check_all(module, &[], &[]);
+    }
 }
 
 /// The harness itself: a shader that is wrong must fail, or the tests above
@@ -264,7 +306,7 @@ fn a_broken_shader_is_caught() {
     // fail to compile.
     assert!(
         check(
-            "toon_prepass",
+            "shaders::toon_prepass",
             &[
                 "PREPASS_FRAGMENT",
                 "VERTEX_OUTPUT_INSTANCE_INDEX",

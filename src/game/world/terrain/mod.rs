@@ -29,7 +29,17 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<TerrainMaterial>::default());
+        // Terrain draws through our own scene pass (`gfx::scene_pass`), not
+        // `MaterialPlugin` — see docs/SCENE_PASS_PLAN.md. What the plugin did
+        // that still has to happen: register the asset type, and register
+        // `MeshMaterial3d<TerrainMaterial>` for reflection. Everything else it
+        // added (render-world extraction, specialization, queueing) is
+        // replaced; `TerrainScenePlugin` owns the render side.
+        //
+        // A material type migrates wholesale: with `MaterialPlugin` still on,
+        // every chunk would be drawn twice, once by each path.
+        app.init_asset::<TerrainMaterial>()
+            .register_type::<MeshMaterial3d<TerrainMaterial>>();
 
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();

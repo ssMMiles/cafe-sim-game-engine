@@ -3,7 +3,7 @@
 // All lighting is baked (see toon_lighting.wesl for the model); this shader
 // only adds the stochastic stone texture blend on top of the base colour.
 
-import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
+import package::shaders::scene::terrain_io::{VertexOutput, FragmentOutput};
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
 var stone_texture: texture_2d<f32>;
@@ -187,7 +187,6 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     // the uniform directly, so the sample stays in uniform control flow.
     var radiance = vec3<f32>(1.0);
     if (terrain.use_lightmap == 1u) {
-@if(VERTEX_UVS_B)
         radiance = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).rgb;
     }
 

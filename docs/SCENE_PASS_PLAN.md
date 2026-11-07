@@ -1,13 +1,18 @@
 # Replacing the bevy scene pass — plan
 
-Status: **Phase 0 tooling in place, Phase 1 not started** (written 2026-11-06,
-Phase 0 2026-11-07). Prerequisite already landed: `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose
-shaders import no bevy PBR fragment modules (ABI 14) — the material contract a
-custom pass must honour is already small and written down (`GRAPHICS.md` §5).
+Status: **Phase 0 tooling in place, Phase 1 implemented** (plan written
+2026-11-06, Phase 1 landed 2026-11-07). Prerequisite already landed:
+`ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose shaders
+import no bevy PBR fragment modules (ABI 14) — the material contract a custom
+pass must honour is already small and written down (`GRAPHICS.md` §5).
+
+Measurements live in **`docs/SCENE_PASS_BASELINE.md`**, not in `memory.md`:
+they are re-taken at every phase and would swamp it.
 
 Everything in §2 marked *verified* was read out of the bevy 0.20 sources on
-the date above; items marked **V#** were *not* verified and must be before the
-phase that depends on them.
+the date above. **V1–V6 have since been verified** against bevy 0.20.0's
+sources and, for V4, against the compiler — see §5, which now records what
+each turned out to be.
 
 ---
 
@@ -190,25 +195,29 @@ is proven.
 ## 4. Phases
 
 **Phase 0 — Baseline.** Protocol, the row lists, and the tables themselves
-live in **`docs/SCENE_PASS_BASELINE.md`**, not `memory.md` — they get re-taken
-at every phase and would swamp it. The Performance panel's Systems (CPU)
-section grew a **Save snapshot** button (`system_timing::snapshot_markdown`)
-so a before/after is a file rather than a transcription from a screenshot.
-*Status: tooling and the row lists are in; the tables need a
-`cargo run-profiling` session, which only a human can drive.* This is the
-before-photo every later phase is judged against; the strategic decision to
-proceed is already made.
+live in **`docs/SCENE_PASS_BASELINE.md`**. The Performance panel's Systems
+(CPU) section grew a **Save snapshot** button
+(`system_timing::snapshot_markdown`) so a before/after is a file rather than a
+transcription from a screenshot. *Status: tooling and the row lists are in; the
+tables need a `cargo run-profiling` session, which only a human can drive.*
 
-**Phase 1 — Terrain through the scene pass.** Plugin skeleton, view+scene
-bind group, instance buffer, pipeline cache; terrain colour + prepass
-pipelines; unregister `MaterialPlugin::<TerrainMaterial>` (keep
-`init_asset::<TerrainMaterial>`, **V1**). Resolve **V2/V3** here, where the
-blast radius is one material. Bonus fix while porting the prepass vertex:
-flip skirt normals in the prepass too (today bevy's default prepass vertex
-doesn't — `GRAPHICS.md` §17).
-*Exit:* outlines, fog, god rays, Shift+L, bake arrival, chunk streaming and
-the web build all visually unchanged; draw count = chunk count; Phase 0 rows
-for terrain gone.
+**Phase 1 — Terrain through the scene pass.** *Done (2026-11-07).*
+`src/game/gfx/scene_pass/` — plugin + instance buffer + bind group (`mod.rs`),
+the specializer (`pipeline.rs`), terrain extract/queue and the material render
+asset (`terrain.rs`), the two pass systems (`pass.rs`); shaders in
+`assets/shaders/scene/`. `MaterialPlugin::<TerrainMaterial>` is gone, replaced
+by a hand-written `init_asset` + `register_type` (**V1**), and the material
+bind group is still bevy's `AsBindGroup` derive, reached through a
+`RenderAsset` impl so every existing path that mutates a terrain material
+(bake arrival, Shift+L, bootstrap) keeps working untouched. **V2/V3** both
+resolved to "run before bevy's pass and let first-use clearing do its job".
+Two things were fixed in passing: skirt normals are flipped in the *prepass*
+too (bevy's default prepass vertex didn't — `GRAPHICS.md` §17), and back faces
+are culled in both passes rather than only the colour one.
+*Exit (unverified until someone runs it — `SCENE_PASS_BASELINE.md` §4):*
+outlines, fog, god rays, Shift+L, bake arrival, chunk streaming and the web
+build all visually unchanged; draw count = chunk count; Phase 0 rows for
+terrain gone.
 
 **Phase 2 — Per-scene uniform refactor (ABI 15).** Move sun, toon curve and
 probe constants out of `ToonShading`/`TerrainShading` into the scene uniform;
@@ -248,34 +257,80 @@ and `world/mod.rs`'s derivation of them go with it. Default expectation:
 **skip** — a near-empty bevy_pbr is probably cheap, and this phase is pure
 risk otherwise.
 
-## 5. Verification items
+## 5. Verification items — resolved 2026-11-07
 
-- **V1** — With `MaterialPlugin::<T>` unregistered: what else registered the
-  asset/type (the plugin does `init_asset`, extraction, `RenderAssets`
-  machinery)? Our plugin must own `init_asset::<T>` and whatever the editor
-  relies on (`Assets<T>` resource definitely; reflection registration?).
-- **V2** — Clear/Load ownership of `ViewPrepassTextures` and the prepass
-  depth: who clears when bevy's prepass phases are empty for the view, and is
-  the "first attachment use clears" tracking (as on `ViewDepthTexture`) in
-  place for all three textures? Decides whether `scene_prepass` runs before or
-  after `early_prepass` and with which ops.
-- **V3** — Same for the colour target: `main_opaque_pass_3d` early-returns
-  when the view has no binned phases — does the camera's clear colour then
-  ever happen, or must `scene_opaque` own the clear? (Also: do empty phases
-  even exist for a view once no bevy material queues into them?)
-- **V4** — Spike: can `toon_lighting.wesl` import a sibling asset shader
-  (`import package::shaders::toon_curve::toon_shade`)? The module-path
-  machinery exists (`Shader::from_wesl`); unknown is whether resolution finds
-  an asset shader that nothing else referenced (it must be loaded — likely a
-  `load`-and-hold in the plugin, the way bevy registers internal shaders).
-- **V5** — WebGPU: storage buffers in the vertex stage are core WebGPU and we
-  ship webgpu-only, so the instance-buffer design is safe; confirm nothing in
-  the design needs a feature the web adapter lacks (it shouldn't — we're
-  *removing* exotic bindings).
-- **V6** — `RenderDiagnostics` span API for custom passes, so the editor's
-  GPU-timings list keeps working where the platform supports it.
+Read out of bevy 0.20.0's published sources (`~/.cargo/registry/.../bevy_*-0.20.0`),
+except V4 which was also run through the WESL compiler.
+
+- **V1 — settled, and smaller than feared.** `MaterialPlugin::<M>::build` does
+  exactly: `init_asset::<M>()`, `register_type::<MeshMaterial3d<M>>()`,
+  `init_resource::<EntitiesNeedingSpecialization<M>>()`,
+  `ErasedRenderAssetPlugin::<MeshMaterial3d<M>>`, two `PostUpdate` systems
+  (`mark_meshes_as_changed_if_their_materials_changed`,
+  `check_entities_needing_specialization`) and, in the render app, the shader
+  cache, the bind-group allocator and four extract systems. Only the first two
+  have to be kept, and `terrain/mod.rs` now does them by hand. `MeshMaterial3d<M>`
+  is bounded on `M: Material`, so the `impl Material for TerrainMaterial` stays
+  — gutted to a doc comment plus `enable_shadows`, since nothing reads it.
+- **V2 — run before `early_prepass`.** The prepass node renders depth into the
+  view's *main* `ViewDepthStencilTexture` and `copy_texture_to_texture`s it
+  into `ViewPrepassTextures.depth` at the end of the pass, so our geometry has
+  to be in the depth buffer before bevy's prepass finishes. Both `ColorAttachment`
+  and `DepthAttachment` clear on first use and load afterwards (an `AtomicBool`
+  per attachment), so running first means we clear and bevy loads. `early_prepass`
+  returns early only if the view's prepass phases are *absent* — being empty is
+  not enough — and those phases come from bevy_core_pipeline's
+  `extract_camera_prepass_phase`, which keys off `DepthPrepass`/`NormalPrepass`
+  on the camera and knows nothing about bevy_pbr. So it always runs for our
+  camera and always does the copy.
+- **V3 — same answer, same reason.** `main_opaque_pass_3d` also early-returns
+  only on *absent* phases (`extract_core_3d_camera_phases`, also
+  bevy_core_pipeline), and it begins its render pass before testing whether the
+  phases have items — so the clear happens either way. `scene_opaque` runs
+  `.before(main_opaque_pass_3d)`, clears on first use, and bevy's pass loads and
+  depth-tests the stragglers against what we wrote.
+- **V4 — yes, asset shaders can import each other, and Phase 1 relies on it.**
+  `Shader::from_wesl` gives an asset at `shaders/a/b.wesl` the module path
+  `/shaders/a/b` (`PathOrigin::Absolute`), `scan_wesl_imports` resolves
+  `package::`/`super::` against it, and `ShaderLoader` turns every resulting
+  `ShaderImport::AssetPath` into a loaded `file_dependencies` entry — so the
+  imported file is loaded and registered in `module_path_to_asset_id` without
+  anything holding a handle. The scene shaders import each other as
+  `package::shaders::scene::…`, and `shader_check.rs` compiles the graph in
+  `cargo test`. (So the shared toon-curve module is feasible — Phase 2/3 work,
+  not done here.)
+- **V5 — nothing exotic.** Bind group 0 is a dynamic-offset uniform (bevy's own
+  `ViewUniform`) and a read-only storage buffer in `VERTEX_FRAGMENT`; both are
+  core WebGPU. `cargo web-check` passes. The design only *removes* bindings.
+- **V6 — works, same call as the post passes.** `ctx.diagnostic_recorder()` +
+  `diagnostics.pass_span(&mut pass, "scene prepass" | "scene opaque")`, exactly
+  as `post_process.rs` does. Still empty on macOS, for the Metal reason in
+  `docs/PERFORMANCE.md`.
 - **V7** — (note, no action) editor picking is `MeshRayCast` on main-world
   mesh data and never touches the render path.
+
+### Also learned while building Phase 1
+
+- **Per-view visibility is `RenderVisibleEntities`**, populated by
+  `collect_visible_cpu_culled_entities` in bevy_render's `ViewPlugin`
+  (`RenderSystems::PrepareAssets`), keyed by visibility class — so
+  `visible.get::<Mesh3d>()` is the frustum-culled, render-layer-filtered list
+  for that view, with no bevy_pbr involved. Using it rather than a global
+  `ViewVisibility` sweep is what keeps terrain out of the thumbnail rig's
+  camera (layer 7).
+- **`@builtin(instance_index)` is `firstInstance + i` by WebGPU spec**, so a
+  draw over an instance range indexes its own slice of the instance buffer
+  with no extra uniform. Bevy's own batching depends on this too.
+- **The instance buffer must go through `encase`, not `bytemuck`.** glam's
+  `Mat3` is 36 bytes; WGSL's `mat3x3<f32>` is 48. `BufferVec` (encase) pads
+  correctly; `RawBufferVec` (Pod) would shear every instance past the first.
+- **Bevy's prepass does not cull back faces while its opaque pass does**
+  (`PrimitiveState::default()` vs `cull_mode: Some(Face::Back)`). Ours culls
+  in both: a back face winning the depth buffer on a pixel the colour pass
+  then discards is a hole with fog in it.
+- **`ViewQuery` skips its system when the view doesn't match** (a
+  `SystemParamValidationError::skipped`), so a pass system can simply require
+  `&SceneDraws` and stay silent on views that have none.
 
 ## 6. Expected wins — hypotheses to check against Phase 0
 
