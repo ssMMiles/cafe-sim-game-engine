@@ -130,6 +130,10 @@ bevy_egui = { version = "0.43", default-features = false, features = [
 egui_dock = { version = "0.21", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Core span types for the Performance panel's per-system timing layer
+# (gfx/system_timing.rs). Already in the graph via bevy; bevy_log re-exports
+# tracing_subscriber but not tracing itself.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 rayon = "1"
 bytemuck = { version = "1", features = ["derive"] }
 # HDR lightmaps: OpenEXR (f16 RGB, ZIP) on disk, Rgba16Float on the GPU.

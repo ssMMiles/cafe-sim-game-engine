@@ -34,6 +34,9 @@ use wasm_bindgen::prelude::*;
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
 pub fn run() {
+    #[cfg(feature = "profiling")]
+    trace_to_temp_dir();
+
     // Register a custom "world" asset source pointing to the project root CWD.
     // Chunk files are loaded as "world://worlds/{id}/chunks/chunk_X_Y.terrain".
     // Must be registered before DefaultPlugins (which includes AssetPlugin).
@@ -53,6 +56,13 @@ pub fn run() {
 
     app.add_plugins(
         DefaultPlugins
+            // Aggregates bevy's per-system spans for the editor's Performance
+            // panel. The spans only exist in builds with bevy's `trace`
+            // feature (cargo run-profiling); elsewhere the layer is idle.
+            .set(bevy::log::LogPlugin {
+                custom_layer: game::gfx::system_timing::timing_layer,
+                ..default()
+            })
             .set(AssetPlugin {
                 meta_check: AssetMetaCheck::Never,
                 ..default()
@@ -85,6 +95,25 @@ pub fn run() {
     .add_systems(Startup, initialize)
     .init_state::<AppState>()
     .run();
+}
+
+/// Point bevy's Chrome trace at the temp dir instead of the working
+/// directory (its default is `./trace-<timestamp>.json`). An explicit
+/// `TRACE_CHROME` still wins. Runs first thing in `run`, before any thread
+/// exists, which is what makes `set_var` sound.
+#[cfg(feature = "profiling")]
+fn trace_to_temp_dir() {
+    if std::env::var_os("TRACE_CHROME").is_some() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros());
+    let path = std::env::temp_dir().join(format!("trace-{stamp}.json"));
+    eprintln!("Chrome trace: {}", path.display());
+    // SAFETY: single-threaded at this point; nothing else reads the
+    // environment concurrently.
+    unsafe { std::env::set_var("TRACE_CHROME", &path) };
 }
 
 pub use engine_api::AppState;

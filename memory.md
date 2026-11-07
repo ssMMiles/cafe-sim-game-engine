@@ -1408,7 +1408,24 @@ main-thread measurement. **egui trap caught before shipping**: `DragValue` defau
 SystemParams + a plain `Targets` struct, so adding a setting no longer threads a parameter
 through six functions. `docs/PERFORMANCE.md` is the reference (ATMOSPHERE.md §7 now points there).
 
-## Per-system CPU timing: not built yet — 4 November 2026 (pick up next session)
+## Per-system CPU timing: built — 5 November 2026 (plan option (a) below)
+
+`src/game/gfx/system_timing.rs`: a tracing `Layer` handed to `LogPlugin::custom_layer`
+(src/lib.rs) times every span named `"system"` (bevy caches one per system; `name` field is the
+full path, read via a `Visit` on `on_new_span`, `Instant` stored in span extensions on enter) and
+accumulates (Duration, runs) per name into `SpanAccumulator` (Arc<Mutex<HashMap>>, inserted as a
+resource by the layer fn). `collect_system_timings` (Last) drains it per frame into
+`SystemTimings` — EMA α=0.05 per system, rows sorted by ms, systems that stop running fade out
+and are forgotten. Panel: inspector → Performance → "Systems (CPU)", top 20 + "n more" row;
+`short_name` shows the last two `::` segments, full path on hover. Render-thread systems are
+included (same span name, any thread). Not gated to the profiling build after all — the layer is
+registered always but idles without `trace` (plain builds emit no system spans; the panel shows a
+run-`cargo run-profiling` hint). `apply_deferred` cost (`"system_commands"` spans) is not counted.
+Added top-level dep `tracing` (bevy_log re-exports tracing_subscriber but not tracing). Trap
+avoided: `custom_layer` is a plain fn pointer, so shared state goes app-ward via the `&mut App`
+argument, not capture.
+
+## Per-system CPU timing: not built yet — 4 November 2026 (superseded by the entry above)
 
 User sees ~16 ms main thread / ~5 ms render thread in the Performance panel → main-thread systems
 are the bottleneck. Asked for per-system times in the panel; deferred as not-quick. Facts verified:
@@ -1426,3 +1443,44 @@ Plan options for the in-editor version: (a) a tracing layer via `LogPlugin::cust
 shared map → "top N systems" table; recommend gating it to the profiling build so normal builds
 don't pay `trace` overhead. (b) Cheap, no `trace`: per-schedule timing using the same marker-schedule
 trick as `frame_pacing.rs` FrameStart/FrameEnd (Update vs PostUpdate/egui etc.), ~1 h.
+
+## update_probe_volume 12 ms/frame standing still — fixed 5 November 2026
+
+Found with the new Systems (CPU) table. Cause: the inspector's environment panel (nothing
+selected) did `panels.terrain_world.as_deref_mut()` every frame just to *read* the environment.
+A `ResMut` deref marks the resource changed, and `update_probe_volume` treats
+`TerrainWorld.is_changed()` as "environment changed" → `enqueue_all()` (the whole 192×48×192
+window, ~1.77 M cells) every frame. With a 131k-cell budget the queue never drained, so it always
+spent the full budget. The same bogus signal also re-ran `apply_environment` and
+`sync_sky_colors` every frame. Fix: read via `as_deref()`, take `as_deref_mut()` only on
+write-back. **Rule: never deref `ResMut<TerrainWorld>` without writing**; its change tick is
+load-bearing. Still coarse: `TerrainWorld` also holds `chunk_state_map`/`chunk_index`, so a
+save result (and anything else touching it) triggers a full probe refill too. It's one-off
+(~14 frames), but a dedicated environment change signal would be the clean fix.
+
+## System timing table: self time + schedule runners — 5 November 2026
+
+`run_render_schedule` (bevy_render, the exclusive system in `RenderRecovery` that runs the whole
+`Render` schedule), `Main::run_main` and `run_fixed_main_schedule` are *containers*: their spans
+enclose other systems' spans, so the first version of the table double-counted and put them on
+top (user read run_render_schedule's ~10 ms as render cost). The layer now keeps a thread-local
+stack of open system spans and records **self time** (duration − nested children on the same
+thread); a span that ever nests another is flagged `nests` (sticky), listed apart as a "schedule
+runner" and excluded from the total — its self time is mostly waiting for systems the executor ran
+on other threads. Swapchain acquire wait shows up as the `prepare_windows` row.
+
+## Replacing StandardMaterial as the toon/terrain base — investigated, not started (6 Nov 2026)
+
+What the base is actually used for: toon reads `base_color`, `base_color_texture` (+ `uv_transform`)
+via `pbr_bindings::material` (flags read as a `let` for Tint uniformity); terrain only `base_color`.
+Hidden dependencies a standalone `Material` must re-provide: (1) **culling** — StandardMaterialKey
+turns `double_sided` into `cull_mode: None`; robot (7 mats), rock, table2 and all trees are
+doubleSided in their glTF. (2) **prepass normals** — ExtendedMaterial falls back to
+`pbr_prepass.wesl`, which flips back-face normals of double-sided materials; the default
+`prepass.wesl` a plain Material gets does not, so the edge detector would see inverted normals on
+leaves. No asset uses normalTexture or alphaMode, so dropping those changes nothing today.
+Bevy 0.20 material systems are mostly type-erased (`specialize_material_meshes`,
+`queue_material_meshes`) and `extract_mesh_materials::<M>` is change-driven, so the steady-state
+CPU win is expected to be small; the per-frame PBR cost (clusters, lights, shadow views, view bind
+group) belongs to `MeshPipeline`/`PbrPlugin` and stays with any `Material`. Measure first.
+

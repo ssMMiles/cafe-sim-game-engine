@@ -6,6 +6,7 @@ pub mod crosshair;
 pub mod frame_pacing;
 pub mod post_process;
 pub mod profiling;
+pub mod system_timing;
 pub mod toon_material;
 
 use atmosphere::{AtmospherePlugin, sync_atmosphere_settings};
@@ -95,6 +96,7 @@ impl Plugin for GfxPlugin {
         app.add_plugins(AtmospherePlugin);
         app.add_plugins(GfxProfilingPlugin);
         app.add_plugins(frame_pacing::FramePacingPlugin);
+        app.add_plugins(system_timing::SystemTimingPlugin);
 
         // The benchmark's override has to be set before the uniforms that
         // read it are built, or it would take effect a frame late — on the

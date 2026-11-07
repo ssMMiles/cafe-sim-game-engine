@@ -25,6 +25,7 @@ use crate::game::gfx::frame_pacing::{
 };
 use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::gfx::profiling::{BenchEffect, EffectBench, GpuTimingSupport};
+use crate::game::gfx::system_timing::{SystemTimings, short_name};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -821,7 +822,11 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
     ui.weak("Nothing selected. Click a placed entity in the viewport or the outliner.");
     ui.separator();
 
-    let Some(tw) = panels.terrain_world.as_deref_mut() else {
+    // Read through `&`: a `ResMut` deref marks `TerrainWorld` changed, and
+    // everything that follows the environment (`apply_environment`, the sky,
+    // a full probe-volume refill) keys off that. Only the write-back below
+    // takes the mutable borrow.
+    let Some(tw) = panels.terrain_world.as_deref() else {
         ui.weak("World not loaded yet.");
         return;
     };
@@ -975,6 +980,7 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
             gpu_timing: &panels.gpu_timing,
             settings: panels.display.reborrow(),
             breakdown: &panels.frame_breakdown,
+            system_timings: &panels.system_timings,
             display,
         },
     );
@@ -993,7 +999,9 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
             panels.lighting.stale = true;
         }
         // Writing through `ResMut` is what `apply_environment` listens for.
-        tw.metadata.environment = env.clone();
+        if let Some(tw) = panels.terrain_world.as_deref_mut() {
+            tw.metadata.environment = env.clone();
+        }
         panels.history.merge_or_push(
             MergeKey::Environment,
             "Edit environment",
@@ -1287,6 +1295,7 @@ struct Perf<'a> {
     gpu_timing: &'a GpuTimingSupport,
     settings: Mut<'a, DisplaySettings>,
     breakdown: &'a FrameBreakdown,
+    system_timings: &'a SystemTimings,
     display: Option<Display>,
 }
 
@@ -1322,6 +1331,8 @@ fn performance(ui: &mut egui::Ui, mut p: Perf) {
             ui.add_space(4.0);
             let refresh = p.display.as_ref().and_then(|d| d.refresh_hz);
             frame_breakdown(ui, p.breakdown, refresh, &p.settings);
+            ui.add_space(4.0);
+            system_times(ui, p.system_timings);
             ui.add_space(4.0);
             display_controls(ui, &mut p.settings, p.display.as_ref());
             ui.add_space(4.0);
@@ -1430,6 +1441,77 @@ fn verdict(m: &FrameSample, refresh_hz: Option<f32>, settings: &DisplaySettings)
         }
         FrameLimit::Headroom => "Neither thread is near the frame time.".into(),
     }
+}
+
+/// The most expensive bevy systems, by smoothed CPU self time per frame,
+/// across both threads. Fed by the tracing layer in `gfx/system_timing.rs`;
+/// bevy only emits the per-system spans in `trace` builds, so outside
+/// `cargo run-profiling` this is a hint instead of a table.
+///
+/// Systems that run whole schedules (`run_main`, `run_render_schedule`, …)
+/// are listed apart: their self time is them waiting for systems on other
+/// threads, which already have rows of their own.
+fn system_times(ui: &mut egui::Ui, timings: &SystemTimings) {
+    const ROWS: usize = 20;
+    egui::CollapsingHeader::new("Systems (CPU)")
+        .default_open(false)
+        .show(ui, |ui| {
+            if timings.is_empty() {
+                ui.weak(
+                    "Per-system times need bevy's span instrumentation, which only the \
+                     profiling build carries: quit and run `cargo run-profiling`.",
+                );
+                return;
+            }
+            ui.weak(format!(
+                "{:.2} ms of system work per frame, main + render threads together \
+                 (smoothed self time; threads overlap, so this can exceed the frame).",
+                timings.total_ms()
+            ));
+            egui::Grid::new("system_times")
+                .striped(true)
+                .min_col_width(0.0)
+                .show(ui, |ui| {
+                    let mut rest = 0.0;
+                    let mut hidden = 0;
+                    for (i, (name, stat)) in timings.rows().filter(|(_, s)| !s.nests).enumerate() {
+                        if i >= ROWS {
+                            rest += stat.ms;
+                            hidden += 1;
+                            continue;
+                        }
+                        ui.label(short_name(name)).on_hover_text(name);
+                        ui.monospace(format!("{:7.3} ms", stat.ms));
+                        // Runs per frame: FixedUpdate systems run 0–n times,
+                        // render systems exactly once, so only flag the odd ones.
+                        if (stat.runs - 1.0).abs() > 0.1 {
+                            ui.monospace(format!("×{:.1}", stat.runs));
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+                    }
+                    if hidden > 0 {
+                        ui.weak(format!("{hidden} more"));
+                        ui.monospace(format!("{rest:7.3} ms"));
+                        ui.end_row();
+                    }
+                });
+            let runners: Vec<_> = timings.rows().filter(|(_, s)| s.nests).collect();
+            if !runners.is_empty() {
+                ui.add_space(2.0);
+                ui.weak("Schedule runners (time not spent in their systems; not in the total):")
+                    .on_hover_text(
+                        "These run whole schedules — run_render_schedule is the entire render \
+                         frame. Their systems are the rows above; what is left here is mostly \
+                         waiting for systems on other threads.",
+                    );
+                for (name, stat) in runners {
+                    ui.weak(format!("{:7.3} ms  {}", stat.ms, short_name(name)))
+                        .on_hover_text(name);
+                }
+            }
+        });
 }
 
 /// Vsync and the frame cap. Both persist per user.

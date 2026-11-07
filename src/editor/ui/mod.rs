@@ -202,6 +202,7 @@ pub struct Panels<'w, 's> {
     pub gpu_timing: Res<'w, crate::game::gfx::profiling::GpuTimingSupport>,
     pub display: ResMut<'w, crate::game::gfx::frame_pacing::DisplaySettings>,
     pub frame_breakdown: Res<'w, crate::game::gfx::frame_pacing::FrameBreakdown>,
+    pub system_timings: Res<'w, crate::game::gfx::system_timing::SystemTimings>,
     /// Refresh rates for the Performance panel's vsync readout.
     pub monitors: Query<
         'w,
