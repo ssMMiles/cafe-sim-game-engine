@@ -25,7 +25,7 @@ use crate::game::gfx::frame_pacing::{
 };
 use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::gfx::profiling::{BenchEffect, EffectBench, GpuTimingSupport};
-use crate::game::gfx::system_timing::{SystemTimings, short_name};
+use crate::game::gfx::system_timing::{SystemTimings, short_name, snapshot_markdown};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -1332,7 +1332,7 @@ fn performance(ui: &mut egui::Ui, mut p: Perf) {
             let refresh = p.display.as_ref().and_then(|d| d.refresh_hz);
             frame_breakdown(ui, p.breakdown, refresh, &p.settings);
             ui.add_space(4.0);
-            system_times(ui, p.system_timings);
+            system_times(ui, p.system_timings, p.breakdown);
             ui.add_space(4.0);
             display_controls(ui, &mut p.settings, p.display.as_ref());
             ui.add_space(4.0);
@@ -1451,11 +1451,12 @@ fn verdict(m: &FrameSample, refresh_hz: Option<f32>, settings: &DisplaySettings)
 /// Systems that run whole schedules (`run_main`, `run_render_schedule`, …)
 /// are listed apart: their self time is them waiting for systems on other
 /// threads, which already have rows of their own.
-fn system_times(ui: &mut egui::Ui, timings: &SystemTimings) {
+fn system_times(ui: &mut egui::Ui, timings: &SystemTimings, breakdown: &FrameBreakdown) {
     const ROWS: usize = 20;
     egui::CollapsingHeader::new("Systems (CPU)")
         .default_open(false)
         .show(ui, |ui| {
+            snapshot_button(ui, timings, breakdown);
             if timings.is_empty() {
                 ui.weak(
                     "Per-system times need bevy's span instrumentation, which only the \
@@ -1512,6 +1513,43 @@ fn system_times(ui: &mut egui::Ui, timings: &SystemTimings) {
                 }
             }
         });
+}
+
+/// Take the whole table away as text: onto the clipboard always, and into a
+/// timestamped file next to `editor_settings.json` on native.
+///
+/// A before/after measurement across a renderer change (`docs/SCENE_PASS_PLAN.md`)
+/// is dozens of rows read twice; transcribing them from a screenshot is how
+/// you end up comparing two different scenes.
+fn snapshot_button(ui: &mut egui::Ui, timings: &SystemTimings, breakdown: &FrameBreakdown) {
+    if !ui
+        .button("Save snapshot")
+        .on_hover_text(
+            "Copy this table and the frame breakdown to the clipboard, and write them \
+             to perf-snapshot-<time>.md in the working directory.",
+        )
+        .clicked()
+    {
+        return;
+    }
+
+    let note = format!(
+        "perf snapshot {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    );
+    let text = snapshot_markdown(timings, breakdown.median(), &note);
+    ui.ctx().copy_text(text.clone());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = std::path::PathBuf::from(format!("{}.md", note.replace(' ', "-")));
+        match std::fs::write(&path, &text) {
+            Ok(()) => info!("perf snapshot written to {}", path.display()),
+            Err(e) => warn!("could not write {}: {e}", path.display()),
+        }
+    }
 }
 
 /// Vsync and the frame cap. Both persist per user.

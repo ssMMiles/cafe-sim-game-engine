@@ -61,6 +61,8 @@ plugins/                # Dynamic plugin crates (dylibs): cafe-sim, example, exa
 projects/               # Project manifests: projects/{id}/project.toml (plugins, worlds, start_world)
 docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save system; EDITOR_UI_DESIGN.md — docked editor, phased;
                         #   GRAPHICS.md — the whole graphics pipeline as built (GRAPHICS_OVERVIEW.md: plain-language);
+                        #   SCENE_PASS_PLAN.md — replacing bevy_pbr's geometry passes with our own, phased
+                        #   (SCENE_PASS_BASELINE.md: how to measure it, and the tables);
                         #   EDGE_DETECTION.md — outline post-process: the maths, knobs, symptoms;
                         #   ATMOSPHERE.md — fog + god rays post-process;
                         #   PERFORMANCE.md — the editor's Performance panel: frame vs work time, vsync/cap, A/B, GPU timers;
@@ -157,6 +159,7 @@ src/
     │   ├── frame_pacing.rs   # `DisplaySettings` (vsync, frame cap), FrameStart/FrameEnd schedules, per-thread
     │   │                #   breakdown incl. swapchain-acquire wait. docs/PERFORMANCE.md
     │   ├── profiling.rs      # GpuTimingSupport (Metal: no in-pass timestamps), A/B EffectBench + EffectOverride
+    │   ├── system_timing.rs  # Per-system CPU self time (tracing layer → Performance panel), snapshot export
     │   └── crosshair.rs
     └── world/           # WorldPlugin - terrain, objects, baking, streaming
         ├── mod.rs       # WorldPlugin, sun/ambient setup, apply_environment, missing-plugin warnings

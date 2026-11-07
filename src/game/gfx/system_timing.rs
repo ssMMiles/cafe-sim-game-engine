@@ -243,6 +243,58 @@ impl SystemTimings {
     }
 }
 
+/// The whole Systems (CPU) table plus the frame breakdown, as markdown.
+///
+/// Exists so a before/after measurement is a file rather than a transcription
+/// from a screenshot — `docs/SCENE_PASS_BASELINE.md` is kept from these. Full
+/// system paths, not [`short_name`]s: telling bevy_pbr's rows from ours is the
+/// entire point of the exercise.
+pub fn snapshot_markdown(
+    timings: &SystemTimings,
+    frame: Option<super::frame_pacing::FrameSample>,
+    note: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    let _ = writeln!(out, "### {note}\n");
+    match frame {
+        Some(m) => {
+            let _ = writeln!(
+                out,
+                "Frame {:.2} ms · main {:.2} · render {:.2} busy + {:.2} waiting\n",
+                m.frame, m.main, m.render_busy, m.render_wait
+            );
+        }
+        None => {
+            let _ = writeln!(out, "Frame breakdown: not enough samples yet.\n");
+        }
+    }
+    if timings.is_empty() {
+        let _ = writeln!(
+            out,
+            "No per-system spans: this is not a `cargo run-profiling` build."
+        );
+        return out;
+    }
+
+    let _ = writeln!(
+        out,
+        "{:.3} ms of system work per frame, both threads (smoothed self time).\n",
+        timings.total_ms()
+    );
+    let _ = writeln!(out, "| ms | runs | system |");
+    let _ = writeln!(out, "|---:|-----:|--------|");
+    for (name, stat) in timings.rows().filter(|(_, s)| !s.nests) {
+        let _ = writeln!(out, "| {:.3} | {:.1} | `{name}` |", stat.ms, stat.runs);
+    }
+    let _ = writeln!(out, "\nSchedule runners (waiting, not work):\n");
+    for (name, stat) in timings.rows().filter(|(_, s)| s.nests) {
+        let _ = writeln!(out, "- {:.3} ms `{name}`", stat.ms);
+    }
+    out
+}
+
 /// The last two path segments: enough to tell `selection::validate_selection`
 /// from another crate's `validate_selection` without eating the panel's width.
 /// The full path belongs in the row's hover text.

@@ -4,3 +4,4 @@ worlds
 pkg.worktrees/
 projects
 editor_settings.json
+perf-snapshot-*.md

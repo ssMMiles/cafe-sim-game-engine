@@ -1,7 +1,7 @@
 # Replacing the bevy scene pass — plan
 
-Status: **planned, not started** (written 2026-11-06). Prerequisite already
-landed: `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose
+Status: **Phase 0 tooling in place, Phase 1 not started** (written 2026-11-06,
+Phase 0 2026-11-07). Prerequisite already landed: `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose
 shaders import no bevy PBR fragment modules (ABI 14) — the material contract a
 custom pass must honour is already small and written down (`GRAPHICS.md` §5).
 
@@ -189,12 +189,15 @@ is proven.
 
 ## 4. Phases
 
-**Phase 0 — Baseline (an hour).** `cargo run-profiling`, capture the Systems
-(CPU) table rows for the render world and the frame breakdown, editor scene +
-cafe scene. Name the rows we expect to shrink or vanish (specialize/queue
-systems for the two material types, batching, preprocess dispatch) and file
-the numbers in `memory.md`. This is the before-photo every later phase is
-judged against; the strategic decision to proceed is already made.
+**Phase 0 — Baseline.** Protocol, the row lists, and the tables themselves
+live in **`docs/SCENE_PASS_BASELINE.md`**, not `memory.md` — they get re-taken
+at every phase and would swamp it. The Performance panel's Systems (CPU)
+section grew a **Save snapshot** button (`system_timing::snapshot_markdown`)
+so a before/after is a file rather than a transcription from a screenshot.
+*Status: tooling and the row lists are in; the tables need a
+`cargo run-profiling` session, which only a human can drive.* This is the
+before-photo every later phase is judged against; the strategic decision to
+proceed is already made.
 
 **Phase 1 — Terrain through the scene pass.** Plugin skeleton, view+scene
 bind group, instance buffer, pipeline cache; terrain colour + prepass
