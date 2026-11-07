@@ -1503,3 +1503,20 @@ upgrades. Not yet run visually by the user at time of writing.
 Also: profiling builds set `TRACE_CHROME` to `$TMPDIR/trace-<µs>.json` in `lib.rs::run` (cfg
 `profiling`) unless already set.
 
+## Scene pass replacement: plan written, not started — 6 November 2026
+
+`docs/SCENE_PASS_PLAN.md`. Key verified facts it rests on: bevy 0.20's per-view graph is the
+**Core3d schedule** (sets Prepass→MainPass→EarlyPostProcess→PostProcess; passes are `ViewQuery` +
+`RenderContext` systems — post_process.rs is the in-repo precedent); prepass/depth textures are
+bevy_core_pipeline, not bevy_pbr; `extract_meshes_for_gpu_building` is change-driven (static
+scenes cheap — the recurring costs are specialize/queue/batch/preprocess/view-bind-group);
+`SkinUniforms`/`extract_skins`/`prepare_skins` are pub (keep PbrPlugin → free skinning for the
+player); asset WESL shaders get module paths from asset paths (shared toon-curve module is a
+spike, V4). Architecture: own extract → instance storage buffer grouped by (pipeline, material,
+mesh) → two pass systems in Core3d; authoring components (`MeshMaterial3d<T>`) unchanged;
+material types migrate **atomically** (no double-draw) — terrain first, then a per-scene uniform
+refactor (ABI 15, kills sync_toon_look's write-every-material), then toon wholesale, sky, then a
+*measured* decision on evicting PbrPlugin (default: don't — stragglers/thumbnails/skinning live
+there). Open verification items V1–V7 in the doc, most importantly who clears the prepass/colour
+attachments when bevy's phases are empty (V2/V3). Phase 0 = capture the Systems-table baseline
+before any code.
