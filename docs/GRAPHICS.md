@@ -132,37 +132,57 @@ egui is configured with `UiRenderOrder::BevyUiAboveEgui` (`src/editor/ui/mod.rs:
 
 ## 5. Materials
 
-Every lit surface is a Bevy `ExtendedMaterial` over `StandardMaterial`. The
-base provides colour, the base colour texture and the prepass. The
-extension replaces the fragment shader. Both toon materials force
-`AlphaMode::Opaque`.
+Both lit materials are standalone Bevy `Material`s (since 2026-11-06; they
+were `ExtendedMaterial`s over `StandardMaterial` before). All lighting is
+baked, so the only surface data they need is a colour, an optional texture
+and whether the surface is double-sided — the PBR base was a uniform and
+bindings nobody read. Both are opaque and opt out of shadow passes
+(`enable_shadows() -> false`: nothing casts a real-time shadow).
 
-### 5.1 `ToonMat` = `ExtendedMaterial<StandardMaterial, ToonMaterial>`
+**Written with a future scene pass of our own in mind.** Neither fragment
+shader imports bevy's PBR modules: they read the vertex-output struct, the
+mesh flags (for the double-sided winding correction) and their own bind
+group, nothing else. The Rust types hold plain data and handles. So the
+contract a replacement renderer must honour is just: the vertex transform,
+each material's bind group, and `ToonMaterialKey` (culling + the
+`TOON_DOUBLE_SIDED` def).
+
+### 5.1 `ToonMaterial`
 
 Placed meshes, the player, and plugin pieces.
-- Types: `crates/engine-api/src/toon_material.rs` (shared with plugin dylibs; ABI-gated).
+- Types: `crates/engine-api/src/toon_material.rs` (shared with plugin dylibs; ABI-gated, 14).
 - Host sync: `src/game/gfx/toon_material.rs`.
-- Shader: `assets/shaders/toon_lighting.wesl` (fragment and deferred). Vertex and prepass are Bevy's.
+- Shaders: `assets/shaders/toon_lighting.wesl` (fragment), `toon_prepass.wesl`
+  (prepass fragment: normals). The vertex stages are Bevy's.
+- Pipeline key: `ToonMaterialKey { double_sided }`. Double-sided → no culling
+  and the `TOON_DOUBLE_SIDED` def on both passes, which flips the normal of a
+  back face (winding-corrected for mirrored meshes) — for probe lighting in
+  the colour pass and for the edge detector in the prepass. Single-sided →
+  back faces culled (front, under a view's `INVERT_CULLING`).
 
 | Binding | What |
 |---------|------|
+| 0 | `ToonSurfaceUniform { base_color (linear), uv_transform }`, derived from the material's fields |
+| 1/2 | `base_color_texture` + sampler (bevy's white fallback when `None`) |
 | 100/101 | `lightmap` texture + sampler (an object's baked EXR; else the 1×1 white `DefaultToonLightmap`) |
 | 102 | `ToonShading` uniform: `source` (1 lightmap / 2 probes), `unlit`, `probe_cell_size`, `probe_dims`, `sun_dir`, `sun_rgb`, `curve` (bands, floor, white, gamma) |
 | 103/104 | probe `c0` 3D texture + its repeat/linear sampler |
 | 105–107 | probe `c1`–`c3` |
 
-Fragment logic (`toon_lighting.wesl:327-394`):
-- **Colour.** `base_color` comes from the material uniform, multiplied by the
-  base colour texture on UV0 when the material has one (respecting
-  `uv_transform`). Vertex colours, normal maps, emissive and
-  metallic/roughness are ignored.
+Fragment logic (`toon_lighting.wesl`, `fn fragment`):
+- **Colour.** `base_color` from the uniform × the base colour texture on UV0
+  (through `uv_transform`) whenever the mesh has UV0 — sampled
+  unconditionally, since a missing texture is bevy's white fallback.
+  Vertex colours, normal maps, emissive and metallic/roughness don't exist
+  on the material; the glTF conversion warns when it drops one (§5.4).
 - **Radiance.** White by default (the unlit view, or no UV1). Probe source:
-  `probe_radiance(world_pos, n)` (§6.2). Lightmap source: the lightmap on UV1.
+  `probe_radiance(world_pos, n)` (§6.2) with the facing normal. Lightmap
+  source: the lightmap on UV1.
 - **Output.** `base × toon_shade(radiance, curve)`.
-- Branches test a `let` copied from the uniform, which WebGPU's uniformity
-  rule requires (§14).
+- Branches test the uniform directly, which WebGPU's uniformity rule
+  requires (§14).
 
-### 5.2 `ExtendedMaterial<StandardMaterial, TerrainMaterial>`
+### 5.2 `TerrainMaterial`
 
 `src/game/world/terrain/material.rs`; vertex `terrain.wesl`, fragment
 `terrain_toon.wesl`.
@@ -171,9 +191,11 @@ Fragment logic (`toon_lighting.wesl:327-394`):
 |---------|------|
 | 100/101 | `stone_texture` (`textures/terrain.png`, repeat) |
 | 102/103 | the chunk's `lightmap` |
-| 104 | `TerrainShading { use_lightmap, curve }` (note: `use_lightmap` = 1 is *lit*, the opposite polarity of `ToonShading::unlit`) |
+| 104 | `TerrainShading { use_lightmap, curve, base_color }` (note: `use_lightmap` = 1 is *lit*, the opposite polarity of `ToonShading::unlit`) |
 
-- **Base.** Flat sRGB (0.81, 0.62, 0.60).
+- **Base.** `TerrainShading.base_color`, set once in `bootstrap.rs` to sRGB
+  (0.81, 0.62, 0.60). Back faces culled (the mesh pipeline's default), and
+  Bevy's default prepass — terrain is never double-sided.
 - **Stone.** Darkened by a *stochastic no-tile* sample of the stone texture
   at `world.xz / 3`: four randomly offset lattice cells blended with
   smoothstep weights, at a fixed mip 1, mixed towards near-black by up to 85%.
@@ -208,12 +230,16 @@ lightmap (`bootstrap.rs:242-253`).
 - **The observer.** One global observer, `on_scene_ready`, handles every
   `WorldAssetRoot` scene instance, placed or plugin-spawned alike.
 - **What converts.** A root carrying `ConvertToToon` (engine-api) has each
-  mesh's `StandardMaterial` cloned in as the *base* of a new `ToonMat`, so
-  colour, textures and `uv_transform` survive.
+  mesh's `StandardMaterial` replaced by a `ToonMaterial` built with
+  `with_surface_of`: colour, base colour texture, `uv_transform` and
+  sidedness (`cull_mode: None` → double-sided) survive. Anything visible
+  that doesn't — normal maps, emissive, transparency, unlit, a base colour on
+  UV1 (`dropped_standard_features`) — is logged as a warning once per source
+  material. No asset in the repo uses any of those today.
 - **Source.** `DynamicLit` on the root picks the probe source; otherwise it
   is the lightmap source.
 - **Sharing.**
-  - Probe-lit conversions share one `ToonMat` per glTF material
+  - Probe-lit conversions share one `ToonMaterial` per glTF material
     (`ProbeToonMaterials`), so identical moving pieces batch.
   - Lightmapped conversions get one material per mesh entity, since each
     has its own lightmap.
@@ -515,16 +541,22 @@ All are WESL except the compute bake.
 
 | File | Stage | Used by | Tested by |
 |------|-------|---------|-----------|
-| `toon_lighting.wesl` | fragment (+ deferred) | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block) |
+| `toon_lighting.wesl` | fragment | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block); `shader_check` (every variant) |
+| `toon_prepass.wesl` | prepass fragment | `ToonMaterial` | `shader_check`; `both_passes_flip_normals_the_same_way` |
 | `terrain.wesl` | vertex | `TerrainMaterial` | — |
-| `terrain_toon.wesl` | fragment (+ deferred) | `TerrainMaterial` | `toon_curve_matches_the_shaders` |
+| `terrain_toon.wesl` | fragment | `TerrainMaterial` | `toon_curve_matches_the_shaders`; `shader_check` |
 | `sky_dome.wesl` | fragment | `SkyDomeMaterial` | — |
 | `edge_detection_post.wesl` | fragment (Bevy fullscreen vertex) | `EdgeDetectionPlugin` | naga validation via import substitution; uniform size; plane/step geometry (`post_process.rs` tests) |
 | `lightmap_bake.wgsl` | compute 16×16 | GPU terrain bake | naga validation, uniform size, f16 packing (`gpu.rs` tests) |
 
-The material shaders import `bevy_pbr::render::*` modules, so they only
-compile inside Bevy's resolver. A broken material shader shows up at
-runtime, not in `cargo test`.
+The material shaders import a few `bevy_pbr` modules, so they only compile
+inside a WESL resolver. `gfx/shader_check.rs` runs the same `wesl::compile`
+bevy does against verbatim stand-ins for those modules and naga-validates
+every combination of the defs each shader branches on, so a broken material
+fragment shader fails `cargo test`. naga skips WebGPU's uniformity rule:
+`DUMP_WGSL=<dir> cargo test shader_check` writes each variant out for
+`tools/tint-check.mjs`. `terrain.wesl` (vertex) isn't covered — it imports
+more of bevy's vertex modules than it was worth stubbing.
 
 ---
 

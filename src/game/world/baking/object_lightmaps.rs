@@ -11,14 +11,12 @@
 //! object id plus the entity's index in [`collect_toon_meshes`]'s walk.
 //! Re-bake after reordering nodes in the source asset.
 
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::lightmap::{LightmapLocation, LightmapSource, lightmap_file_name};
 use crate::game::gfx::toon_material::ToonMaterial;
-
-pub type ToonMat = ExtendedMaterial<StandardMaterial, ToonMaterial>;
 
 /// Path of one sub-mesh's lightmap inside a world directory.
 pub fn object_lightmap_path(world_path: &Path, object_id: u64, sub_mesh: usize) -> PathBuf {
@@ -58,7 +56,7 @@ pub fn object_lightmap_location(
 pub struct ToonMeshEntry {
     pub entity: Entity,
     pub mesh: Handle<Mesh>,
-    pub material: Handle<ToonMat>,
+    pub material: Handle<ToonMaterial>,
     /// The sub-mesh's *own* world transform. glTF nodes routinely carry
     /// their own scale/offset (the rock mesh is scaled 2.5× inside its file),
     /// so the placed root's transform alone puts texels in the wrong place —
@@ -74,7 +72,7 @@ pub type ToonMeshQuery<'w, 's> = Query<
     's,
     (
         &'static Mesh3d,
-        &'static MeshMaterial3d<ToonMat>,
+        &'static MeshMaterial3d<ToonMaterial>,
         &'static GlobalTransform,
     ),
 >;
@@ -124,10 +122,10 @@ fn collect_recursive(
 /// missing.
 pub fn unique_material(
     entry: &ToonMeshEntry,
-    seen: &mut HashSet<AssetId<ToonMat>>,
-    materials: &mut Assets<ToonMat>,
+    seen: &mut HashSet<AssetId<ToonMaterial>>,
+    materials: &mut Assets<ToonMaterial>,
     commands: &mut Commands,
-) -> Option<Handle<ToonMat>> {
+) -> Option<Handle<ToonMaterial>> {
     if seen.insert(entry.material.id()) {
         return Some(entry.material.clone());
     }
@@ -151,7 +149,7 @@ pub struct NeedsObjectLightmaps;
 struct ApplyCtx<'a, 'w, 's> {
     commands: &'a mut Commands<'w, 's>,
     meshes: &'a mut Assets<Mesh>,
-    materials: &'a mut Assets<ToonMat>,
+    materials: &'a mut Assets<ToonMaterial>,
     images: &'a mut Assets<Image>,
     uv_cache: &'a mut super::uv_unwrap::LightmapUvCache,
 }
@@ -195,7 +193,7 @@ fn apply_lightmap_sources(
         // The same unwrap the bake used — the UVs must match the texels.
         ctx.uv_cache.ensure(ctx.meshes, entry.mesh.id());
         if let Some(mut mat) = ctx.materials.get_mut(mat_handle.id()) {
-            mat.extension.lightmap = image;
+            mat.lightmap = image;
         }
         applied += 1;
     }
@@ -222,7 +220,7 @@ pub fn apply_object_lightmaps(
     mesh_query: ToonMeshQuery,
     children_query: Query<&Children>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ToonMat>>,
+    mut materials: ResMut<Assets<ToonMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut uv_cache: ResMut<super::uv_unwrap::LightmapUvCache>,
 ) {
@@ -337,7 +335,7 @@ pub fn apply_object_lightmaps(
     mesh_query: ToonMeshQuery,
     children_query: Query<&Children>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ToonMat>>,
+    mut materials: ResMut<Assets<ToonMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut uv_cache: ResMut<super::uv_unwrap::LightmapUvCache>,
     mut in_flight: ResMut<PendingObjectLightmaps>,
@@ -414,7 +412,7 @@ mod tests {
         let child = world
             .spawn((
                 Mesh3d(Handle::default()),
-                MeshMaterial3d::<ToonMat>(Handle::default()),
+                MeshMaterial3d::<ToonMaterial>(Handle::default()),
                 child_tf,
                 ChildOf(root),
             ))
@@ -422,7 +420,7 @@ mod tests {
         let grandchild = world
             .spawn((
                 Mesh3d(Handle::default()),
-                MeshMaterial3d::<ToonMat>(Handle::default()),
+                MeshMaterial3d::<ToonMaterial>(Handle::default()),
                 grandchild_tf,
                 ChildOf(child),
             ))

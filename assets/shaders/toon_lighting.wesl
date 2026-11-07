@@ -12,20 +12,31 @@
 // docs/DYNAMIC_LIGHTING_PLAN.md §8. Either way the banding below is shared. That keeps the WASM/WebGPU path free of
 // shadow maps and clustered lighting entirely.
 
+// The material is standalone (engine-api `ToonMaterial`, not an extension of
+// StandardMaterial), so nothing below reads bevy's PBR fragment modules: only
+// the vertex-output struct and the mesh flags, both of which any mesh pass
+// has to provide.
 import bevy_pbr::render::{
-    pbr_fragment::pbr_input_from_vertex_output,
-    pbr_bindings,
-    pbr_types,
-    mesh_view_bindings as view_bindings,
+    forward_io::{VertexOutput, FragmentOutput},
+    mesh_bindings::mesh,
+    mesh_types::MESH_FLAGS_SIGN_DETERMINANT_MODEL_3X3_BIT,
 };
 
-@if(PREPASS_PIPELINE)
-import bevy_pbr::{
-    prepass::io::{VertexOutput, FragmentOutput},
-    deferred::functions::deferred_output,
+// Mirrors `ToonSurfaceUniform` in engine-api's toon_material.rs.
+struct ToonSurface {
+    // Linear RGBA.
+    base_color: vec4<f32>,
+    uv_transform: mat3x3<f32>,
 };
-@else
-import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
+@group(constants::MATERIAL_BIND_GROUP) @binding(0)
+var<uniform> surface: ToonSurface;
+// bevy binds its white fallback when the material has no texture, so the
+// sample below is unconditional — no branch, nothing for WebGPU's uniformity
+// analysis to object to.
+@group(constants::MATERIAL_BIND_GROUP) @binding(1)
+var base_color_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2)
+var base_color_sampler: sampler;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
 var lightmap_texture: texture_2d<f32>;
@@ -324,71 +335,47 @@ fn toon_shade(radiance: vec3<f32>, curve: vec4<f32>) -> vec3<f32> {
 }
 // ─── END TOON CURVE ──────────────────────────────────────────────────────
 
+// The shading normal. A double-sided material's back faces are seen from
+// behind, so their normal is flipped towards the viewer; a mirrored mesh
+// (negative determinant) has its winding — and so `is_front` — reversed.
+// `toon_prepass.wesl` holds the same function for the normal prepass; keep
+// the two in step.
+fn facing_normal(world_normal: vec3<f32>, is_front: bool, instance_index: u32) -> vec3<f32> {
+    let positive_determinant =
+        (mesh[instance_index].flags & MESH_FLAGS_SIGN_DETERMINANT_MODEL_3X3_BIT) != 0u;
+    let front = is_front == positive_determinant;
+@if(TOON_DOUBLE_SIDED)
+    return select(-world_normal, world_normal, front);
+@else
+    return world_normal;
+}
+
 @fragment
 fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
-    let double_sided = false;
-    var pbr_input = pbr_input_from_vertex_output(in, is_front, double_sided);
-    // Read base color from the material uniform directly to avoid
-    // pbr_input_from_standard_material's dependency on uv (VERTEX_UVS_A) when
-    // only VERTEX_UVS_B is defined on the mesh.
-    //
-    // `material_flags` is a `let` straight from the uniform, and the texture
-    // branch below tests *it*, never `pbr_input.material.flags`. WGSL's
-    // uniformity analysis treats a partial assignment to a `var` as keeping
-    // the variable's old dependencies, and `pbr_input` was built from `in`
-    // and `is_front`, so a condition read back out of it is non-uniform and
-    // `textureSampleBias` inside it is a compile error in WebGPU (Tint).
-    // naga skips that rule for fragment stages, so native never notices;
-    // this is the same reason bevy's own pbr_fragment branches on a local
-    // `flags` copy of the uniform.
-    let material_flags = pbr_bindings::material.flags;
-    pbr_input.material.base_color = pbr_bindings::material.base_color;
-    pbr_input.material.flags = material_flags;
-
-    // Mix in base_color_texture when one is bound and the mesh ships a
-    // primary UV channel. Mirrors the StandardMaterial path in
-    // pbr_fragment::pbr_input_from_standard_material; guarded on
-    // VERTEX_UVS_A so lightmap-only meshes still compile.
-@if(VERTEX_UVS_A)
-    if ((material_flags & pbr_types::STANDARD_MATERIAL_FLAGS_BASE_COLOR_TEXTURE_BIT) != 0u) {
-        let uv = (pbr_bindings::material.uv_transform * vec3<f32>(in.uv, 1.0)).xy;
-        pbr_input.material.base_color = pbr_input.material.base_color * textureSampleBias(
-            pbr_bindings::base_color_texture,
-            pbr_bindings::base_color_sampler,
-            uv,
-            view_bindings::view.mip_bias,
-        );
-    }
-
+    var base_color = surface.base_color;
+@if(VERTEX_UVS_A) {
+    let uv = (surface.uv_transform * vec3<f32>(in.uv, 1.0)).xy;
+    base_color = base_color * textureSample(base_color_texture, base_color_sampler, uv);
+}
 
     // White = fully lit. Used for the unlit debug view and for lightmapped
-    // meshes that have no lightmap UVs at all. Computed unconditionally: in
-    // the deferred prepass it is simply unused, which is the same trade
-    // bevy_pbr makes in `pbr.wesl` (WESL `@if` attaches to one statement, so
-    // the forward-only branch is kept to the statements that need the
-    // guard). Both branches test the uniform, so the samples sit in uniform
-    // control flow.
+    // meshes that have no lightmap UVs at all. Both branches test the
+    // uniform directly, so the samples inside sit in uniform control flow
+    // (WebGPU/Tint requires it for `textureSample`).
     var radiance = vec3<f32>(1.0);
     if (toon.unlit == 0u && toon.source == 2u) {
-        radiance = probe_radiance(in.world_position.xyz, normalize(in.world_normal));
+        let n = normalize(facing_normal(in.world_normal, is_front, in.instance_index));
+        radiance = probe_radiance(in.world_position.xyz, n);
     }
     if (toon.unlit == 0u && toon.source == 1u) {
 @if(VERTEX_UVS_B)
         radiance = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).rgb;
     }
 
-@if(PREPASS_PIPELINE)
-    let out = deferred_output(in, pbr_input);
-@if(!PREPASS_PIPELINE)
     var out: FragmentOutput;
-@if(!PREPASS_PIPELINE)
-    out.color = vec4<f32>(
-        pbr_input.material.base_color.rgb * toon_shade(radiance, toon.curve),
-        pbr_input.material.base_color.a,
-    );
-
+    out.color = vec4<f32>(base_color.rgb * toon_shade(radiance, toon.curve), base_color.a);
     return out;
 }

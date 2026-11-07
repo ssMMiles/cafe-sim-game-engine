@@ -42,11 +42,12 @@ plane, so the prepass stores
 where `distance` is along the view axis. Pixels nothing was drawn to
 (sky) stay at the clear value, 0. The sky dome writes no depth.
 
-**Normals.** World-space unit normals, packed `n * 0.5 + 0.5`, written by
-bevy's standard prepass shader for every opaque material. Both toon
-materials are `ExtendedMaterial<StandardMaterial, …>` and use the base
-prepass, so a glTF normal map *does* reach this texture. The sky dome writes
-its sphere normals, never in front of real geometry.
+**Normals.** World-space normals, packed `n * 0.5 + 0.5`. Toon objects
+write them with `toon_prepass.wesl`, which flips a double-sided material's
+back faces towards the viewer (bevy's default prepass wouldn't, and leaves
+would outline along every fold); terrain uses bevy's default prepass. Normal
+maps don't reach this texture — toon materials have none. The sky dome
+writes its sphere normals, never in front of real geometry.
 
 **Not in the prepass:** anything alpha-blended (blob shadows, by design,
 which is how they stay outline-free), gizmos, and egui. These never get

@@ -1,4 +1,4 @@
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 
 pub mod atmosphere;
 pub mod camera;
@@ -6,6 +6,8 @@ pub mod crosshair;
 pub mod frame_pacing;
 pub mod post_process;
 pub mod profiling;
+#[cfg(test)]
+mod shader_check;
 pub mod system_timing;
 pub mod toon_material;
 
@@ -89,9 +91,7 @@ impl Plugin for GfxPlugin {
                 .run_if(in_state(EditorMode::Gameplay)),
         );
 
-        app.add_plugins(MaterialPlugin::<
-            ExtendedMaterial<StandardMaterial, ToonMaterial>,
-        >::default());
+        app.add_plugins(MaterialPlugin::<ToonMaterial>::default());
         app.add_plugins(EdgeDetectionPlugin);
         app.add_plugins(AtmospherePlugin);
         app.add_plugins(GfxProfilingPlugin);

@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use engine_api::{PlayerCamera, ToonMat};
+use engine_api::{PlayerCamera, ToonMaterial};
 use rand::seq::IndexedRandom;
 use std::collections::HashSet;
 
@@ -34,7 +34,7 @@ const POPUP_FONT_SIZE: f32 = 16.0;
 #[derive(Resource)]
 pub struct CustomerAssets {
     pub mesh: Handle<Mesh>,
-    pub material: Handle<ToonMat>,
+    pub material: Handle<ToonMaterial>,
 }
 
 #[derive(Resource, Default)]

@@ -6,20 +6,18 @@
 //! materials (`ToonMaterial::new`) against the same `TypeId`s.
 
 pub use engine_api::toon_material::{
-    DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonShading, ToonSource,
+    DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonShading, ToonSource,
     create_default_toon_lightmap, create_probe_volume_images,
 };
 
 pub use engine_api::toon_curve::ToonCurve;
 
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 
 use crate::game::world::terrain::{
     material::TerrainMaterial,
     storage::{EnvironmentData, TerrainWorld},
 };
-
-type TerrainMat = ExtendedMaterial<StandardMaterial, TerrainMaterial>;
 
 /// Everything a toon material needs from the level that isn't baked into
 /// its lightmap: the sun (which probe-lit surfaces evaluate per pixel) and
@@ -79,19 +77,19 @@ pub fn update_toon_look(terrain_world: Option<Res<TerrainWorld>>, mut look: ResM
 /// here raises `Modified`, so reacting to that would loop every frame.
 pub fn sync_toon_look(
     look: Res<ToonLook>,
-    mut events: MessageReader<AssetEvent<ToonMat>>,
-    mut materials: ResMut<Assets<ToonMat>>,
-    mut terrain: ResMut<Assets<TerrainMat>>,
+    mut events: MessageReader<AssetEvent<ToonMaterial>>,
+    mut materials: ResMut<Assets<ToonMaterial>>,
+    mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
     if look.is_changed() {
         events.clear();
         for (_, mat) in materials.iter_mut() {
-            look.apply(&mut mat.extension.shading);
+            look.apply(&mut mat.shading);
         }
         // Terrain materials are few (one shared handle) and carry no sun, so
         // they are rewritten wholesale rather than tracked by asset event.
         for (_, mat) in terrain.iter_mut() {
-            mat.extension.shading.curve = look.curve.to_vec4();
+            mat.shading.curve = look.curve.to_vec4();
         }
         return;
     }
@@ -99,7 +97,7 @@ pub fn sync_toon_look(
         if let AssetEvent::Added { id } = event
             && let Some(mut mat) = materials.get_mut(*id)
         {
-            look.apply(&mut mat.extension.shading);
+            look.apply(&mut mat.shading);
         }
     }
 }
@@ -110,6 +108,28 @@ mod tests {
 
     const OBJECT_SHADER: &str = include_str!("../../../assets/shaders/toon_lighting.wesl");
     const TERRAIN_SHADER: &str = include_str!("../../../assets/shaders/terrain_toon.wesl");
+    const PREPASS_SHADER: &str = include_str!("../../../assets/shaders/toon_prepass.wesl");
+
+    /// `fn facing_normal` through its closing brace.
+    fn facing_normal(src: &str) -> Option<&str> {
+        let start = src.find("fn facing_normal(")?;
+        let end = src[start..].find("\n}\n")? + start;
+        Some(&src[start..end])
+    }
+
+    /// The colour pass and the normal prepass each flip a double-sided back
+    /// face's normal, with their own copy of the function. If they disagree,
+    /// probe lighting and outlines describe different surfaces.
+    #[test]
+    fn both_passes_flip_normals_the_same_way() {
+        let colour = facing_normal(OBJECT_SHADER).expect("toon_lighting.wesl has facing_normal");
+        let prepass = facing_normal(PREPASS_SHADER).expect("toon_prepass.wesl has facing_normal");
+        assert_eq!(
+            colour, prepass,
+            "facing_normal has drifted between the passes"
+        );
+        assert!(colour.contains(&format!("@if({})", engine_api::TOON_DOUBLE_SIDED_DEF)));
+    }
 
     const BEGIN: &str = "// ─── TOON CURVE";
     const END: &str = "// ─── END TOON CURVE";

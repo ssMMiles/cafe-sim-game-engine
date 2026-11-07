@@ -15,7 +15,7 @@
 //! mirrors [`crate::delivery::handle_delivery_click`].
 
 use bevy::prelude::*;
-use engine_api::ToonMat;
+use engine_api::ToonMaterial;
 use rand::RngExt;
 use std::collections::HashSet;
 
@@ -57,7 +57,7 @@ const NOTICE_LIFETIME_SECS: f32 = 6.0;
 #[derive(Resource)]
 pub struct StaffAssets {
     pub mesh: Handle<Mesh>,
-    pub material: Handle<ToonMat>,
+    pub material: Handle<ToonMaterial>,
 }
 
 /// Names of staff who quit at the last close for lack of pay. Drained into a

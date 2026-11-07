@@ -13,13 +13,14 @@ use std::time::Duration;
 use super::bvh::TriangleBvh;
 use super::lightmap::{BakeLighting, LightmapBuffer, LightmapLocation, store_lightmap};
 use super::object_lightmaps::{
-    ToonMat, ToonMeshQuery, collect_toon_meshes, object_lightmap_location, unique_material,
+    ToonMeshQuery, collect_toon_meshes, object_lightmap_location, unique_material,
 };
 use super::raycast::BakeHeightCache;
 use super::uv_unwrap::{
     LightmapUvCache, cell_texels, lightmap_resolution, max_world_edge, texels_per_cell,
 };
 use super::{BakeConfig, BakeRegion, raycast};
+use crate::game::gfx::toon_material::ToonMaterial;
 use crate::game::world::{
     objects::PlacedObject,
     terrain::{HeightmapData, storage::TerrainWorld},
@@ -42,14 +43,14 @@ pub struct ObjectBakeJob {
     cache: BakeHeightCache,
     /// Resolved on the main world — `unique_material` may *add* an asset, so
     /// it cannot run off-thread.
-    material: Handle<ToonMat>,
+    material: Handle<ToonMaterial>,
     /// Where the finished EXR goes: a file path natively, an OPFS key on wasm.
     dest: LightmapLocation,
 }
 
 /// A finished sub-mesh lightmap on its way back to the ECS.
 pub struct ObjectBakeResult {
-    pub material: Handle<ToonMat>,
+    pub material: Handle<ToonMaterial>,
     pub image: Image,
 }
 
@@ -112,7 +113,7 @@ pub fn collect_object_bake_jobs(
     mesh_query: &ToonMeshQuery,
     children_query: &Query<&Children>,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ToonMat>,
+    materials: &mut Assets<ToonMaterial>,
     uv_cache: &mut LightmapUvCache,
 ) -> Vec<ObjectBakeJob> {
     let mut jobs = Vec::new();

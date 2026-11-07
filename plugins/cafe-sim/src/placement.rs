@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use engine_api::{
     AutoCollider, ConvertToToon, DefaultToonLightmap, DynamicLit, PlayerCamera, ProbeVolumeImages,
-    ToonMat,
+    ToonMaterial,
 };
 use std::collections::HashMap;
 
@@ -138,7 +138,7 @@ pub fn sync_preview(
 pub fn apply_paint_when_loaded(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut toon_materials: ResMut<Assets<ToonMat>>,
+    mut toon_materials: ResMut<Assets<ToonMaterial>>,
     mut colors: ResMut<ProbeLitColors>,
     lightmap: Res<DefaultToonLightmap>,
     probes: Res<ProbeVolumeImages>,

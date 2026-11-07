@@ -3,7 +3,7 @@
 //! The GPU path in `gpu.rs` computes the same texels with the same lighting
 //! model; this is the wasm / fallback implementation.
 
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 use rayon::prelude::*;
 
 use super::bvh::TriangleBvh;
@@ -27,11 +27,8 @@ pub fn bake_terrain_lightmaps(
     terrain_world: &TerrainWorld,
     config: &BakeConfig,
     region: &BakeRegion,
-    chunk_query: &Query<(
-        &TerrainChunk,
-        &MeshMaterial3d<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
-    )>,
-    materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    chunk_query: &Query<(&TerrainChunk, &MeshMaterial3d<TerrainMaterial>)>,
+    materials: &mut Assets<TerrainMaterial>,
     images: &mut Assets<Image>,
     lighting: &BakeLighting,
     bvh: &TriangleBvh,
@@ -71,7 +68,7 @@ pub fn bake_terrain_lightmaps(
 
         let new_handle = images.add(lightmap.into_image());
         if let Some(mut mat) = materials.get_mut(material_handle.id()) {
-            mat.extension.lightmap = new_handle;
+            mat.lightmap = new_handle;
         }
 
         info!(

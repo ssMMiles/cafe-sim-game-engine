@@ -18,8 +18,9 @@ pub use script::{
 };
 pub use toon_curve::ToonCurve;
 pub use toon_material::{
-    DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonShading, ToonSource,
-    create_default_toon_lightmap, create_probe_volume_images,
+    DefaultToonLightmap, ProbeVolumeImages, TOON_DOUBLE_SIDED_DEF, ToonMaterial, ToonMaterialKey,
+    ToonShading, ToonSource, ToonSurfaceUniform, create_default_toon_lightmap,
+    create_probe_volume_images, dropped_standard_features,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,7 +57,11 @@ pub use toon_material::{
 /// - 13: [`UserSettings`] lost `outline_visible` with the inert
 ///   `bevy_mod_outline` hover-outline system it belonged to (the screen-space
 ///   edge pass is the only outline now).
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 13;
+/// - 14: [`ToonMaterial`] is a standalone `Material` rather than an
+///   `ExtendedMaterial<StandardMaterial, _>` extension; the `ToonMat` alias
+///   is gone. Surface fields (`base_color`, `base_color_texture`,
+///   `uv_transform`, `double_sided`) live on the material itself.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 14;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -352,9 +357,9 @@ impl BlobShadow {
 }
 
 /// Ask the host to re-dress a glTF scene in toon materials once it has
-/// spawned: every sub-mesh's `StandardMaterial` becomes the base of an
-/// `ExtendedMaterial<StandardMaterial, ToonMaterial>`, colours and textures
-/// preserved, and the marker is removed. Put it on the `WorldAssetRoot`
+/// spawned: every sub-mesh's `StandardMaterial` is replaced by a
+/// [`ToonMaterial`] carrying its colour, texture and sidedness
+/// ([`ToonMaterial::with_surface_of`]), and the marker is removed. Put it on the `WorldAssetRoot`
 /// entity. Without [`DynamicLit`] the scene is treated as static level
 /// geometry and shades from a baked lightmap (white until one is applied);
 /// with it, from the probe volume at its own position — and then every
@@ -363,7 +368,7 @@ impl BlobShadow {
 ///
 /// Plugins spawning scenes at runtime (furniture, props) want
 /// `(ConvertToToon, DynamicLit)`. A translucent preview cannot be toon
-/// (the extension forces opaque) — leave it on `StandardMaterial`.
+/// (toon is always opaque) — leave it on `StandardMaterial`.
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub struct ConvertToToon;
 

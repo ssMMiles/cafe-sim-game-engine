@@ -1484,3 +1484,22 @@ Bevy 0.20 material systems are mostly type-erased (`specialize_material_meshes`,
 CPU win is expected to be small; the per-frame PBR cost (clusters, lights, shadow views, view bind
 group) belongs to `MeshPipeline`/`PbrPlugin` and stays with any `Material`. Measure first.
 
+## ToonMaterial / TerrainMaterial are standalone Materials — 6 November 2026
+
+Done (ABI 13 → 14; `ToonMat` alias removed, use `ToonMaterial`). Surface fields on the material
+(`base_color`, `base_color_texture`, `uv_transform`, `double_sided`) → struct-level
+`#[uniform(0, ToonSurfaceUniform)]` + texture 1/2; lighting bindings unchanged at 100–107.
+`ToonMaterialKey { double_sided }` → `specialize` sets cull mode (also runs for the prepass
+pipeline: bevy's prepass calls the same `user_specialize`) and pushes `TOON_DOUBLE_SIDED`.
+New `toon_prepass.wesl` replaces `pbr_prepass.wesl`'s back-face normal flip. Main pass now
+also flips back-face normals for probe lighting (the old shader passed `double_sided = false`
+— behaviour change, only visible on probe-lit double-sided meshes like the robot).
+`enable_shadows() -> false` on both. Terrain base colour moved into `TerrainShading.base_color`.
+Base colour texture is sampled unconditionally (white fallback) — no flags branch.
+Shader testing: `gfx/shader_check.rs` uses `wesl` 0.6 (dev-dep; same as bevy_shader) with a
+`Resolver` serving our files + stub bevy modules copied verbatim from bevy_pbr 0.20; every def
+subset naga-validated; Tint verified all 26 variants on 2026-11-06. Stubs must track bevy
+upgrades. Not yet run visually by the user at time of writing.
+Also: profiling builds set `TRACE_CHROME` to `$TMPDIR/trace-<µs>.json` in `lib.rs::run` (cfg
+`profiling`) unless already set.
+

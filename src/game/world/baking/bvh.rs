@@ -23,7 +23,7 @@ use bevy::{
 };
 use bytemuck::Zeroable;
 
-use super::object_lightmaps::ToonMat;
+use crate::game::gfx::toon_material::ToonMaterial;
 use crate::game::gltf_loading::DynamicLit;
 use crate::game::world::objects::PlacedObject;
 
@@ -361,7 +361,7 @@ pub fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Op
 /// `DynamicLit`, which wins — it would otherwise bake a shadow of whatever
 /// orientation it was authored in.
 pub fn collect_occluder_triangles(
-    toon_meshes: &Query<(Entity, &Mesh3d, &GlobalTransform), With<MeshMaterial3d<ToonMat>>>,
+    toon_meshes: &Query<(Entity, &Mesh3d, &GlobalTransform), With<MeshMaterial3d<ToonMaterial>>>,
     parents: &Query<&ChildOf>,
     scenery: &Query<(Option<&PlacedObject>, Option<&RigidBody>, Has<DynamicLit>)>,
     meshes: &Assets<Mesh>,

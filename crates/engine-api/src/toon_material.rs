@@ -1,9 +1,14 @@
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
-    pbr::{ExtendedMaterial, MaterialExtension},
+    math::Affine2,
+    mesh::{MeshVertexBufferLayoutRef, UvChannel},
+    pbr::{MaterialPipeline, MaterialPipelineKey, MeshPipelineKey},
     prelude::*,
-    render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
+    render::render_resource::{
+        AsBindGroup, Extent3d, Face, RenderPipelineDescriptor, ShaderType,
+        SpecializedMeshPipelineError, TextureDimension, TextureFormat,
+    },
     shader::ShaderRef,
 };
 
@@ -152,12 +157,36 @@ pub fn create_probe_volume_images(images: &mut Assets<Image>) -> ProbeVolumeImag
     }
 }
 
-/// The material every toon-shaded mesh renders with: bevy's PBR inputs for
-/// base colour and textures, the toon extension for how it is lit.
-pub type ToonMat = ExtendedMaterial<StandardMaterial, ToonMaterial>;
-
+/// The material every toon-shaded mesh renders with.
+///
+/// A standalone [`Material`], not an extension of `StandardMaterial`: all
+/// lighting is baked, so the only surface properties the shader reads are a
+/// base colour, an optional base-colour texture and whether the surface is
+/// double-sided. Everything here is plain data and handles — no PBR types —
+/// so the bind group and the [`ToonMaterialKey`] are the whole contract a
+/// renderer has to honour (`docs/GRAPHICS.md` §5.1).
+///
+/// Built from a glTF's `StandardMaterial` with [`ToonMaterial::with_surface_of`];
+/// whatever that drops is listed by [`dropped_standard_features`].
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[uniform(0, ToonSurfaceUniform)]
+#[bind_group_data(ToonMaterialKey)]
 pub struct ToonMaterial {
+    /// Multiplies the base-colour texture (if any) and then the toon-shaded
+    /// lighting. Its alpha is written out but the material is always opaque.
+    pub base_color: Color,
+    /// Sampled through UV0 (and [`Self::uv_transform`]) on meshes that have
+    /// UV0; `None` binds bevy's white fallback, i.e. no texture.
+    #[texture(1)]
+    #[sampler(2)]
+    pub base_color_texture: Option<Handle<Image>>,
+    /// Applied to UV0 before the base-colour lookup (glTF `KHR_texture_transform`).
+    pub uv_transform: Affine2,
+    /// No back-face culling, and back faces shade with the normal flipped
+    /// towards the viewer — in the colour pass (probe-lit lighting) and in
+    /// the normal prepass the edge detector reads. glTF `doubleSided`.
+    pub double_sided: bool,
+
     /// Per-instance baked HDR lightmap: outgoing radiance in lightmap units
     /// where 1.0 shows the full base colour. Sun, ambient×AO, bounce and
     /// every placed light are folded in at bake time; the shader only
@@ -184,11 +213,47 @@ pub struct ToonMaterial {
     pub probe_c3: Handle<Image>,
 }
 
+/// The surface half of the material, as the shader sees it. Mirrors
+/// `ToonSurface` in `toon_lighting.wesl`.
+#[derive(Clone, Copy, Debug, ShaderType)]
+pub struct ToonSurfaceUniform {
+    /// Linear RGBA.
+    pub base_color: Vec4,
+    pub uv_transform: Mat3,
+}
+
+impl From<&ToonMaterial> for ToonSurfaceUniform {
+    fn from(m: &ToonMaterial) -> Self {
+        Self {
+            base_color: LinearRgba::from(m.base_color).to_vec4(),
+            uv_transform: m.uv_transform.into(),
+        }
+    }
+}
+
+/// What makes two toon materials need different pipelines. Only culling —
+/// and the matching normal flip, which is the same switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ToonMaterialKey {
+    pub double_sided: bool,
+}
+
+impl From<&ToonMaterial> for ToonMaterialKey {
+    fn from(m: &ToonMaterial) -> Self {
+        Self {
+            double_sided: m.double_sided,
+        }
+    }
+}
+
+/// Shader def set on both passes of a double-sided toon pipeline.
+pub const TOON_DOUBLE_SIDED_DEF: &str = "TOON_DOUBLE_SIDED";
+
 impl ToonMaterial {
-    /// A material shading from `source`. `lightmap` is only sampled for
-    /// [`ToonSource::Lightmap`]; pass the shared default for anything else.
-    /// The sun fields start empty — the host fills them for every toon
-    /// material from the level's environment.
+    /// A white, single-sided material shading from `source`. `lightmap` is
+    /// only sampled for [`ToonSource::Lightmap`]; pass the shared default for
+    /// anything else. The sun fields start empty — the host fills them for
+    /// every toon material from the level's environment.
     pub fn new(source: ToonSource, lightmap: Handle<Image>, probes: &ProbeVolumeImages) -> Self {
         Self {
             lightmap,
@@ -197,13 +262,59 @@ impl ToonMaterial {
             probe_c1: probes.c1.clone(),
             probe_c2: probes.c2.clone(),
             probe_c3: probes.c3.clone(),
+            ..default()
         }
     }
+
+    pub fn with_base_color(mut self, color: impl Into<Color>) -> Self {
+        self.base_color = color.into();
+        self
+    }
+
+    /// Take the surface — colour, texture, UV transform, sidedness — from a
+    /// `StandardMaterial` (what glTF scenes spawn with). Everything else it
+    /// carries is ignored; [`dropped_standard_features`] says what that loses.
+    pub fn with_surface_of(mut self, standard: &StandardMaterial) -> Self {
+        self.base_color = standard.base_color;
+        self.base_color_texture = standard.base_color_texture.clone();
+        self.uv_transform = standard.uv_transform;
+        // `cull_mode` rather than `double_sided`: it is what decides whether
+        // back faces are visible, and the glTF loader sets both together.
+        self.double_sided = standard.cull_mode.is_none();
+        self
+    }
+}
+
+/// The `StandardMaterial` features a toon conversion throws away that would
+/// visibly change the result — not the PBR parameters (metallic, roughness,
+/// reflectance) that have no meaning under baked toon lighting.
+pub fn dropped_standard_features(standard: &StandardMaterial) -> Vec<&'static str> {
+    let mut dropped = Vec::new();
+    if standard.normal_map_texture.is_some() {
+        dropped.push("normal map");
+    }
+    if standard.emissive != LinearRgba::BLACK || standard.emissive_texture.is_some() {
+        dropped.push("emissive");
+    }
+    if !matches!(standard.alpha_mode, AlphaMode::Opaque) {
+        dropped.push("transparency (toon is always opaque)");
+    }
+    if standard.unlit {
+        dropped.push("unlit");
+    }
+    if standard.base_color_channel != UvChannel::Uv0 {
+        dropped.push("base colour on UV1 (toon reads UV0)");
+    }
+    dropped
 }
 
 impl Default for ToonMaterial {
     fn default() -> Self {
         Self {
+            base_color: Color::WHITE,
+            base_color_texture: None,
+            uv_transform: Affine2::IDENTITY,
+            double_sided: false,
             lightmap: Handle::default(),
             shading: ToonShading::new(ToonSource::Lightmap),
             probe_c0: Handle::default(),
@@ -214,17 +325,46 @@ impl Default for ToonMaterial {
     }
 }
 
-impl MaterialExtension for ToonMaterial {
+impl Material for ToonMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/toon_lighting.wesl".into()
     }
 
-    fn deferred_fragment_shader() -> ShaderRef {
-        "shaders/toon_lighting.wesl".into()
+    /// Writes the prepass normal with the double-sided flip; bevy's default
+    /// prepass fragment would hand the edge detector inverted normals on the
+    /// back of every leaf.
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/toon_prepass.wesl".into()
     }
 
-    fn alpha_mode() -> Option<AlphaMode> {
-        Some(AlphaMode::Opaque)
+    /// Nothing casts a real-time shadow: all lighting is baked and
+    /// `BakedSun` has shadows off. Saying so skips the shadow specialisation.
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    /// Runs for the colour pass and the prepass alike.
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let double_sided = key.bind_group_data.double_sided;
+        // Mirrors bevy's own rule: a view with INVERT_CULLING (mirrors)
+        // culls the opposite face.
+        descriptor.primitive.cull_mode = match (
+            double_sided,
+            key.mesh_key.contains(MeshPipelineKey::INVERT_CULLING),
+        ) {
+            (true, _) => None,
+            (false, false) => Some(Face::Back),
+            (false, true) => Some(Face::Front),
+        };
+        if double_sided && let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader_defs.push(TOON_DOUBLE_SIDED_DEF.into());
+        }
+        Ok(())
     }
 }
 
@@ -270,4 +410,79 @@ pub fn probe_cell_index(w: f32) -> i32 {
 #[inline]
 pub fn probe_cell_centre(i: i32) -> f32 {
     (i as f32 + 0.5) * PROBE_CELL_SIZE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a glTF `doubleSided` material looks like after bevy's loader.
+    fn gltf_double_sided() -> StandardMaterial {
+        StandardMaterial {
+            base_color: Color::srgb(0.2, 0.4, 0.6),
+            base_color_texture: Some(Handle::default()),
+            uv_transform: Affine2::from_scale(Vec2::splat(2.0)),
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }
+    }
+
+    #[test]
+    fn the_surface_survives_conversion() {
+        let standard = gltf_double_sided();
+        let toon = ToonMaterial::default().with_surface_of(&standard);
+        assert_eq!(toon.base_color, standard.base_color);
+        assert_eq!(toon.base_color_texture, standard.base_color_texture);
+        assert_eq!(toon.uv_transform, standard.uv_transform);
+        assert!(toon.double_sided);
+        assert!(ToonMaterialKey::from(&toon).double_sided);
+
+        // The default StandardMaterial culls back faces: single-sided.
+        let single = ToonMaterial::default().with_surface_of(&StandardMaterial::default());
+        assert!(!single.double_sided);
+    }
+
+    /// Conversion keeps the lighting the template chose.
+    #[test]
+    fn conversion_leaves_the_lighting_alone() {
+        let template = ToonMaterial {
+            shading: ToonShading::new(ToonSource::ProbeVolume),
+            ..default()
+        };
+        let toon = template.clone().with_surface_of(&gltf_double_sided());
+        assert_eq!(toon.shading.source, ToonSource::ProbeVolume as u32);
+    }
+
+    /// The shader multiplies in linear space, like StandardMaterial did.
+    #[test]
+    fn the_uniform_carries_linear_colour() {
+        let toon = ToonMaterial::default().with_base_color(Color::srgb(0.5, 0.5, 0.5));
+        let uniform = ToonSurfaceUniform::from(&toon);
+        let expected = LinearRgba::from(Color::srgb(0.5, 0.5, 0.5)).to_vec4();
+        assert!((uniform.base_color - expected).abs().max_element() < 1e-6);
+        assert!(uniform.base_color.x < 0.25, "sRGB 0.5 is ~0.21 linear");
+        assert_eq!(uniform.uv_transform, Mat3::IDENTITY);
+    }
+
+    #[test]
+    fn only_visible_losses_are_reported() {
+        // PBR parameters mean nothing under baked toon lighting: no noise.
+        let plain = StandardMaterial {
+            metallic: 1.0,
+            perceptual_roughness: 0.1,
+            ..default()
+        };
+        assert!(dropped_standard_features(&plain).is_empty());
+        assert!(dropped_standard_features(&gltf_double_sided()).is_empty());
+
+        let fancy = StandardMaterial {
+            normal_map_texture: Some(Handle::default()),
+            emissive: LinearRgba::RED,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        };
+        let dropped = dropped_standard_features(&fancy);
+        assert_eq!(dropped.len(), 3, "{dropped:?}");
+    }
 }

@@ -2,7 +2,6 @@ use avian3d::prelude::*;
 use bevy::{
     camera::primitives::Aabb,
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
-    pbr::ExtendedMaterial,
     prelude::*,
 };
 
@@ -41,7 +40,7 @@ pub(crate) struct WorldMetaOpfsHandle(
 /// Shared render assets created once during terrain setup, reused for every spawned chunk.
 #[derive(Resource)]
 pub struct TerrainRenderAssets {
-    pub material: Handle<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    pub material: Handle<TerrainMaterial>,
 }
 
 /// Data produced by the background mesh-generation task.
@@ -223,7 +222,7 @@ pub fn spawn_chunk_from_result(
     meshes: &mut Assets<Mesh>,
     chunk_registry: &mut TerrainChunkRegistry,
     render_assets: &TerrainRenderAssets,
-    terrain_materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    terrain_materials: &mut Assets<TerrainMaterial>,
     images: &mut Assets<Image>,
     mut result: ChunkComputeResult,
 ) -> Entity {
@@ -245,7 +244,7 @@ pub fn spawn_chunk_from_result(
     let chunk_material = if let Some(base) = terrain_materials.get(&render_assets.material) {
         let mut mat = base.clone();
         if let Some(image) = result.lightmap.take() {
-            mat.extension.lightmap = images.add(image);
+            mat.lightmap = images.add(image);
         }
         terrain_materials.add(mat)
     } else {
@@ -329,7 +328,7 @@ pub fn create_terrain(
         (With<TerrainSetupMarker>, Without<TerrainProcessed>),
     >,
     mut commands: Commands,
-    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     #[cfg(not(all(target_arch = "wasm32", feature = "opfs")))] world_meta_assets: Res<
         Assets<WorldMetaAsset>,
@@ -471,7 +470,7 @@ fn finalize_terrain_setup(
     world_path: std::path::PathBuf,
     world_config: &storage::WorldConfig,
     commands: &mut Commands,
-    terrain_materials: &mut Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    terrain_materials: &mut Assets<TerrainMaterial>,
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
 ) {
@@ -504,18 +503,12 @@ fn finalize_terrain_setup(
     // Unbaked chunks bind the shared 1×1 white lightmap, i.e. fully lit.
     let default_lightmap = create_default_toon_lightmap(images);
 
-    let material = terrain_materials.add(ExtendedMaterial {
-        base: StandardMaterial {
-            base_color: Color::srgb(0.81, 0.62, 0.60),
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            reflectance: 0.0,
+    let material = terrain_materials.add(TerrainMaterial {
+        stone_texture,
+        lightmap: default_lightmap,
+        shading: TerrainShading {
+            base_color: LinearRgba::from(Color::srgb(0.81, 0.62, 0.60)).to_vec4(),
             ..default()
-        },
-        extension: TerrainMaterial {
-            stone_texture,
-            lightmap: default_lightmap,
-            shading: TerrainShading::default(),
         },
     });
 

@@ -1,5 +1,4 @@
 use bevy::{
-    pbr::MaterialExtension,
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
@@ -21,6 +20,8 @@ pub struct TerrainShading {
     pub _pad: Vec3,
     /// The toon ramp as `(bands, floor, white, gamma)` — see [`ToonCurve`].
     pub curve: Vec4,
+    /// Ground colour where the stone texture doesn't darken it, linear RGBA.
+    pub base_color: Vec4,
 }
 
 impl Default for TerrainShading {
@@ -29,6 +30,7 @@ impl Default for TerrainShading {
             use_lightmap: 1,
             _pad: Vec3::ZERO,
             curve: ToonCurve::default().to_vec4(),
+            base_color: Vec4::ONE,
         }
     }
 }
@@ -50,7 +52,10 @@ pub struct TerrainMaterial {
     pub shading: TerrainShading,
 }
 
-impl MaterialExtension for TerrainMaterial {
+/// A standalone material, like `ToonMaterial`: opaque, back faces culled
+/// (the mesh pipeline's default), and the default prepass — terrain is never
+/// double-sided, so bevy's plain world-normal output is exactly right.
+impl Material for TerrainMaterial {
     fn vertex_shader() -> ShaderRef {
         "shaders/terrain.wesl".into()
     }
@@ -59,11 +64,8 @@ impl MaterialExtension for TerrainMaterial {
         "shaders/terrain_toon.wesl".into()
     }
 
-    fn deferred_fragment_shader() -> ShaderRef {
-        "shaders/terrain_toon.wesl".into()
-    }
-
-    fn alpha_mode() -> Option<AlphaMode> {
-        Some(AlphaMode::Opaque)
+    /// See `ToonMaterial::enable_shadows`: nothing casts real-time shadows.
+    fn enable_shadows() -> bool {
+        false
     }
 }

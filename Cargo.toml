@@ -169,6 +169,10 @@ tempfile = "3"
 # links) so capability errors surface at `cargo test`, not at runtime.
 # Keep in step with bevy_render's wgpu/naga: Bevy 0.20 -> 30.
 naga = { version = "30", features = ["wgsl-in"] }
+# Compiles the material shaders' WESL the way bevy's resolver does, against
+# stub `bevy_pbr` modules, so `gfx/shader_check.rs` can naga-validate every
+# feature combination. Keep on bevy_shader's version (Bevy 0.20 -> 0.6).
+wesl = "0.6"
 
 [dependencies.bevy]
 workspace = true

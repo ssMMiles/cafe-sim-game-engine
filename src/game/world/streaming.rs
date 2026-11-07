@@ -26,7 +26,6 @@
 //! 3. `finalize_computed_chunks` uses `computing.objects_data` directly (no asset lookup).
 
 use bevy::{
-    pbr::ExtendedMaterial,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -604,7 +603,7 @@ pub fn finalize_computed_chunks(
     config: Res<ChunkStreamingConfig>,
     chunk_registry: Option<ResMut<TerrainChunkRegistry>>,
     render_assets: Option<Res<TerrainRenderAssets>>,
-    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     prefabs: Res<PrefabLibrary>,

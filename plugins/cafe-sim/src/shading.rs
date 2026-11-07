@@ -14,49 +14,46 @@
 //!   shared — a probe-lit material carries nothing per instance, and
 //!   same-mesh-same-material instances batch into one draw.
 //!
-//! The ghost preview stays `StandardMaterial`: the toon extension forces
-//! opaque, so a translucent toon ghost is not possible.
+//! The ghost preview stays `StandardMaterial`: toon is always opaque, so a
+//! translucent toon ghost is not possible.
 
-use bevy::{pbr::ExtendedMaterial, platform::collections::HashMap, prelude::*};
-use engine_api::{DefaultToonLightmap, ProbeVolumeImages, ToonMat, ToonMaterial, ToonSource};
+use bevy::{platform::collections::HashMap, prelude::*};
+use engine_api::{DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource};
 
 /// Shared probe-lit toon materials by colour.
 #[derive(Resource, Default)]
-pub struct ProbeLitColors(HashMap<[u8; 4], Handle<ToonMat>>);
+pub struct ProbeLitColors(HashMap<[u8; 4], Handle<ToonMaterial>>);
 
 /// The probe-lit toon material for `color`, building it on first use.
 pub fn probe_lit(
     color: Color,
     cache: &mut ProbeLitColors,
-    materials: &mut Assets<ToonMat>,
+    materials: &mut Assets<ToonMaterial>,
     lightmap: &DefaultToonLightmap,
     probes: &ProbeVolumeImages,
-) -> Handle<ToonMat> {
+) -> Handle<ToonMaterial> {
     cache
         .0
         .entry(color.to_srgba().to_u8_array())
         .or_insert_with(|| {
-            materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    base_color: color,
-                    ..default()
-                },
-                extension: ToonMaterial::new(ToonSource::ProbeVolume, lightmap.0.clone(), probes),
-            })
+            materials.add(
+                ToonMaterial::new(ToonSource::ProbeVolume, lightmap.0.clone(), probes)
+                    .with_base_color(color),
+            )
         })
         .clone()
 }
 
 /// [`probe_lit`] for exclusive-`World` setup code. [`ProbeLitColors`] must
 /// already be a resource.
-pub fn probe_lit_in(world: &mut World, color: Color) -> Handle<ToonMat> {
+pub fn probe_lit_in(world: &mut World, color: Color) -> Handle<ToonMaterial> {
     let lightmap = world.resource::<DefaultToonLightmap>().clone();
     let probes = world.resource::<ProbeVolumeImages>().clone();
     world.resource_scope(|world, mut cache: Mut<ProbeLitColors>| {
         probe_lit(
             color,
             &mut cache,
-            &mut world.resource_mut::<Assets<ToonMat>>(),
+            &mut world.resource_mut::<Assets<ToonMaterial>>(),
             &lightmap,
             &probes,
         )

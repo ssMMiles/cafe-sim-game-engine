@@ -3,17 +3,6 @@
 // All lighting is baked (see toon_lighting.wesl for the model); this shader
 // only adds the stochastic stone texture blend on top of the base colour.
 
-import bevy_pbr::render::{
-    pbr_fragment::pbr_input_from_vertex_output,
-    pbr_bindings,
-};
-
-@if(PREPASS_PIPELINE)
-import bevy_pbr::{
-    prepass::io::{VertexOutput, FragmentOutput},
-    deferred::functions::deferred_output,
-};
-@else
 import bevy_pbr::render::forward_io::{VertexOutput, FragmentOutput};
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -34,6 +23,8 @@ struct TerrainShading {
     // The toon ramp: (bands, floor, white, gamma). The same values the
     // object materials carry — see `toon_shade`.
     curve: vec4<f32>,
+    // Ground colour where the stone doesn't darken it, linear RGBA.
+    base_color: vec4<f32>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(104)
 var<uniform> terrain: TerrainShading;
@@ -184,46 +175,23 @@ fn sample_no_tile(uv: vec2<f32>) -> vec4<f32> {
 }
 
 @fragment
-fn fragment(
-    in: VertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> FragmentOutput {
-    let double_sided = false;
-    var pbr_input = pbr_input_from_vertex_output(in, is_front, double_sided);
-    // Read base color directly from the material uniform — we skip
-    // pbr_input_from_standard_material because terrain has no UV0 and that
-    // function assumes uv is defined whenever any UV set is present.
-    pbr_input.material.base_color = pbr_bindings::material.base_color;
-    pbr_input.material.flags = pbr_bindings::material.flags;
-
+fn fragment(in: VertexOutput) -> FragmentOutput {
     // Sample with stochastic UV offset to break up visible tiling.
     // Fixed mip level avoids automatic selection blurring sparse textures to white at distance.
     let stone_uv = in.world_position.xz / STONE_UV_SCALE;
     let stone_sample = sample_no_tile(stone_uv);
     let stone_factor = smoothstep(0.05, 0.45, 1.0 - stone_sample.r) * STONE_BLEND_STRENGTH;
+    let base_color = mix(terrain.base_color.rgb, STONE_COLOR, stone_factor);
 
-    pbr_input.material.base_color = vec4<f32>(
-        mix(pbr_input.material.base_color.rgb, STONE_COLOR, stone_factor),
-        pbr_input.material.base_color.a,
-    );
-
-    // White = fully lit (unlit debug view / unbaked chunk). Computed
-    // unconditionally; unused in the deferred prepass — see toon_lighting.wesl.
+    // White = fully lit (unlit debug view / unbaked chunk). The branch tests
+    // the uniform directly, so the sample stays in uniform control flow.
     var radiance = vec3<f32>(1.0);
     if (terrain.use_lightmap == 1u) {
 @if(VERTEX_UVS_B)
         radiance = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).rgb;
     }
 
-@if(PREPASS_PIPELINE)
-    let out = deferred_output(in, pbr_input);
-@if(!PREPASS_PIPELINE)
     var out: FragmentOutput;
-@if(!PREPASS_PIPELINE)
-    out.color = vec4<f32>(
-        pbr_input.material.base_color.rgb * toon_shade(radiance, terrain.curve),
-        pbr_input.material.base_color.a,
-    );
-
+    out.color = vec4<f32>(base_color * toon_shade(radiance, terrain.curve), terrain.base_color.a);
     return out;
 }

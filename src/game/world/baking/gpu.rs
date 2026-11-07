@@ -31,7 +31,6 @@
 
 use bevy::{
     asset::{Assets, RenderAssetUsages},
-    pbr::ExtendedMaterial,
     prelude::*,
     render::{
         ExtractSchedule, MainWorld, Render, RenderApp, RenderStartup, RenderSystems,
@@ -217,7 +216,7 @@ pub struct GpuBakeChunkJob {
     /// Handle to the output `ShaderBuffer` (pre-allocated, zeroed).
     pub out_handle: Handle<ShaderBuffer>,
     /// Material to swap the lightmap into once the readback completes.
-    pub material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    pub material_handle: AssetId<TerrainMaterial>,
     /// Where the finished EXR goes — a file path natively, an OPFS key on
     /// wasm. Resolved in the main world, where `TerrainWorld` lives.
     pub dest: LightmapLocation,
@@ -229,7 +228,7 @@ pub struct BakeReadbackTag {
     pub chunk_x: i32,
     pub chunk_y: i32,
     pub grid: ChunkBakeGrid,
-    pub material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    pub material_handle: AssetId<TerrainMaterial>,
     pub dest: LightmapLocation,
 }
 
@@ -244,7 +243,7 @@ struct GpuBakeQueueEntry {
     bvh: Arc<TriangleBvh>,
     /// Placed point/spot lights, uploaded verbatim.
     lights: Vec<BakedLight>,
-    material_handle: AssetId<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+    material_handle: AssetId<TerrainMaterial>,
     dest: LightmapLocation,
 }
 
@@ -417,7 +416,7 @@ pub fn enqueue_terrain_bake_jobs(
     chunk_registry: &TerrainChunkRegistry,
     chunk_query: &Query<(
         &crate::game::world::terrain::TerrainChunk,
-        &MeshMaterial3d<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+        &MeshMaterial3d<TerrainMaterial>,
     )>,
     processed: &mut GpuBakeProcessed,
     queue: &mut GpuBakeQueue,
@@ -799,7 +798,7 @@ fn handle_bake_complete(
     tags: Query<&BakeReadbackTag>,
     mut processed: ResMut<GpuBakeProcessed>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
     mut commands: Commands,
     mut queue: ResMut<GpuBakeQueue>,
     config: Res<BakeConfig>,
@@ -851,7 +850,7 @@ fn handle_bake_complete(
     let new_handle = images.add(lightmap.into_image());
 
     if let Some(mut mat) = materials.get_mut(tag.material_handle) {
-        mat.extension.lightmap = new_handle;
+        mat.lightmap = new_handle;
     }
 
     info!(

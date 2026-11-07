@@ -32,7 +32,6 @@ pub mod uv_unwrap;
 use avian3d::prelude::RigidBody;
 use bevy::{
     ecs::system::SystemParam,
-    pbr::ExtendedMaterial,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -318,7 +317,6 @@ impl BakeRegion {
 #[derive(Message)]
 pub struct BakeMessage;
 
-type ToonMat = ExtendedMaterial<StandardMaterial, ToonMaterial>;
 type OccluderMeshItem = (Entity, &'static Mesh3d, &'static GlobalTransform);
 
 /// The world queries every bake path walks: terrain chunks, placed objects,
@@ -330,7 +328,7 @@ pub struct BakeSceneQueries<'w, 's> {
         's,
         (
             &'static TerrainChunk,
-            &'static MeshMaterial3d<ExtendedMaterial<StandardMaterial, TerrainMaterial>>,
+            &'static MeshMaterial3d<TerrainMaterial>,
         ),
     >,
     pub placed: Query<'w, 's, (Entity, &'static PlacedObject, &'static GlobalTransform)>,
@@ -338,7 +336,7 @@ pub struct BakeSceneQueries<'w, 's> {
     pub children: Query<'w, 's, &'static Children>,
     /// Shadow-caster candidates: every toon-shaded mesh in the world.
     /// `collect_occluder_triangles` keeps only the static ones.
-    pub occluder_meshes: Query<'w, 's, OccluderMeshItem, With<MeshMaterial3d<ToonMat>>>,
+    pub occluder_meshes: Query<'w, 's, OccluderMeshItem, With<MeshMaterial3d<ToonMaterial>>>,
     pub parents: Query<'w, 's, &'static ChildOf>,
     /// What marks a subtree as static scenery for shadow casting — and what
     /// un-marks it (`DynamicLit`: a placed entity a script moves).
@@ -460,8 +458,8 @@ fn run_bake(
     terrain_world: Option<Res<TerrainWorld>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
-    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
+    mut toon_materials: ResMut<Assets<ToonMaterial>>,
     mut uv_cache: ResMut<LightmapUvCache>,
     mut tasks: BakeTasks,
     scene: BakeSceneQueries,
@@ -655,7 +653,7 @@ fn run_bake(
 fn apply_object_bake(
     mut object_bake: ResMut<ObjectBakeTask>,
     mut images: ResMut<Assets<Image>>,
-    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
+    mut toon_materials: ResMut<Assets<ToonMaterial>>,
 ) {
     let Some(task) = object_bake.0.as_mut() else {
         return;
@@ -670,7 +668,7 @@ fn apply_object_bake(
         // A material can be gone if the object was deleted mid-bake. The EXR
         // is already on disk, so the next load picks it up regardless.
         if let Some(mut mat) = toon_materials.get_mut(result.material.id()) {
-            mat.extension.lightmap = images.add(result.image);
+            mat.lightmap = images.add(result.image);
         }
     }
     info!("Object bake complete: {count} sub-mesh lightmap(s) applied");
@@ -717,7 +715,7 @@ fn dispatch_gpu_terrain_bake(
     heightmap: Option<Res<HeightmapData>>,
     terrain_world: Option<Res<TerrainWorld>>,
     chunk_registry: Option<Res<TerrainChunkRegistry>>,
-    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     scene: BakeSceneQueries,
     mut gpu_processed: ResMut<gpu::GpuBakeProcessed>,

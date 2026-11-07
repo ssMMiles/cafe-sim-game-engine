@@ -8,7 +8,7 @@ pub mod save;
 pub mod storage;
 pub mod types;
 
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 pub use types::{HeightmapData, TerrainChunk};
 
 pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
@@ -29,9 +29,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<
-            ExtendedMaterial<StandardMaterial, TerrainMaterial>,
-        >::default());
+        app.add_plugins(MaterialPlugin::<TerrainMaterial>::default());
 
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();

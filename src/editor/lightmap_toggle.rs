@@ -6,7 +6,7 @@
 //! and probes, so "off" simply means unlit. Toon materials keep their
 //! *source* (lightmap or probe volume) and only flip the `unlit` flag.
 
-use bevy::{pbr::ExtendedMaterial, prelude::*};
+use bevy::prelude::*;
 
 use crate::game::gfx::toon_material::ToonMaterial;
 use crate::game::world::terrain::material::TerrainMaterial;
@@ -21,8 +21,8 @@ pub fn toggle_lightmap_mode(input: Res<ButtonInput<KeyCode>>, mut settings: ResM
 
 pub fn sync_lightmap_mode(
     settings: Res<UserSettings>,
-    mut toon_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, ToonMaterial>>>,
-    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainMaterial>>>,
+    mut toon_materials: ResMut<Assets<ToonMaterial>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
 ) {
     if !settings.is_changed() {
         return;
@@ -31,10 +31,10 @@ pub fn sync_lightmap_mode(
     let use_lm = if settings.use_lightmap { 1u32 } else { 0u32 };
 
     for (_id, mat) in toon_materials.iter_mut() {
-        mat.extension.shading.unlit = 1 - use_lm;
+        mat.shading.unlit = 1 - use_lm;
     }
 
     for (_id, mat) in terrain_materials.iter_mut() {
-        mat.extension.shading.use_lightmap = use_lm;
+        mat.shading.use_lightmap = use_lm;
     }
 }

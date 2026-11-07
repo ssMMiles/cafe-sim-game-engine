@@ -8,7 +8,7 @@
 //! timer elapses the counter cube despawns and the customer walks out (+Z).
 
 use bevy::prelude::*;
-use engine_api::{PlayerCamera, ToonMat};
+use engine_api::{PlayerCamera, ToonMaterial};
 
 use crate::balance::{Balance, spawn_balance_popup};
 use crate::coffee_menu::Brewing;
@@ -34,7 +34,7 @@ const SERVED_HOLD_SECS_WRONG: f32 = 1.0;
 #[derive(Resource)]
 pub struct DeliveryAssets {
     pub mesh: Handle<Mesh>,
-    pub material: Handle<ToonMat>,
+    pub material: Handle<ToonMaterial>,
 }
 
 #[derive(Resource, Default)]
