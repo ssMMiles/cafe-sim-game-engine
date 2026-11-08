@@ -1737,3 +1737,22 @@ bevy's depth copy (same function, after its pass), so `scene_pass` now does the
 without scene draws keep their phases so bevy's opaque pass still clears them — that is what paints
 a thumbnail rig's background while the subject loads (black-until-drawn would fool the readback's
 non-background test and cache empty thumbnails).
+
+## First Metal System Trace of gameplay (`gpu.trace`) — 8 November 2026
+
+**`tools/gpu-trace.py` now automates all of this** (exports, cmdbuffer-label join, present-window
+detection, per-pass ms/frame table). Read with `xcrun xctrace export --xpath …table[@schema="…"]`; the useful tables are `metal-gpu-intervals`
+(per-channel GPU time), `metal-application-command-buffer-submissions` (wgpu makes one command buffer per
+bevy pass, so its label names the pass — join on `cmdbuffer-id`), `gpu-performance-state-intervals` and
+`ca-client-present-request`. `metal-object-label` ids are **recycled**: a last-label-wins join mislabels.
+
+**Only 1.0–2.3 s of the 16 s trace is real presenting**: after that there are no `Present` command
+buffers and no 2D/egui passes, and the 3D passes run at an exact 60 Hz with the GPU at Minimum/Medium
+clock — the window was presumably covered (Instruments in front). Check for presents before reading a trace.
+
+Presenting window (165 frames, mean 7.5 ms, GPU at Maximum clock): engine GPU busy 76 %, WindowServer
+30 %, union 82 % — **GPU-bound, and the compositor is ~a quarter of the GPU**. Per frame: scene_pass
+vertex 2.4 ms (+0.64 frag) — `LOD_DISTANCES_SQ[0]` is 500 m but the load ring reaches ~360 m, so every
+terrain chunk is always LOD0 (~130k tris each); atmosphere 1.04; edges 0.79; the presentation Camera2d at
+window res 3456×2234 ≈ 1.07 (sprite 0.61 + its own `Fxaa` 0.34 + upscaling 0.12); 3D fxaa 0.18; depth
+copy blit 0.23; tonemapping 0.12; egui 0.02. WindowServer ≈ 2.3 ms/frame (not direct-to-display).

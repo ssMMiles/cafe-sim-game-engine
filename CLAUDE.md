@@ -71,7 +71,9 @@ docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save syste
                         #   and a ranked, unmeasured list of trims/profile/flag changes to try)
 tools/                  # Dev tools: serve.py (no-cache static server for the web build), tint-check.mjs (WGSL through
                         #   Chrome's Tint), bundle-check.mjs (what a world zip imports as), web-trace.mjs (headless
-                        #   Chrome performance trace of a `web-profile` build — docs/WEB_PROFILING.md)
+                        #   Chrome performance trace of a `web-profile` build — docs/WEB_PROFILING.md),
+                        #   gpu-trace.py (per-pass GPU ms/frame table from an Instruments Metal System Trace;
+                        #   record with the game window in front — a covered window stops presenting)
 index.html              # Web start page: engine download/compile, OPFS world list, bundle import (drop / Import… /
                         #   ?world=<url>), Enter button (?play skips it). Pure zip/layout/manifest logic sits between
                         #   @bundle-logic markers; tools/bundle-check.mjs evaluates that slice on a zip
