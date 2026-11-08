@@ -1601,3 +1601,18 @@ doing the uniform on top of our own pipeline was simpler than threading a shared
 bevy's `MaterialPlugin`, and it kept each commit to one kind of change. `ExtractResourcePlugin` is
 `bevy::render::extract_resource::ExtractResourcePlugin` (bevy_extract underneath; the trait is generic
 over the `AppLabel`, so `impl ExtractResource<RenderApp> for T`).
+
+## Timing collector rewritten hash-free; F9 snapshots — 7 November 2026
+
+`collect_system_timings` was 1.2 ms/frame, the second row in its own table: a mutexed
+`HashMap<String, _>` entry + `String` clone per span *exit* (~1000/frame), then a sort of 1000
+`String`s with hash lookups in the comparator. Now `on_new_span` (once per system, bevy caches the
+span) interns an `Arc<Slot>` into the span's extensions and a registry `Vec`; each exit is two
+atomic adds; `absorb` works on parallel `Vec`s by slot index. Panel API unchanged. **F9** saves a
+snapshot from any mode (heading says `(gameplay)`/`(editor)`), because the editor's `editor_ui`
+(~1.8 ms) dominated every table and measurements should be gameplay-only.
+
+Gotcha that bit us: `perf-snapshot-*.md` is written into whichever checkout is running, and a
+parallel worktree (`hfi/af456d63…`) implements the same scene pass with different module names
+(`scene_pass::toon`, `extract_probe_images`) — the row names are the only way to tell which build a
+snapshot is from. Two of the user's "HEAD" snapshots were from that other build.

@@ -159,7 +159,7 @@ src/
     │   ├── frame_pacing.rs   # `DisplaySettings` (vsync, frame cap), FrameStart/FrameEnd schedules, per-thread
     │   │                #   breakdown incl. swapchain-acquire wait. docs/PERFORMANCE.md
     │   ├── profiling.rs      # GpuTimingSupport (Metal: no in-pass timestamps), A/B EffectBench + EffectOverride
-    │   ├── system_timing.rs  # Per-system CPU self time (tracing layer → Performance panel), snapshot export
+    │   ├── system_timing.rs  # Per-system CPU self time (tracing layer, hash-free per-span slots → Performance panel), F9 snapshot
     │   ├── scene_pass/       # Our own geometry passes for ToonMaterial + TerrainMaterial (docs/SCENE_PASS_PLAN.md).
     │   │                #   mod.rs: plugin, SceneInstance buffer, bind group 0 (bevy's View uniform +
     │   │                #   instances + bevy's joint matrices). material.rs: generic SceneMaterialPlugin<M>:
@@ -312,6 +312,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | Shift+L | Toggle baked lighting / flat unlit debug view |
 | Shift+P | Toggle collision-shape gizmos (also View menu) |
 | F8 | Toggle placed-light gizmos (also View menu) |
+| F9 | Save a Systems-table perf snapshot to `perf-snapshot-<secs>.md` (works in gameplay; `docs/SCENE_PASS_BASELINE.md`) |
 
 ## Terrain Streaming Pipeline
 

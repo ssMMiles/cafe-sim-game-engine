@@ -10,13 +10,22 @@
 //! - [`timing_layer`] is given to `LogPlugin::custom_layer` (src/lib.rs). It
 //!   clocks every `"system"` span on enter/exit — whichever thread it runs
 //!   on, so render-app systems are included — and adds its *self time* to a
-//!   shared map keyed by system name ([`SpanAccumulator`]). Systems that run
-//!   schedules are flagged rather than counted (`ThreadFrame`).
-//! - [`collect_system_timings`] (in bevy's `Last`) takes that map once per
+//!   per-system [`Slot`]. Systems that run schedules are flagged rather than
+//!   counted (`ThreadFrame`).
+//! - [`collect_system_timings`] (in bevy's `Last`) drains every slot once per
 //!   main-world frame and folds it into [`SystemTimings`], an exponential
 //!   moving average per system, which is what the panel reads. The EMA is
 //!   the smoothing: render-thread spans land whenever that thread finishes,
 //!   so a single frame's slice is jittery by construction.
+//! - **F9** saves a snapshot of the table from *any* mode, so a gameplay
+//!   measurement doesn't carry the editor's own egui pass in it.
+//!
+//! The hot path is deliberately hash-free. Bevy creates one span per system
+//! and re-enters it every run, so the system's slot is interned **once**, in
+//! `on_new_span`, and stashed in the span's extensions as an `Arc<Slot>`;
+//! each exit is then two atomic adds. An earlier version keyed a mutexed
+//! `HashMap<String, _>` per exit and cloned ~1000 names per frame, which made
+//! the collector the second most expensive row in its own table (1.2 ms).
 //!
 //! The layer is registered in every build. Without system spans its hooks
 //! only ever see bevy's few log spans and return on the name check, so the
@@ -24,8 +33,10 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -43,33 +54,72 @@ use tracing::{
     span::Attributes,
 };
 
-/// Raw durations since the last collection, filled by the tracing layer from
-/// any thread, drained once per frame by [`collect_system_timings`].
-#[derive(Resource, Clone, Default)]
-pub struct SpanAccumulator(Arc<Mutex<HashMap<String, FrameAccum>>>);
+use super::frame_pacing::{FrameBreakdown, FrameSample};
+use crate::editor::EditorMode;
+
+/// One system's running totals since the last collection, written from any
+/// thread without a lock.
+pub struct Slot {
+    name: String,
+    /// Self time in nanoseconds: the span's duration minus the system spans
+    /// nested in it.
+    total_ns: AtomicU64,
+    runs: AtomicU32,
+    /// Another system ran inside this one (see [`ThreadFrame`]).
+    nests: AtomicBool,
+}
+
+impl Slot {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            total_ns: AtomicU64::new(0),
+            runs: AtomicU32::new(0),
+            nests: AtomicBool::new(false),
+        }
+    }
+
+    fn record(&self, elapsed: Duration, nests: bool) {
+        self.total_ns
+            .fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+        self.runs.fetch_add(1, Ordering::Relaxed);
+        if nests {
+            self.nests.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// This frame's totals, reset to zero.
+    fn take(&self) -> FrameAccum {
+        FrameAccum {
+            total: Duration::from_nanos(self.total_ns.swap(0, Ordering::Relaxed)),
+            runs: self.runs.swap(0, Ordering::Relaxed),
+            nests: self.nests.load(Ordering::Relaxed),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct FrameAccum {
-    /// Self time: the span's duration minus the system spans nested in it.
     total: Duration,
     runs: u32,
-    /// Another system ran inside this one (see [`ThreadFrame`]).
     nests: bool,
 }
 
-/// `LogPlugin::custom_layer` hook: creates the shared accumulator, hands it
-/// to the app as a resource, and returns the layer that writes into it.
+/// Every system the layer has seen, in first-seen order. Appended to only
+/// from `on_new_span` (once per system for the process lifetime), read once
+/// per frame by [`collect_system_timings`]; the hot path never touches it.
+#[derive(Resource, Clone, Default)]
+pub struct SpanRegistry(Arc<Mutex<Vec<Arc<Slot>>>>);
+
+/// `LogPlugin::custom_layer` hook: creates the shared registry, hands it to
+/// the app as a resource, and returns the layer that fills it.
 pub fn timing_layer(app: &mut App) -> Option<BoxedLayer> {
-    let shared = SpanAccumulator::default();
+    let shared = SpanRegistry::default();
     app.insert_resource(shared.clone());
     Some(Box::new(TimingLayer(shared.0)))
 }
 
-struct TimingLayer(Arc<Mutex<HashMap<String, FrameAccum>>>);
-
-/// The system path, stored in the span's extensions when bevy creates it
-/// (one cached span per system, re-entered every run).
-struct SystemName(String);
+struct TimingLayer(Arc<Mutex<Vec<Arc<Slot>>>>);
 
 /// One open system span on this thread.
 ///
@@ -116,8 +166,10 @@ where
         let mut visitor = NameVisitor(None);
         attrs.record(&mut visitor);
         let Some(name) = visitor.0 else { return };
+        let slot = Arc::new(Slot::new(name));
+        self.0.lock().unwrap().push(slot.clone());
         if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(SystemName(name));
+            span.extensions_mut().insert(slot);
         }
     }
 
@@ -157,15 +209,9 @@ where
         }) else {
             return;
         };
-        let extensions = span.extensions();
-        let Some(SystemName(name)) = extensions.get::<SystemName>() else {
-            return;
-        };
-        let mut map = self.0.lock().unwrap();
-        let accum = map.entry(name.clone()).or_default();
-        accum.total += elapsed.saturating_sub(frame.nested);
-        accum.runs += 1;
-        accum.nests |= frame.nests;
+        if let Some(slot) = span.extensions().get::<Arc<Slot>>() {
+            slot.record(elapsed.saturating_sub(frame.nested), frame.nests);
+        }
     }
 }
 
@@ -177,16 +223,22 @@ where
 /// steady enough to read as a table, quick enough to see a toggle's effect.
 const EMA_ALPHA: f32 = 0.05;
 
-/// Forget a system once its average falls this far below a microsecond; keeps
-/// one-shot startup systems from pinning rows forever.
+/// Hide a system once its average falls this far below a microsecond; keeps
+/// one-shot startup systems from pinning rows forever. (The slot stays — a
+/// system that runs again just reappears.)
 const FORGET_BELOW_MS: f32 = 1e-4;
 
 /// Smoothed per-system cost, in display order (most expensive first).
+///
+/// `stats[i]` belongs to the registry's `i`-th slot; slots are only ever
+/// appended, so the index is stable and nothing here hashes a name.
 #[derive(Resource, Default)]
 pub struct SystemTimings {
-    stats: HashMap<String, SystemStat>,
-    /// Rebuilt after each absorb: names sorted by `ms` descending.
-    order: Vec<String>,
+    names: Vec<Arc<Slot>>,
+    stats: Vec<SystemStat>,
+    /// Rebuilt after each absorb: indices of rows above the forget threshold,
+    /// sorted by `ms` descending.
+    order: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -210,35 +262,44 @@ impl SystemTimings {
     pub fn rows(&self) -> impl Iterator<Item = (&str, SystemStat)> {
         self.order
             .iter()
-            .map(|name| (name.as_str(), self.stats[name]))
+            .map(|&i| (self.names[i].name.as_str(), self.stats[i]))
     }
 
     /// Sum of every tracked system's self time, both threads together.
     /// Schedule runners are left out: their self time is waiting, not work.
     pub fn total_ms(&self) -> f32 {
-        self.stats.values().filter(|s| !s.nests).map(|s| s.ms).sum()
+        self.order
+            .iter()
+            .map(|&i| self.stats[i])
+            .filter(|s| !s.nests)
+            .map(|s| s.ms)
+            .sum()
     }
 
-    fn absorb(&mut self, frame: HashMap<String, FrameAccum>) {
+    /// Fold one frame in. `frame[i]` is slot `i`'s accumulation; slots past
+    /// the end are ones the registry has grown since last time.
+    fn absorb(&mut self, slots: &[Arc<Slot>], frame: impl Iterator<Item = FrameAccum>) {
+        if self.names.len() < slots.len() {
+            self.names.extend(slots[self.names.len()..].iter().cloned());
+            self.stats.resize(slots.len(), SystemStat::default());
+        }
         // Decay everything, then add this frame's share: a system that didn't
         // run contributes 0 to its average, same as a 0-ms run would.
-        self.stats.retain(|name, stat| {
-            stat.ms *= 1.0 - EMA_ALPHA;
-            stat.runs *= 1.0 - EMA_ALPHA;
-            stat.ms >= FORGET_BELOW_MS || frame.contains_key(name)
-        });
-        for (name, accum) in frame {
-            let stat = self.stats.entry(name).or_default();
-            stat.ms += accum.total.as_secs_f32() * 1000.0 * EMA_ALPHA;
-            stat.runs += accum.runs as f32 * EMA_ALPHA;
+        for (stat, accum) in self.stats.iter_mut().zip(frame) {
+            stat.ms = stat.ms * (1.0 - EMA_ALPHA) + accum.total.as_secs_f32() * 1000.0 * EMA_ALPHA;
+            stat.runs = stat.runs * (1.0 - EMA_ALPHA) + accum.runs as f32 * EMA_ALPHA;
             stat.nests |= accum.nests;
         }
-        self.order = self.stats.keys().cloned().collect();
-        self.order.sort_by(|a, b| {
-            self.stats[b]
+        self.order.clear();
+        self.order
+            .extend((0..self.stats.len()).filter(|&i| self.stats[i].ms >= FORGET_BELOW_MS));
+        let stats = &self.stats;
+        let names = &self.names;
+        self.order.sort_by(|&a, &b| {
+            stats[b]
                 .ms
-                .total_cmp(&self.stats[a].ms)
-                .then_with(|| a.cmp(b))
+                .total_cmp(&stats[a].ms)
+                .then_with(|| names[a].name.cmp(&names[b].name))
         });
     }
 }
@@ -251,7 +312,7 @@ impl SystemTimings {
 /// entire point of the exercise.
 pub fn snapshot_markdown(
     timings: &SystemTimings,
-    frame: Option<super::frame_pacing::FrameSample>,
+    frame: Option<FrameSample>,
     note: &str,
 ) -> String {
     use std::fmt::Write as _;
@@ -295,6 +356,53 @@ pub fn snapshot_markdown(
     out
 }
 
+/// Write a snapshot to `perf-snapshot-<unix-seconds>.md` in the working
+/// directory (gitignored) and return the text, so a caller can also put it on
+/// the clipboard. `context` names what was being measured ("gameplay",
+/// "editor") and goes in the heading; the file is which build it came from
+/// only by its row names, so say so in the doc you paste it into.
+pub fn save_snapshot(timings: &SystemTimings, breakdown: &FrameBreakdown, context: &str) -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let note = format!("perf snapshot {secs} ({context})");
+    let text = snapshot_markdown(timings, breakdown.median(), &note);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = std::path::PathBuf::from(format!("perf-snapshot-{secs}.md"));
+        match std::fs::write(&path, &text) {
+            Ok(()) => info!("perf snapshot ({context}) written to {}", path.display()),
+            Err(e) => warn!("could not write {}: {e}", path.display()),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    info!("perf snapshot ({context}):\n{text}");
+
+    text
+}
+
+/// F9: save a snapshot from wherever you are. The panel's button only exists
+/// in the editor, and the editor's own egui pass is the most expensive row in
+/// the table — so a *gameplay* measurement, which is what the renderer work
+/// is judged against, needs a key.
+fn snapshot_on_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    timings: Res<SystemTimings>,
+    breakdown: Res<FrameBreakdown>,
+    mode: Option<Res<State<EditorMode>>>,
+) {
+    if !keys.just_pressed(KeyCode::F9) {
+        return;
+    }
+    let context = match mode.as_deref().map(|m| m.get()) {
+        Some(EditorMode::Gameplay) => "gameplay",
+        Some(EditorMode::Editor) => "editor",
+        None => "menu",
+    };
+    save_snapshot(&timings, &breakdown, context);
+}
+
 /// The last two path segments: enough to tell `selection::validate_selection`
 /// from another crate's `validate_selection` without eating the panel's width.
 /// The full path belongs in the row's hover text.
@@ -309,24 +417,25 @@ pub fn short_name(full: &str) -> &str {
     &full[cut + 2..]
 }
 
-fn collect_system_timings(acc: Res<SpanAccumulator>, mut timings: ResMut<SystemTimings>) {
-    let frame = std::mem::take(&mut *acc.0.lock().unwrap());
-    if frame.is_empty() && timings.is_empty() {
+fn collect_system_timings(registry: Res<SpanRegistry>, mut timings: ResMut<SystemTimings>) {
+    let slots = registry.0.lock().unwrap();
+    if slots.is_empty() {
         return; // The common case outside profiling builds: stay unchanged.
     }
-    timings.absorb(frame);
+    timings.absorb(&slots, slots.iter().map(|s| s.take()));
 }
 
 pub struct SystemTimingPlugin;
 
 impl Plugin for SystemTimingPlugin {
     fn build(&self, app: &mut App) {
-        // The accumulator normally exists already (inserted by `timing_layer`
+        // The registry normally exists already (inserted by `timing_layer`
         // when LogPlugin built); this is only a fallback so `collect` can
         // take a plain `Res` even if the log plugin is ever disabled.
-        app.init_resource::<SpanAccumulator>()
+        app.init_resource::<SpanRegistry>()
             .init_resource::<SystemTimings>()
-            .add_systems(Last, collect_system_timings);
+            .add_systems(Last, collect_system_timings)
+            .add_systems(Update, snapshot_on_key);
     }
 }
 
@@ -334,27 +443,27 @@ impl Plugin for SystemTimingPlugin {
 mod tests {
     use super::*;
 
-    fn frame(entries: &[(&str, u64, u32)]) -> HashMap<String, FrameAccum> {
-        entries
+    fn slots(names: &[&str]) -> Vec<Arc<Slot>> {
+        names
             .iter()
-            .map(|(name, us, runs)| {
-                (
-                    name.to_string(),
-                    FrameAccum {
-                        total: Duration::from_micros(*us),
-                        runs: *runs,
-                        nests: false,
-                    },
-                )
-            })
+            .map(|n| Arc::new(Slot::new(n.to_string())))
             .collect()
+    }
+
+    fn frame(entries: &[(u64, u32)]) -> impl Iterator<Item = FrameAccum> + '_ {
+        entries.iter().map(|(us, runs)| FrameAccum {
+            total: Duration::from_micros(*us),
+            runs: *runs,
+            nests: false,
+        })
     }
 
     #[test]
     fn rows_are_ordered_by_cost_and_converge_to_the_steady_state() {
+        let slots = slots(&["a::cheap", "b::dear"]);
         let mut t = SystemTimings::default();
         for _ in 0..400 {
-            t.absorb(frame(&[("a::cheap", 100, 1), ("b::dear", 2000, 1)]));
+            t.absorb(&slots, frame(&[(100, 1), (2000, 1)]));
         }
         let rows: Vec<_> = t.rows().map(|(n, s)| (n.to_owned(), s)).collect();
         assert_eq!(rows[0].0, "b::dear");
@@ -366,49 +475,84 @@ mod tests {
     }
 
     #[test]
-    fn a_system_that_stops_running_fades_out_and_is_forgotten() {
+    fn a_system_that_stops_running_fades_out_and_is_hidden() {
+        let slots = slots(&["startup::once"]);
         let mut t = SystemTimings::default();
-        t.absorb(frame(&[("startup::once", 5000, 1)]));
+        t.absorb(&slots, frame(&[(5000, 1)]));
         assert!(!t.is_empty());
         for _ in 0..400 {
-            t.absorb(HashMap::new());
+            t.absorb(&slots, frame(&[(0, 0)]));
         }
-        assert!(t.is_empty(), "still tracking {:?}", t.order);
+        assert!(t.is_empty(), "still showing {:?}", t.order);
+    }
+
+    /// Slots the registry gains mid-run get rows without disturbing the old
+    /// ones' indices.
+    #[test]
+    fn late_slots_are_appended() {
+        let mut all = slots(&["a::first"]);
+        let mut t = SystemTimings::default();
+        t.absorb(&all, frame(&[(1000, 1)]));
+        all.push(Arc::new(Slot::new("b::second".into())));
+        t.absorb(&all, frame(&[(1000, 1), (3000, 1)]));
+        // Sorted by cost: the newcomer is the dearer one.
+        let names: Vec<_> = t.rows().map(|(n, _)| n.to_owned()).collect();
+        assert_eq!(names, ["b::second", "a::first"]);
+        let first = t.rows().find(|(n, _)| *n == "a::first").unwrap().1;
+        assert!((first.ms - 0.0975).abs() < 1e-3, "{}", first.ms);
     }
 
     /// A schedule runner's span contains its children's: self time must take
-    /// them off and flag the runner, and a leaf must keep its own time.
+    /// them off and flag the runner, and a leaf must keep its own time. Also
+    /// the whole point of the rewrite: the hot path does no hashing — the
+    /// registry sees exactly one entry per distinct span.
     #[test]
     fn nested_system_spans_are_charged_to_the_child_only() {
         use bevy::log::tracing_subscriber::{Registry, layer::SubscriberExt};
-        let acc = SpanAccumulator::default();
-        let subscriber = Registry::default().with(TimingLayer(acc.0.clone()));
+        let registry = SpanRegistry::default();
+        let subscriber = Registry::default().with(TimingLayer(registry.0.clone()));
         tracing::subscriber::with_default(subscriber, || {
             let runner = tracing::info_span!("system", name = "app::run_schedule");
             let child = tracing::info_span!("system", name = "game::busy");
-            let _r = runner.enter();
-            let _c = child.enter();
-            std::thread::sleep(Duration::from_millis(20));
+            for _ in 0..3 {
+                let _r = runner.enter();
+                let _c = child.enter();
+                std::thread::sleep(Duration::from_millis(5));
+            }
         });
-        let map = acc.0.lock().unwrap();
-        let runner = map["app::run_schedule"];
-        let child = map["game::busy"];
+        let slots = registry.0.lock().unwrap();
+        assert_eq!(slots.len(), 2, "one slot per span, not per run");
+        let runner = slots[0].take();
+        let child = slots[1].take();
         assert!(runner.nests && !child.nests);
-        assert!(child.total >= Duration::from_millis(20));
+        assert!(child.total >= Duration::from_millis(15));
         assert!(
             runner.total < Duration::from_millis(5),
             "runner charged {:?} of its child's time",
             runner.total
         );
-        assert_eq!((runner.runs, child.runs), (1, 1));
+        assert_eq!((runner.runs, child.runs), (3, 3));
+        // `take` resets.
+        assert_eq!(slots[1].take().runs, 0);
     }
 
     #[test]
     fn schedule_runners_stay_out_of_the_total() {
+        let slots = slots(&["a::work", "b::runner"]);
         let mut t = SystemTimings::default();
-        let mut f = frame(&[("a::work", 1000, 1), ("b::runner", 9000, 1)]);
-        f.get_mut("b::runner").unwrap().nests = true;
-        t.absorb(f);
+        let f = [
+            FrameAccum {
+                total: Duration::from_micros(1000),
+                runs: 1,
+                nests: false,
+            },
+            FrameAccum {
+                total: Duration::from_micros(9000),
+                runs: 1,
+                nests: true,
+            },
+        ];
+        t.absorb(&slots, f.into_iter());
         assert!((t.total_ms() - 1.0 * EMA_ALPHA).abs() < 1e-4);
     }
 

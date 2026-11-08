@@ -25,7 +25,7 @@ use crate::game::gfx::frame_pacing::{
 };
 use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::gfx::profiling::{BenchEffect, EffectBench, GpuTimingSupport};
-use crate::game::gfx::system_timing::{SystemTimings, short_name, snapshot_markdown};
+use crate::game::gfx::system_timing::{SystemTimings, save_snapshot, short_name};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
 use crate::game::world::terrain::storage::EnvironmentData;
 
@@ -1515,40 +1515,22 @@ fn system_times(ui: &mut egui::Ui, timings: &SystemTimings, breakdown: &FrameBre
         });
 }
 
-/// Take the whole table away as text: onto the clipboard always, and into a
-/// timestamped file next to `editor_settings.json` on native.
-///
-/// A before/after measurement across a renderer change (`docs/SCENE_PASS_PLAN.md`)
-/// is dozens of rows read twice; transcribing them from a screenshot is how
-/// you end up comparing two different scenes.
+/// Take the whole table away as text: onto the clipboard, and into a
+/// timestamped file next to `editor_settings.json` (`system_timing::save_snapshot`).
+/// Same as F9, which also works in gameplay — where a measurement doesn't
+/// carry this panel's own egui pass.
 fn snapshot_button(ui: &mut egui::Ui, timings: &SystemTimings, breakdown: &FrameBreakdown) {
-    if !ui
+    if ui
         .button("Save snapshot")
         .on_hover_text(
             "Copy this table and the frame breakdown to the clipboard, and write them \
-             to perf-snapshot-<time>.md in the working directory.",
+             to perf-snapshot-<time>.md in the working directory. F9 does the same from \
+             gameplay, without the editor's cost in the table.",
         )
         .clicked()
     {
-        return;
-    }
-
-    let note = format!(
-        "perf snapshot {}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    );
-    let text = snapshot_markdown(timings, breakdown.median(), &note);
-    ui.ctx().copy_text(text.clone());
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let path = std::path::PathBuf::from(format!("{}.md", note.replace(' ', "-")));
-        match std::fs::write(&path, &text) {
-            Ok(()) => info!("perf snapshot written to {}", path.display()),
-            Err(e) => warn!("could not write {}: {e}", path.display()),
-        }
+        let text = save_snapshot(timings, breakdown, "editor");
+        ui.ctx().copy_text(text);
     }
 }
 

@@ -16,19 +16,29 @@ a table (`gfx/system_timing.rs`).
 cargo run-profiling
 ```
 
-Then, **in the editor** (F1 if it starts in gameplay), with nothing selected:
-Inspector → **Performance**.
+Measure **in gameplay**, not the editor. The editor's own egui pass
+(`editor_ui`, ~1.8 ms) was the biggest row in every early table and has
+nothing to do with the renderer; editor optimisation is a separate job.
 
-1. **Turn vsync off** (Performance → Display) and leave the frame cap off.
-   With vsync on, anything cheaper than a refresh reads as idle and the whole
-   table becomes meaningless — `docs/PERFORMANCE.md` has the long version.
-2. Put the camera somewhere reproducible and **stand still for ~10 seconds**.
-   The table is an exponential moving average over ~60 frames; the frame
-   breakdown is a median over the last few hundred. Both need to settle.
-3. Open **Systems (CPU)** and press **Save snapshot**. That writes
-   `perf-snapshot-<unix-seconds>.md` into the working directory (and copies
-   the same text to the clipboard). Paste the relevant part into a section
-   below with the scene, the date and what build it was.
+1. **Turn vsync off** (editor → Inspector, nothing selected → Performance →
+   Display) and leave the frame cap off. The setting persists. With vsync on,
+   anything cheaper than a refresh reads as idle and the whole table becomes
+   meaningless — `docs/PERFORMANCE.md` has the long version.
+2. **F1 into gameplay.** Put the player somewhere reproducible and **stand
+   still for ~10 seconds**. The table is an exponential moving average over
+   ~60 frames; the frame breakdown is a median over the last few hundred.
+   Both need to settle.
+3. **Press F9.** That writes `perf-snapshot-<unix-seconds>.md` into the
+   working directory, with `(gameplay)` in its heading. (The editor panel's
+   **Save snapshot** button does the same with `(editor)`, and also copies to
+   the clipboard.) Paste the relevant part into a section below with the
+   scene, the date and what build it was.
+
+**Which build a snapshot came from is only in its row names.** More than one
+checkout writes `perf-snapshot-*.md` into its own working directory with the
+same naming, and a parallel branch of this same work exists — check that the
+`scene_pass::…` rows match the code you think you measured (this branch:
+`scene_pass::material::queue_draws<…>`, `scene_pass::pass::scene_prepass`).
 
 Two scenes, because they stress different halves:
 
@@ -76,7 +86,11 @@ replacement:
 - `render_asset::prepare_assets::<PreparedTerrainMaterial>`
 
 The honest summary for each phase is one line: **`total_ms` before →
-`total_ms` after**, plus the appeared/vanished lists. Frame time is *not* the
+`total_ms` after**, plus the appeared/vanished lists. Tables taken before
+2026-11-07 evening carry two rows that are not renderer cost and should be
+subtracted when comparing against newer ones: `editor_ui` (~1.8 ms, editor
+only) and `collect_system_timings` (~1.2 ms, the profiler itself — rewritten
+hash-free the same day, expect it well under 0.1 ms). Frame time is *not* the
 headline — with vsync off on macOS the compositor still paces the drawable, so
 read work time, not frame time.
 
