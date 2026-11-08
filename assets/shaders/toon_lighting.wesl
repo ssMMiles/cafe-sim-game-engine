@@ -16,7 +16,7 @@
 // scene pass (`src/game/gfx/scene_pass`, docs/SCENE_PASS_PLAN.md): the
 // varyings and the per-instance winding flag come from our modules, and
 // nothing here reads bevy_pbr at all.
-import package::shaders::scene::toon_io::{VertexOutput, FragmentOutput};
+import package::shaders::scene::mesh_io::{VertexOutput, FragmentOutput};
 import package::shaders::scene::bindings::{scene, scene_instance_winds_forward};
 
 // Mirrors `ToonSurfaceUniform` in engine-api's toon_material.rs.

@@ -5,13 +5,13 @@ pub mod chunk_assets;
 pub mod objects;
 pub mod prefabs;
 pub mod probe_volume;
-mod sky;
+pub mod sky;
 pub mod streaming;
 pub mod terrain;
 
 use crate::game::{
     GameEntity,
-    world::sky::{SkyDomeMaterial, sync_sky_colors, sync_sky_dome},
+    world::sky::{sync_sky_colors, sync_sky_dome},
 };
 
 use chunk_assets::{
@@ -41,7 +41,9 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default());
+        // No `MaterialPlugin::<SkyDomeMaterial>`: the dome draws through our
+        // own scene pass, whose `SceneMaterialPlugin` registers the asset type
+        // (`gfx::scene_pass`, docs/SCENE_PASS_PLAN.md Phase 4).
         app.add_systems(
             Update,
             (sync_sky_dome, sync_sky_colors).in_set(WorldSet::InGame),

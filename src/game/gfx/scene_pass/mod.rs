@@ -70,14 +70,14 @@ use engine_api::{
 
 use crate::game::gfx::toon_material::ToonLook;
 
-use crate::game::world::terrain::material::TerrainMaterial;
+use crate::game::world::{sky::SkyDomeMaterial, terrain::material::TerrainMaterial};
 
 pub mod material;
 pub mod pass;
 pub mod pipeline;
 
 use material::{SceneMaterial, SceneMaterialPlugin};
-use pipeline::{TerrainScenePipeline, ToonScenePipeline};
+use pipeline::{SkyScenePipeline, TerrainScenePipeline, ToonScenePipeline};
 
 impl SceneMaterial for TerrainMaterial {
     type Pipeline = TerrainScenePipeline;
@@ -85,6 +85,11 @@ impl SceneMaterial for TerrainMaterial {
 
 impl SceneMaterial for ToonMaterial {
     type Pipeline = ToonScenePipeline;
+}
+
+impl SceneMaterial for SkyDomeMaterial {
+    type Pipeline = SkyScenePipeline;
+    const LAYER: SceneLayer = SceneLayer::Background;
 }
 
 /// Every system that appends to [`SceneInstances`] and writes a view's
@@ -159,20 +164,6 @@ impl Default for SceneInstances {
     }
 }
 
-/// One `draw_indexed` call: a run of instances sharing a mesh and a material.
-///
-/// Terrain chunks and lightmapped objects each own their material, so their
-/// runs are length 1; probe-lit furniture sharing a material and a mesh is one
-/// instanced draw. The material is its prepared bind group (cheap `Arc`
-/// clone), so the pass needs to know nothing about material types.
-pub struct SceneDraw {
-    pub mesh: AssetId<Mesh>,
-    pub material: BindGroup,
-    pub colour_pipeline: CachedRenderPipelineId,
-    pub prepass_pipeline: CachedRenderPipelineId,
-    pub instances: std::ops::Range<u32>,
-}
-
 /// Everything a toon surface needs from the level that isn't in its material:
 /// one buffer for every draw of every material. Mirrors `SceneUniform` in
 /// `assets/shaders/scene/bindings.wesl` field for field.
@@ -217,6 +208,43 @@ impl Default for SceneUniform {
 #[derive(Resource, Default)]
 pub struct SceneUniformBuffer(pub UniformBuffer<SceneUniform>);
 
+/// Which part of the frame a material's geometry belongs to.
+///
+/// Two facts that always travel together, so they are one value rather than
+/// two consts that could be set inconsistently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SceneLayer {
+    /// Solid geometry: writes depth, and has a prepass variant so the edge
+    /// detector and the atmosphere can see it. Drawn first.
+    Opaque,
+    /// Background: no depth *write* (it still tests, so the finished depth
+    /// buffer rejects whatever is in front of it) and **no prepass variant at
+    /// all**. Drawn after the opaque layer.
+    ///
+    /// Leaving it out of the prepass is not an optimisation, it is the
+    /// contract the atmosphere pass relies on: fog and god rays reconstruct
+    /// world position from prepass depth, and a sky that wrote depth would be
+    /// fogged as if it were a surface a few hundred metres away
+    /// (`docs/ATMOSPHERE.md`).
+    Background,
+}
+
+/// One `draw_indexed` call: a run of instances sharing a mesh and a material.
+///
+/// Terrain chunks and lightmapped objects each own their material, so their
+/// runs are length 1; probe-lit furniture sharing a material and a mesh is one
+/// instanced draw. The material is its prepared bind group (cheap `Arc`
+/// clone), so the pass needs to know nothing about material types.
+pub struct SceneDraw {
+    pub mesh: AssetId<Mesh>,
+    pub material: BindGroup,
+    pub layer: SceneLayer,
+    pub colour_pipeline: CachedRenderPipelineId,
+    /// `None` for [`SceneLayer::Background`], which the prepass skips.
+    pub prepass_pipeline: Option<CachedRenderPipelineId>,
+    pub instances: std::ops::Range<u32>,
+}
+
 /// What each view draws this frame, in submission order, by render-world view
 /// entity.
 ///
@@ -246,6 +274,7 @@ impl Plugin for ScenePassPlugin {
         app.add_plugins((
             SceneMaterialPlugin::<TerrainMaterial>::default(),
             SceneMaterialPlugin::<ToonMaterial>::default(),
+            SceneMaterialPlugin::<SkyDomeMaterial>::default(),
             ExtractResourcePlugin::<ToonLook>::default(),
         ));
 
@@ -267,6 +296,9 @@ impl Plugin for ScenePassPlugin {
                     clear_scene_draws
                         .in_set(RenderSystems::Queue)
                         .before(SceneQueue),
+                    order_scene_draws
+                        .in_set(RenderSystems::Queue)
+                        .after(SceneQueue),
                     prepare_scene_instances.in_set(RenderSystems::PrepareResources),
                     prepare_scene_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
@@ -312,6 +344,24 @@ fn scene_bind_group_layout() -> SceneBindGroupLayout {
 fn clear_scene_draws(mut instances: ResMut<SceneInstances>, mut draws: ResMut<SceneDraws>) {
     instances.0.clear();
     draws.0.clear();
+}
+
+/// Put each view's draws in layer order once every material has queued.
+///
+/// This is about overdraw, not correctness: the prepass has already settled
+/// depth by the time the opaque pass runs, so a sky submitted first would be
+/// depth-rejected behind terrain anyway. But it would be rejected *after*
+/// being shaded, and the dome covers the whole screen — so submitting it last
+/// is the difference between shading the visible sky and shading all of it.
+/// It also makes submission order deterministic, which the `SceneQueue`
+/// systems alone are not (they are unordered with respect to each other).
+///
+/// A *stable* sort, so each material's `(material, mesh)` grouping — the thing
+/// that makes its draws batch — survives untouched.
+fn order_scene_draws(mut draws: ResMut<SceneDraws>) {
+    for list in draws.0.values_mut() {
+        list.sort_by_key(|draw| draw.layer);
+    }
 }
 
 /// Upload the frame's instances and the scene uniform.

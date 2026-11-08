@@ -1616,3 +1616,26 @@ Gotcha that bit us: `perf-snapshot-*.md` is written into whichever checkout is r
 parallel worktree (`hfi/af456d63…`) implements the same scene pass with different module names
 (`scene_pass::toon`, `extract_probe_images`) — the row names are the only way to tell which build a
 snapshot is from. Two of the user's "HEAD" snapshots were from that other build.
+
+## Scene pass Phase 4: the sky, and what's left — 7 November 2026
+
+`SkyDomeMaterial` is a third `SceneMaterialPlugin`, in a new `SceneLayer { Opaque, Background }`.
+Background = no depth *write*, **no prepass variant at all**, sorted last (`order_scene_draws`). The
+missing prepass variant is load-bearing: `atmosphere.rs` reconstructs world position from prepass
+depth, so a sky that wrote depth would be fogged as a surface ~900 m away. The sort is about
+overdraw, *not* correctness — the prepass has settled depth before the opaque pass, so a sky
+submitted first would be rejected anyway, just after being shaded over the whole screen. The sky's
+`specialize` is gone; culling (camera inside the sphere) and depth-write come from the layer.
+`scene/toon_io|toon_vertex.wesl` renamed `mesh_io|mesh_vertex` — three materials share them now.
+
+**Snapshots carry their build**: `build.rs` stamps `BUILD_COMMIT` (short HEAD hash; re-runs on
+`.git/HEAD` and the branch ref file, and handles `.git` being a *file* in a worktree), and it is in
+both the heading and the file name. No `-dirty` marker on purpose: build.rs only re-runs on its
+watched paths, so the marker would go stale in the misleading direction.
+
+**Measured, gameplay, build 19225e1**: whole scene pass ≈ 0.27 ms of a 7.6 ms frame. But bevy_pbr
+still costs **~0.5 ms** with nothing of ours in its phases — `prepare_clusters_for_gpu_clustering`
+0.24 (clustered lighting, in a fully baked game), `prepare_preprocess_bind_groups` 0.10, and ~0.15
+across eight `write_binned_instance_buffers` instantiations. That is twice our own pass and the
+first real argument for Phase 5; a cheaper probe first is to drop the `BakedSun` `DirectionalLight`
+(it only lights `StandardMaterial` previews) and see if the clustering row goes with it.

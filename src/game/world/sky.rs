@@ -19,14 +19,8 @@
 
 use bevy::{
     light::NotShadowCaster,
-    // `OpaqueRendererMethod` and `SpecializedMeshPipelineError` moved into the
-    // new `bevy_material` crate in Bevy 0.19.
-    material::{OpaqueRendererMethod, specialize::SpecializedMeshPipelineError},
-    mesh::MeshVertexBufferLayoutRef,
-    pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderType},
-    shader::ShaderRef,
+    render::render_resource::{AsBindGroup, ShaderType},
 };
 
 use crate::game::{
@@ -114,36 +108,15 @@ pub struct SkyDomeMaterial {
     pub colors: SkyColors,
 }
 
-impl Material for SkyDomeMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/sky_dome.wesl".into()
-    }
-
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Opaque
-    }
-
-    fn opaque_render_method(&self) -> OpaqueRendererMethod {
-        // Use forward rendering so it bypasses the deferred g-buffer pipeline.
-        OpaqueRendererMethod::Forward
-    }
-
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        // The camera is *inside* the sphere, so disable back-face culling.
-        descriptor.primitive.cull_mode = None;
-        // Disable depth write so the sky dome always sits behind all other geometry
-        // without poisoning the depth buffer.
-        if let Some(ref mut ds) = descriptor.depth_stencil {
-            ds.depth_write_enabled = Some(false);
-        }
-        Ok(())
-    }
-}
+/// The dome is **not** drawn by `MaterialPlugin`: our scene pass owns it
+/// (`gfx::scene_pass`, `docs/SCENE_PASS_PLAN.md` Phase 4), in the
+/// *background* layer — drawn after the opaque geometry, writing no depth,
+/// and with no prepass variant, which is what keeps fog and god rays off the
+/// sky. Culling off (the camera is inside the sphere) and the depth-write
+/// rule both come from `SceneLayer::Background` now, not from a `specialize`
+/// here. This impl survives only because `MeshMaterial3d<M>` is bounded on
+/// `M: Material`; nothing reads it.
+impl Material for SkyDomeMaterial {}
 
 /// Spawns the sky dome sphere.
 /// Runs `OnEnter(AppState::InGame)` after the main `setup` system.

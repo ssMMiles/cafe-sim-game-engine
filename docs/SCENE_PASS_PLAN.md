@@ -1,7 +1,9 @@
 # Replacing the bevy scene pass — plan
 
-Status: **Phases 0–3 implemented** (plan written 2026-11-06; Phases 1, 3 and
-then 2 landed 2026-11-07). Next: Phase 4 (sky dome, re-measure, tidy). Prerequisite already landed:
+Status: **Phases 0–4 implemented** (plan written 2026-11-06; Phases 1, 3, 2
+and 4 landed 2026-11-07). Only Phase 5 (evicting `PbrPlugin`) is left, and it
+was always conditional on measurement — see the numbers in
+`docs/SCENE_PASS_BASELINE.md` §3, which now argue *for* it more than expected. Prerequisite already landed:
 `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose shaders
 import no bevy PBR fragment modules (ABI 14) — the material contract a custom
 pass must honour is already small and written down (`GRAPHICS.md` §5).
@@ -250,131 +252,36 @@ by `(material, mesh)` is what keeps probe-lit furniture batching.
 double-sided, player animation + probe lighting, cafe furniture draw count,
 object bake arrival, web build clean.
 
-**Phase 4 — Sky + measure + tidy.** Port the sky dome (one pipeline: cull
-off, depth write off, draw last in our opaque pass). Re-run Phase 0's
-measurement; update `docs/PERFORMANCE.md` / `GRAPHICS.md`; add
-RenderDiagnostics spans around our two passes so the GPU-timings panel keeps
-naming them (**V6**).
+**Phase 4 — Sky + measure + tidy.** *Done (2026-11-07).* The sky dome is a
+third `SceneMaterialPlugin`, in a new `SceneLayer::Background`: no depth
+*write*, **no prepass variant at all**, and sorted after the opaque layer
+(`order_scene_draws`). The missing prepass variant is the contract the
+atmosphere pass depends on — fog and god rays reconstruct position from
+prepass depth, and a sky that wrote depth would be fogged as a surface a few
+hundred metres off. Its `specialize` is gone: culling and depth-write now
+come from the layer. `scene/toon_io.wesl` / `toon_vertex.wesl` were renamed
+`mesh_io` / `mesh_vertex` now that three materials share them (terrain keeps
+its own narrower pair). Measurement: `SCENE_PASS_BASELINE.md` §3.4-3.5.
 
-**Phase 5 — optional: evict PbrPlugin.** Only if Phase 4's numbers say the
-residue matters. Requires porting: skinning (extract/prepare), the stragglers
-(ghosts + blob shadows need a small alpha-blend pipeline in our pass with
-back-to-front sorting over a handful of entities; brush disc likewise), and a
-lit path for thumbnails (or accepting flat thumbnails); plus verifying
-bevy_gltf still functions without `PbrPlugin` registering
+**Phase 5 — optional: evict PbrPlugin.** Still optional, but the Phase 3/4
+gameplay measurement makes the case better than expected: with nothing of
+ours left in bevy's phases, bevy_pbr still spends **~0.5 ms a frame** on
+machinery for the handful of `StandardMaterial` stragglers —
+`prepare_clusters_for_gpu_clustering` 0.24 ms (clustered lighting, in a game
+where *all* lighting is baked), `prepare_preprocess_bind_groups` 0.10 ms, and
+~0.15 ms across the `write_binned_instance_buffers` instantiations. That is
+roughly twice what our entire scene pass costs.
+
+Requires porting: skinning (`extract_skins`/`prepare_skins`, both `pub`), the
+stragglers (ghosts + blob shadows need a small alpha-blend pipeline in our
+pass with back-to-front sorting over a handful of entities; brush disc
+likewise), and a lit path for thumbnails (or accepting flat thumbnails); plus
+verifying bevy_gltf still functions without `PbrPlugin` registering
 `Assets<StandardMaterial>` (the glTF loader and `with_surface_of` conversion
 still need the asset type to exist). `DirectionalLight`/`GlobalAmbientLight`
-and `world/mod.rs`'s derivation of them go with it. Default expectation:
-**skip** — a near-empty bevy_pbr is probably cheap, and this phase is pure
-risk otherwise.
+and `world/mod.rs`'s derivation of them go with it.
 
-## 5. Verification items — resolved 2026-11-07
-
-Read out of bevy 0.20.0's published sources (`~/.cargo/registry/.../bevy_*-0.20.0`),
-except V4 which was also run through the WESL compiler.
-
-- **V1 — settled, and smaller than feared.** `MaterialPlugin::<M>::build` does
-  exactly: `init_asset::<M>()`, `register_type::<MeshMaterial3d<M>>()`,
-  `init_resource::<EntitiesNeedingSpecialization<M>>()`,
-  `ErasedRenderAssetPlugin::<MeshMaterial3d<M>>`, two `PostUpdate` systems
-  (`mark_meshes_as_changed_if_their_materials_changed`,
-  `check_entities_needing_specialization`) and, in the render app, the shader
-  cache, the bind-group allocator and four extract systems. Only the first two
-  have to be kept, and `terrain/mod.rs` now does them by hand. `MeshMaterial3d<M>`
-  is bounded on `M: Material`, so the `impl Material for TerrainMaterial` stays
-  — gutted to a doc comment plus `enable_shadows`, since nothing reads it.
-- **V2 — run before `early_prepass`.** The prepass node renders depth into the
-  view's *main* `ViewDepthStencilTexture` and `copy_texture_to_texture`s it
-  into `ViewPrepassTextures.depth` at the end of the pass, so our geometry has
-  to be in the depth buffer before bevy's prepass finishes. Both `ColorAttachment`
-  and `DepthAttachment` clear on first use and load afterwards (an `AtomicBool`
-  per attachment), so running first means we clear and bevy loads. `early_prepass`
-  returns early only if the view's prepass phases are *absent* — being empty is
-  not enough — and those phases come from bevy_core_pipeline's
-  `extract_camera_prepass_phase`, which keys off `DepthPrepass`/`NormalPrepass`
-  on the camera and knows nothing about bevy_pbr. So it always runs for our
-  camera and always does the copy.
-- **V3 — same answer, same reason.** `main_opaque_pass_3d` also early-returns
-  only on *absent* phases (`extract_core_3d_camera_phases`, also
-  bevy_core_pipeline), and it begins its render pass before testing whether the
-  phases have items — so the clear happens either way. `scene_opaque` runs
-  `.before(main_opaque_pass_3d)`, clears on first use, and bevy's pass loads and
-  depth-tests the stragglers against what we wrote.
-- **V4 — yes, asset shaders can import each other, and Phase 1 relies on it.**
-  `Shader::from_wesl` gives an asset at `shaders/a/b.wesl` the module path
-  `/shaders/a/b` (`PathOrigin::Absolute`), `scan_wesl_imports` resolves
-  `package::`/`super::` against it, and `ShaderLoader` turns every resulting
-  `ShaderImport::AssetPath` into a loaded `file_dependencies` entry — so the
-  imported file is loaded and registered in `module_path_to_asset_id` without
-  anything holding a handle. The scene shaders import each other as
-  `package::shaders::scene::…`, and `shader_check.rs` compiles the graph in
-  `cargo test`. (So the shared toon-curve module is feasible — Phase 2/3 work,
-  not done here.)
-- **V5 — nothing exotic.** Bind group 0 is a dynamic-offset uniform (bevy's own
-  `ViewUniform`) and a read-only storage buffer in `VERTEX_FRAGMENT`; both are
-  core WebGPU. `cargo web-check` passes. The design only *removes* bindings.
-- **V6 — works, same call as the post passes.** `ctx.diagnostic_recorder()` +
-  `diagnostics.pass_span(&mut pass, "scene prepass" | "scene opaque")`, exactly
-  as `post_process.rs` does. Still empty on macOS, for the Metal reason in
-  `docs/PERFORMANCE.md`.
-- **V7** — (note, no action) editor picking is `MeshRayCast` on main-world
-  mesh data and never touches the render path.
-
-### Also learned while building Phase 1
-
-- **Per-view visibility is `RenderVisibleEntities`**, populated by
-  `collect_visible_cpu_culled_entities` in bevy_render's `ViewPlugin`
-  (`RenderSystems::PrepareAssets`), keyed by visibility class — so
-  `visible.get::<Mesh3d>()` is the frustum-culled, render-layer-filtered list
-  for that view, with no bevy_pbr involved. Using it rather than a global
-  `ViewVisibility` sweep is what keeps terrain out of the thumbnail rig's
-  camera (layer 7).
-- **`@builtin(instance_index)` is `firstInstance + i` by WebGPU spec**, so a
-  draw over an instance range indexes its own slice of the instance buffer
-  with no extra uniform. Bevy's own batching depends on this too.
-- **The instance buffer must go through `encase`, not `bytemuck`.** glam's
-  `Mat3` is 36 bytes; WGSL's `mat3x3<f32>` is 48. `BufferVec` (encase) pads
-  correctly; `RawBufferVec` (Pod) would shear every instance past the first.
-- **Bevy's prepass does not cull back faces while its opaque pass does**
-  (`PrimitiveState::default()` vs `cull_mode: Some(Face::Back)`). Ours culls
-  in both: a back face winning the depth buffer on a pixel the colour pass
-  then discards is a hole with fog in it.
-- **`ViewQuery` skips its system when the view doesn't match** (a
-  `SystemParamValidationError::skipped`), so a pass system can simply require
-  `&SceneDraws` and stay silent on views that have none.
-
-## 6. Expected wins — hypotheses to check against Phase 0
-
-Honest framing: with a *static* scene, bevy's extraction is change-driven and
-cheap; nobody should promise "N ms back" before Phase 0's table exists. What
-the design removes per frame regardless: per-material-type specialize+queue
-systems, binned-phase build + batching, the GPU preprocess dispatch for our
-items, and the `mesh_view` bind-group rebuild — plus, with Phase 2, the
-write-every-material environment sync. What it *adds*: our own extract +
-prepare, deliberately simple (one list rebuild, one buffer upload). The
-secondary win is wall-clock in the render pass itself (two tight passes, no
-per-item draw-function dispatch); the primary win is strategic ownership.
-
-Size estimate: Phase 1 ≈ 600–900 lines (plugin + buffers + pipelines + two
-pass systems + shader modules), Phase 3 ≈ the same again rather than more
-(the machinery exists; it gains variants), Phases 2/4 small. Comparable in
-shape to `atmosphere.rs` + `post_process.rs`, which is the house style it
-should follow.
-
-## 7. Alternatives considered
-
-- **Queue custom phase items into bevy's `Opaque3d`/`Opaque3dPrepass`**
-  (they live in bevy_core_pipeline, so it works without bevy_pbr): keeps
-  bevy's pass drivers, binning, sorting and batching — which is exactly the
-  machinery we're trying to shed, and it drags in `GetBatchData`/binned-item
-  plumbing. Kept as the fallback if direct pass systems fight the schedule
-  (V2/V3 turning out hostile).
-- **Fork/trim bevy_pbr**: maximum control, but every bevy upgrade becomes a
-  merge. Rejected.
-- **Stay on `Material` and slim the view bind group**: not possible —
-  `MaterialPlugin` hardwires `MeshPipeline` and its layout.
-
-Decisions already taken: authoring components stay (`MeshMaterial3d<T>`);
-material types migrate atomically (no double-draw window); PbrPlugin stays
-until measurement justifies Phase 5; post stack and prepass *textures* are
-bevy's, only the geometry that fills them is ours.
+A cheaper intermediate worth measuring first: those three rows are driven by
+lights and by meshes in bevy's binned phases. Culling the one `BakedSun`
+`DirectionalLight` (it exists only to light `StandardMaterial` previews) may
+take `prepare_clusters_for_gpu_clustering` with it for a fraction of the work.

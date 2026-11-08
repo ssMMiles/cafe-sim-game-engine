@@ -30,10 +30,10 @@ use bevy::{
 };
 use engine_api::{TOON_DOUBLE_SIDED_DEF, ToonMaterial, ToonMaterialKey};
 
-use crate::game::world::terrain::material::TerrainMaterial;
+use crate::game::world::{sky::SkyDomeMaterial, terrain::material::TerrainMaterial};
 
 use super::{
-    SceneBindGroupLayout,
+    SceneBindGroupLayout, SceneLayer,
     material::{MaterialLayout, ScenePipeline},
 };
 
@@ -87,12 +87,16 @@ impl SceneShaders {
     }
 
     /// The whole descriptor given the per-material pieces: the vertex layout
-    /// the mesh supports, the defs both stages share, and the cull mode.
+    /// the mesh supports, the defs both stages share, the cull mode, and the
+    /// layer (which decides depth *write* — a background material tests depth
+    /// but must not add to it).
+    #[expect(clippy::too_many_arguments, reason = "pipeline descriptor pieces")]
     fn descriptor(
         &self,
         label: &'static str,
         pass: ScenePassKind,
         view: SceneViewKey,
+        layer: SceneLayer,
         vertex_layout: VertexBufferLayout,
         mut shader_defs: Vec<ShaderDefVal>,
         cull_mode: Option<Face>,
@@ -148,7 +152,7 @@ impl SceneShaders {
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                depth_write_enabled: Some(layer == SceneLayer::Opaque),
                 // Reverse-Z, as everywhere else in the 3D view.
                 depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: StencilState::default(),
@@ -218,6 +222,7 @@ impl SpecializedMeshPipeline for TerrainScenePipeline {
             label,
             key.pass,
             key.view,
+            SceneLayer::Opaque,
             vertex_layout,
             Vec::new(),
             Some(Face::Back),
@@ -236,7 +241,7 @@ impl FromWorld for ToonScenePipeline {
     fn from_world(world: &mut World) -> Self {
         Self(SceneShaders::load::<ToonMaterial>(
             world,
-            "shaders/scene/toon_vertex.wesl",
+            "shaders/scene/mesh_vertex.wesl",
             "shaders/toon_lighting.wesl",
             "shaders/toon_prepass.wesl",
         ))
@@ -311,9 +316,71 @@ impl SpecializedMeshPipeline for ToonScenePipeline {
             label,
             key.pass,
             key.view,
+            SceneLayer::Opaque,
             vertex_layout,
             shader_defs,
             cull_mode,
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sky dome
+// ---------------------------------------------------------------------------
+
+#[derive(Resource)]
+pub struct SkyScenePipeline(SceneShaders);
+
+impl FromWorld for SkyScenePipeline {
+    fn from_world(world: &mut World) -> Self {
+        Self(SceneShaders::load::<SkyDomeMaterial>(
+            world,
+            "shaders/scene/mesh_vertex.wesl",
+            "shaders/sky_dome.wesl",
+            // Never used: the sky has no prepass variant
+            // (`SceneLayer::Background`). `SceneShaders` holds one handle per
+            // stage, so this names the colour shader rather than inventing a
+            // prepass the pass would refuse to draw.
+            "shaders/sky_dome.wesl",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SkyPipelineKey {
+    pub view: SceneViewKey,
+}
+
+impl ScenePipeline<SkyDomeMaterial> for SkyScenePipeline {
+    fn key(view: SceneViewKey, _pass: ScenePassKind, _: &()) -> Self::Key {
+        SkyPipelineKey { view }
+    }
+}
+
+impl SpecializedMeshPipeline for SkyScenePipeline {
+    type Key = SkyPipelineKey;
+
+    /// One variant. The dome is a plain UV sphere and the shader reads only
+    /// its radial normal — which is the view direction, since the dome is
+    /// centred on the camera (`world/sky.rs`).
+    fn specialize(
+        &self,
+        key: Self::Key,
+        layout: &MeshVertexBufferLayoutRef,
+    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+        ])?;
+        Ok(self.0.descriptor(
+            "sky_scene_pipeline",
+            ScenePassKind::Colour,
+            key.view,
+            SceneLayer::Background,
+            vertex_layout,
+            Vec::new(),
+            // The camera is *inside* the sphere.
+            None,
         ))
     }
 }

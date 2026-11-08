@@ -1,8 +1,10 @@
-// What the toon vertex stage hands its two fragment stages
-// (`toon_lighting.wesl`, `toon_prepass.wesl`). Replaces bevy_pbr's
-// `forward_io::VertexOutput` / `prepass::io::VertexOutput`, which differed
-// from each other in location numbering and so forced two vertex variants;
-// here one struct and one vertex shader serve both passes.
+// What `mesh_vertex.wesl` hands every fragment stage of the scene pass:
+// `toon_lighting.wesl`, `toon_prepass.wesl` and `sky_dome.wesl`. Replaces
+// bevy_pbr's `forward_io::VertexOutput` / `prepass::io::VertexOutput`, which
+// differed from each other in location numbering and so forced two vertex
+// variants; here one struct and one vertex shader serve both passes and
+// every material that isn't terrain (which has its own, narrower pair —
+// three varyings and no defs at all).
 //
 // `VERTEX_UVS_A` / `VERTEX_UVS_B` keep bevy's names on purpose: the fragment
 // shaders already branch on them, and the scene pipeline sets them from the

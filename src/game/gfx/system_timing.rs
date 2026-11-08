@@ -356,21 +356,25 @@ pub fn snapshot_markdown(
     out
 }
 
+/// The commit this binary was built from (`build.rs`), in every snapshot
+/// heading. Uncommitted edits are not reflected — see `stamp_build_commit`.
+pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
+
 /// Write a snapshot to `perf-snapshot-<unix-seconds>.md` in the working
 /// directory (gitignored) and return the text, so a caller can also put it on
 /// the clipboard. `context` names what was being measured ("gameplay",
-/// "editor") and goes in the heading; the file is which build it came from
-/// only by its row names, so say so in the doc you paste it into.
+/// "editor"); the heading also carries [`BUILD_COMMIT`], which is what tells
+/// two otherwise similar tables apart.
 pub fn save_snapshot(timings: &SystemTimings, breakdown: &FrameBreakdown, context: &str) -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let note = format!("perf snapshot {secs} ({context})");
+    let note = format!("perf snapshot {secs} ({context}, build {BUILD_COMMIT})");
     let text = snapshot_markdown(timings, breakdown.median(), &note);
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let path = std::path::PathBuf::from(format!("perf-snapshot-{secs}.md"));
+        let path = std::path::PathBuf::from(format!("perf-snapshot-{BUILD_COMMIT}-{secs}.md"));
         match std::fs::write(&path, &text) {
             Ok(()) => info!("perf snapshot ({context}) written to {}", path.display()),
             Err(e) => warn!("could not write {}: {e}", path.display()),

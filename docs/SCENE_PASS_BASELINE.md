@@ -34,11 +34,13 @@ nothing to do with the renderer; editor optimisation is a separate job.
    the clipboard.) Paste the relevant part into a section below with the
    scene, the date and what build it was.
 
-**Which build a snapshot came from is only in its row names.** More than one
-checkout writes `perf-snapshot-*.md` into its own working directory with the
-same naming, and a parallel branch of this same work exists — check that the
-`scene_pass::…` rows match the code you think you measured (this branch:
-`scene_pass::material::queue_draws<…>`, `scene_pass::pass::scene_prepass`).
+**Every snapshot records the commit it came from**, in its heading and its
+file name (`perf-snapshot-<commit>-<secs>.md`, from `BUILD_COMMIT` in
+`build.rs`). Uncommitted edits are not captured — the hash is HEAD's — so
+commit before a measurement you intend to keep. This matters because more
+than one checkout writes snapshots into its own working directory with the
+same naming, and a parallel branch of this same work exists; before the
+stamp existed, row names were the only way to tell two tables apart.
 
 Two scenes, because they stress different halves:
 
@@ -145,15 +147,61 @@ Net ≈ **−0.15 ms** per frame, inside the run-to-run noise of the totals
 (8.3–9.4 ms across the six Phase 0 snapshots). As the plan said: the win is
 ownership, not milliseconds, at this scene size.
 
-### 3.4 After Phase 3 — editor terrain world and cafe
+### 3.4 After Phases 1–3 — editor and gameplay (taken 2026-11-07, build `19225e1`)
 
-> **Not yet taken.** Expect `MaterialPlugin::<ToonMaterial>`'s rows to go the
-> same way, and — the one that might actually register — the two
-> `write_binned_instance_buffers` and `prepare_preprocess_bind_groups` rows to
-> fall to their straggler-only floor, since every toon sub-mesh left bevy's
-> binned phases too.
+The first measurement with the editor out of the way (F9 in gameplay) and the
+profiler's own cost fixed.
 
-## 4. Visual checklist for Phases 1 and 3
+| | Editor | Gameplay |
+|---|---:|---:|
+| Frame | 8.50 ms | 7.64 ms |
+| Main thread | 7.63 | 5.61 |
+| Render busy + waiting | 5.19 + 0.11 | 5.70 + 0.76 |
+| System work total | 7.37 | 6.80 |
+| `editor_ui` | 1.69 | — |
+| `collect_system_timings` | 0.19 | 0.28 |
+| **All `scene_pass` rows** | **~0.21** | **~0.27** |
+
+What the whole renderer-ownership change costs on CPU is that last row:
+roughly a quarter of a millisecond, against a 7.6 ms frame. The two rows that
+used to dominate are gone or shrunk — `editor_ui` by measuring in gameplay,
+`collect_system_timings` from 1.2 ms by the hash-free rewrite (commit
+`19225e1`).
+
+**The interesting leftover.** With none of our geometry in bevy's phases any
+more, bevy_pbr still costs about **0.5 ms** in gameplay for the handful of
+`StandardMaterial` stragglers:
+
+| ms | row | what it is for us |
+|---:|---|---|
+| 0.236 | `prepare_clusters_for_gpu_clustering` | clustered lighting — and *all* our lighting is baked |
+| 0.098 | `prepare_preprocess_bind_groups` | GPU mesh preprocessing |
+| ~0.15 | `write_binned_instance_buffers<…>` × 8 | one instantiation per phase, mostly empty |
+
+That is about twice what our own pass costs, which is the first real evidence
+for Phase 5 (or at least for killing the `BakedSun` directional light that
+drives the clustering row).
+
+### 3.5 Does a wider view cost more?
+
+Two gameplay-era snapshots from the same build, low angle vs a high angle
+seeing much more terrain and more objects:
+
+| ms | Low | High |
+|---|---:|---:|
+| `scene_prepass` | 0.021 | 0.038 |
+| `scene_opaque` | 0.012 | 0.023 |
+| toon queue | 0.012 | 0.029 |
+| **All `scene_pass`** | **~0.09** | **~0.16** |
+| Render thread busy | 5.07 | 5.11 |
+
+Roughly double the visible draw count costs ~0.07 ms of CPU, and the render
+thread's total barely moves — the per-draw CPU cost is not where the frame
+goes. What the wider view costs on the *GPU* is not visible here: macOS has no
+in-pass timestamps (`docs/PERFORMANCE.md`), and most of the 5 ms of render-thread
+work has no span of its own.
+
+## 4. Visual checklist for Phases 1, 3 and 4
 
 Measurement is half of it; the exit criterion is "visually unchanged". With a
 terrain world loaded:
@@ -187,3 +235,14 @@ With objects placed (and the cafe, for the player + furniture):
 - [ ] Cafe furniture: draw count stays ≈ number of distinct (material, mesh)
       pairs, not number of pieces.
 - [ ] Placement ghost, brush disc and thumbnails (all still bevy's) unaffected.
+
+Phase 4 (the sky):
+
+- [ ] The sky dome renders, with its gradient and sun disc.
+- [ ] Fog and god rays still **do not** touch the sky (it writes no prepass
+      depth) while still fogging terrain and objects in front of it.
+- [ ] Outlines do not trace the dome.
+- [ ] Terrain and objects occlude the sky correctly from every angle,
+      including looking straight up and from below the terrain.
+- [ ] Changing the sun angle or ambient in the inspector moves the sky with
+      the lighting, as before.

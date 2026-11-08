@@ -12,7 +12,7 @@
 // Drawn by the scene pass (`src/game/gfx/scene_pass`), whose modules provide
 // the varyings and the per-instance winding flag.
 
-import package::shaders::scene::toon_io::{VertexOutput, PrepassOutput};
+import package::shaders::scene::mesh_io::{VertexOutput, PrepassOutput};
 import package::shaders::scene::bindings::scene_instance_winds_forward;
 
 // Same as `facing_normal` in toon_lighting.wesl; keep the two in step.

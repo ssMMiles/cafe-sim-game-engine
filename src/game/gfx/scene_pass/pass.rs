@@ -153,7 +153,7 @@ pub fn scene_opaque(
     render_draws(
         &mut pass,
         draws,
-        |draw| draw.colour_pipeline,
+        |draw| Some(draw.colour_pipeline),
         &bind_group,
         view_offset,
         &pipeline_cache,
@@ -174,7 +174,7 @@ pub fn scene_opaque(
 fn render_draws<'w>(
     pass: &mut TrackedRenderPass<'w>,
     draws: &'w [SceneDraw],
-    pipeline_of: impl Fn(&SceneDraw) -> CachedRenderPipelineId,
+    pipeline_of: impl Fn(&SceneDraw) -> Option<CachedRenderPipelineId>,
     bind_group: &'w SceneBindGroup,
     view_offset: &ViewUniformOffset,
     pipeline_cache: &'w PipelineCache,
@@ -184,8 +184,12 @@ fn render_draws<'w>(
     pass.set_bind_group(0, &bind_group.0, &[view_offset.offset]);
 
     for draw in draws {
-        let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_of(draw)) else {
-            continue; // Still compiling.
+        // `None` is a draw this pass doesn't carry at all — a background
+        // material in the prepass; otherwise the pipeline is still compiling.
+        let Some(pipeline) =
+            pipeline_of(draw).and_then(|id| pipeline_cache.get_render_pipeline(id))
+        else {
+            continue;
         };
         let Some(mesh) = meshes.get(draw.mesh) else {
             continue;

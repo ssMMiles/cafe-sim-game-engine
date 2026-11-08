@@ -47,7 +47,7 @@ use bevy::{
 use bevy::platform::collections::HashMap;
 
 use super::{
-    SceneDraw, SceneDraws, SceneInstance, SceneInstances, SceneQueue,
+    SceneDraw, SceneDraws, SceneInstance, SceneInstances, SceneLayer, SceneQueue,
     pipeline::{ScenePassKind, SceneViewKey},
 };
 
@@ -56,6 +56,9 @@ use super::{
 /// key is built from the view and the material's own [`AsBindGroup::Data`].
 pub trait SceneMaterial: Material + AsBindGroup<Data: Clone + Hash + Eq + Send + Sync> {
     type Pipeline: ScenePipeline<Self>;
+    /// Where in the frame this material's geometry is drawn, and whether it
+    /// has a prepass variant at all. Almost everything is [`SceneLayer::Opaque`].
+    const LAYER: SceneLayer = SceneLayer::Opaque;
 }
 
 /// The specializer for one [`SceneMaterial`]: built once in `RenderStartup`
@@ -308,10 +311,13 @@ fn queue_draws<M: SceneMaterial>(
                     &render_mesh.layout,
                 )
             };
-            let (Ok(colour_pipeline), Ok(prepass_pipeline)) = (
-                specialize(ScenePassKind::Colour),
-                specialize(ScenePassKind::Prepass),
-            ) else {
+            let colour = specialize(ScenePassKind::Colour);
+            // A background material has no prepass variant at all: see
+            // `SceneLayer::Background`.
+            let prepass = (M::LAYER == SceneLayer::Opaque)
+                .then(|| specialize(ScenePassKind::Prepass))
+                .transpose();
+            let (Ok(colour_pipeline), Ok(prepass_pipeline)) = (colour, prepass) else {
                 // A mesh missing an attribute the pipeline binds (a toon mesh
                 // with no normals, say). Bevy would have skipped it silently.
                 error_once!(
@@ -330,6 +336,7 @@ fn queue_draws<M: SceneMaterial>(
             draws.push(SceneDraw {
                 mesh: head.mesh,
                 material: material.bind_group.clone(),
+                layer: M::LAYER,
                 colour_pipeline,
                 prepass_pipeline,
                 instances: start..instances.0.len() as u32,

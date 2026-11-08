@@ -1,7 +1,8 @@
-// Toon vertex stage for the scene pass, colour and prepass alike — static
-// meshes and the one skinned mesh (the player) by the `SKINNED` def.
+// The scene pass's general vertex stage, colour and prepass alike: static
+// meshes, the one skinned mesh (the player) by the `SKINNED` def, and the
+// sky dome (which sets no defs and reads only the world normal).
 //
-// Replaces bevy_pbr's `mesh.wesl` vertex for toon materials. What it keeps
+// Replaces bevy_pbr's `mesh.wesl` vertex. What it keeps
 // from there: the transform comes from an instance buffer indexed by
 // `instance_index`, skinning is a weighted sum of four joint matrices that
 // already fold in the inverse bind pose, and a skinned normal goes through
@@ -12,7 +13,7 @@
 import package::shaders::scene::bindings::{
     instances, scene_position_world_to_clip, scene_skin_model, scene_normal_matrix,
 };
-import package::shaders::scene::toon_io::VertexOutput;
+import package::shaders::scene::mesh_io::VertexOutput;
 
 struct Vertex {
     @location(0) position: vec3<f32>,

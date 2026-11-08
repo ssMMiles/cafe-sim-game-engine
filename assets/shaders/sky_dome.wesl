@@ -3,8 +3,13 @@
 // the colour decisions are made on the CPU (`SkyColors::from_environment`,
 // world/sky.rs), already exposed through the toon curve's `white`; this
 // shader only places them on the sphere.
+//
+// Drawn by our own scene pass (`src/game/gfx/scene_pass`) in the *background*
+// layer: after the opaque geometry, writing no depth, and with no prepass
+// variant at all — which is what keeps the fog and god-ray pass off the sky
+// (it reconstructs position from prepass depth, and the sky leaves none).
 
-import bevy_pbr::render::forward_io::VertexOutput;
+import package::shaders::scene::mesh_io::{VertexOutput, FragmentOutput};
 
 // Mirrors `SkyColors` in world/sky.rs field for field.
 struct SkyColors {
@@ -25,7 +30,7 @@ const SUN_DISC_OUTER: f32 = 0.9990;
 const SUN_DISC_INNER: f32 = 0.9996;
 
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment(in: VertexOutput) -> FragmentOutput {
     // The dome is a UV sphere centred on the camera, and a UV sphere's
     // normals are radial, so the world normal *is* the view direction. The
     // old `world_position.y / radius` put the horizon at world y = 0 rather
@@ -49,5 +54,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // undefined, so the fade is written in terms of -dir.y.
     color = mix(color, sky.ground.rgb, smoothstep(0.0, 0.08, -dir.y));
 
-    return vec4<f32>(color, 1.0);
+    var out: FragmentOutput;
+    out.color = vec4<f32>(color, 1.0);
+    return out;
 }

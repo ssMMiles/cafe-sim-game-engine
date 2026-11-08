@@ -34,8 +34,9 @@ const SCENE_BINDINGS: &str = include_str!("../../../assets/shaders/scene/binding
 const TERRAIN_IO: &str = include_str!("../../../assets/shaders/scene/terrain_io.wesl");
 const TERRAIN_VERTEX: &str = include_str!("../../../assets/shaders/scene/terrain_vertex.wesl");
 const TERRAIN_PREPASS: &str = include_str!("../../../assets/shaders/scene/terrain_prepass.wesl");
-const TOON_IO: &str = include_str!("../../../assets/shaders/scene/toon_io.wesl");
-const TOON_VERTEX: &str = include_str!("../../../assets/shaders/scene/toon_vertex.wesl");
+const MESH_IO: &str = include_str!("../../../assets/shaders/scene/mesh_io.wesl");
+const MESH_VERTEX: &str = include_str!("../../../assets/shaders/scene/mesh_vertex.wesl");
+const SKY: &str = include_str!("../../../assets/shaders/sky_dome.wesl");
 
 /// bevy_render's `view.wesl`, cut down to the fields the scene pass reads.
 /// The *layout* can't drift unnoticed: the bind group entry is built from the
@@ -67,8 +68,9 @@ impl Resolver for Stubs {
             "package::shaders::scene::terrain_io" => TERRAIN_IO,
             "package::shaders::scene::terrain_vertex" => TERRAIN_VERTEX,
             "package::shaders::scene::terrain_prepass" => TERRAIN_PREPASS,
-            "package::shaders::scene::toon_io" => TOON_IO,
-            "package::shaders::scene::toon_vertex" => TOON_VERTEX,
+            "package::shaders::scene::mesh_io" => MESH_IO,
+            "package::shaders::scene::mesh_vertex" => MESH_VERTEX,
+            "package::shaders::sky_dome" => SKY,
             "bevy_render::view" => RENDER_VIEW,
             "constants" => CONSTANTS,
             other => {
@@ -155,12 +157,19 @@ const TOON_DEFS: &[&str] = &[
 #[test]
 fn toon_scene_pass_shaders_compile_for_every_variant() {
     for module in [
-        "shaders::scene::toon_vertex",
+        "shaders::scene::mesh_vertex",
         "shaders::toon_lighting",
         "shaders::toon_prepass",
     ] {
         check_all(module, &[], TOON_DEFS);
     }
+}
+
+/// The sky dome shares `mesh_vertex` with the toon materials but sets no
+/// defs at all, and has no prepass variant (`SceneLayer::Background`).
+#[test]
+fn sky_dome_compiles() {
+    check_all("shaders::sky_dome", &[], &[]);
 }
 
 /// Terrain's three stages, as the scene pass compiles them: one `const` def

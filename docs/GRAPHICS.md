@@ -546,8 +546,8 @@ All are WESL except the compute bake.
 
 | File | Stage | Used by | Tested by |
 |------|-------|---------|-----------|
-| `scene/toon_io.wesl` | module | toon varyings | `shader_check` (via its importers) |
-| `scene/toon_vertex.wesl` | vertex | `ToonMaterial`, both passes, `SKINNED` variant | `shader_check` (every variant) |
+| `scene/mesh_io.wesl` | module | scene-pass varyings (toon + sky) | `shader_check` (via its importers) |
+| `scene/mesh_vertex.wesl` | vertex | `ToonMaterial` + `SkyDomeMaterial`, both passes, `SKINNED` variant | `shader_check` (every variant) |
 | `toon_lighting.wesl` | fragment | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block); `shader_check` (every variant) |
 | `toon_prepass.wesl` | prepass fragment | `ToonMaterial` | `shader_check`; `both_passes_flip_normals_the_same_way` |
 | `scene/bindings.wesl` | module | scene pass (view + instance bind group) | `shader_check` (via its importers) |
@@ -555,7 +555,7 @@ All are WESL except the compute bake.
 | `scene/terrain_vertex.wesl` | vertex | `TerrainMaterial`, both passes | `shader_check` |
 | `scene/terrain_prepass.wesl` | prepass fragment | `TerrainMaterial` | `shader_check` |
 | `terrain_toon.wesl` | fragment | `TerrainMaterial` | `toon_curve_matches_the_shaders`; `shader_check` |
-| `sky_dome.wesl` | fragment | `SkyDomeMaterial` | — |
+| `sky_dome.wesl` | fragment | `SkyDomeMaterial` (scene pass, background layer) | `shader_check` |
 | `edge_detection_post.wesl` | fragment (Bevy fullscreen vertex) | `EdgeDetectionPlugin` | naga validation via import substitution; uniform size; plane/step geometry (`post_process.rs` tests) |
 | `lightmap_bake.wgsl` | compute 16×16 | GPU terrain bake | naga validation, uniform size, f16 packing (`gpu.rs` tests) |
 
