@@ -1756,3 +1756,19 @@ vertex 2.4 ms (+0.64 frag) — `LOD_DISTANCES_SQ[0]` is 500 m but the load ring 
 terrain chunk is always LOD0 (~130k tris each); atmosphere 1.04; edges 0.79; the presentation Camera2d at
 window res 3456×2234 ≈ 1.07 (sprite 0.61 + its own `Fxaa` 0.34 + upscaling 0.12); 3D fxaa 0.18; depth
 copy blit 0.23; tonemapping 0.12; egui 0.02. WindowServer ≈ 2.3 ms/frame (not direct-to-display).
+
+## The presentation Camera2d: Msaa::Off, no Fxaa — 8 November 2026
+
+The in-game `Camera2d` (and the menu's) now carries `Msaa::Off` and lost its `Fxaa`. Verified in
+bevy 0.20 source: `Camera` *requires* `Msaa`, default `Sample4`, so the 2D passes were drawing the
+fullscreen sprite into a 4× multisampled window-size (3456×2234) texture and resolving it; bevy_ui
+(`bevy_ui_render/render_pass.rs`) and bevy_egui 0.43 (`render/render_pass.rs`) both render into
+`get_unsampled_color_attachment()` with hardcoded 1-sample pipelines, so UI/egui never touched the
+MSAA texture and don't care. The sprite pipeline specializes on the view's msaa. Expected ~0.8–1 ms
+GPU/frame back (fxaa-at-window-res 0.34 + most of the 2D passes' 0.7); re-measure with
+`tools/gpu-trace.py`. The 3D camera keeps `Msaa` default Sample4 deliberately (only geometry AA).
+
+**Dropping the presentation camera entirely was investigated and rejected**: it hosts
+`PrimaryEguiContext` + `IsDefaultUiCamera` (plugin HUDs); 3D direct-to-window would shade 7.7 Mpx
+instead of 2.07 Mpx in the scene pass *and every post pass* (~3.7×) and lose the fixed-1080p pixel
+look; a custom blit node shades the same pixels the sprite does and saves nothing once MSAA is off.

@@ -144,7 +144,17 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
         // },
         // PixelViewport,
         RenderLayers::layer(1),
-        Fxaa::default(),
+        // This camera only blits the already-anti-aliased render texture and
+        // hosts UI, at full window resolution, so neither MSAA nor FXAA buys
+        // anything here — and `Camera` requires `Msaa`, whose default is
+        // Sample4: without the override the 2D passes render the fullscreen
+        // sprite into a 4× multisampled window-size texture and resolve it
+        // (~1 ms/frame of pure bandwidth measured, `tools/gpu-trace.py`).
+        // bevy_ui and bevy_egui draw into the *unsampled* attachment with
+        // 1-sample pipelines either way, so they don't notice. A second
+        // `Fxaa` here used to blur the nearest-upscaled pixels for another
+        // ~0.3 ms.
+        Msaa::Off,
     ));
 }
 

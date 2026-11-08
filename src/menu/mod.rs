@@ -55,7 +55,10 @@ pub struct MenuCamera;
 
 fn setup_menu(mut commands: Commands, mut next_state: ResMut<NextState<MenuScreen>>) {
     log::info!("Setting up menu");
-    commands.spawn((Camera2d, MenuCamera));
+    // Msaa::Off: this camera only hosts bevy_ui, which draws into the
+    // unsampled attachment — the default Sample4 would just make the empty
+    // 2D passes drag a 4× multisampled window-size texture around.
+    commands.spawn((Camera2d, MenuCamera, Msaa::Off));
     next_state.set(MenuScreen::Main);
 }
 
