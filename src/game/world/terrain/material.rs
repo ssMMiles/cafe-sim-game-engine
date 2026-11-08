@@ -52,10 +52,9 @@ pub struct TerrainMaterial {
 /// authoring component, which deliberately did not change — is bounded on
 /// `M: Material`. Nothing reads it.
 ///
-/// The shaders live in `assets/shaders/scene/terrain_vertex.wesl`,
-/// `assets/shaders/scene/terrain_prepass.wesl` and
+/// The shaders live in `assets/shaders/scene/terrain_vertex.wesl` and
 /// `assets/shaders/terrain_toon.wesl`, and are named by
-/// `scene_pass::pipeline::init_terrain_scene_pipeline`. They are *not* usable
+/// `scene_pass::pipeline::TerrainScenePipeline`. They are *not* usable
 /// through bevy's mesh pipeline: they read our bind group 0, not
 /// `mesh_view` + `mesh`. Naming them here would be a trap, so the defaults
 /// stand.

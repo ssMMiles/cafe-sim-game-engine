@@ -56,5 +56,10 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 
     var out: FragmentOutput;
     out.color = vec4<f32>(color, 1.0);
+    // Never written: the background layer's pipeline masks the normal target
+    // off, so the sky leaves no normal (and no depth) for the edge detector
+    // or the atmosphere to see.
+@if(SCENE_NORMAL_TARGET)
+    out.normal = vec4<f32>(0.0);
     return out;
 }

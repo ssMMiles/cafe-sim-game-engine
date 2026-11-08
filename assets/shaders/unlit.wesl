@@ -28,5 +28,9 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 }
     var out: FragmentOutput;
     out.color = color;
+    // Never written: the transparent layer's pipeline masks the normal
+    // target off, so a blob shadow gets no outline of its own.
+@if(SCENE_NORMAL_TARGET)
+    out.normal = vec4<f32>(0.0);
     return out;
 }

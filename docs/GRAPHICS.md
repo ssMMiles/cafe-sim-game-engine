@@ -152,13 +152,14 @@ each material's bind group, and `ToonMaterialKey` (culling + the
 Placed meshes, the player, and plugin pieces.
 - Types: `crates/engine-api/src/toon_material.rs` (shared with plugin dylibs; ABI-gated, 14).
 - Host sync: `src/game/gfx/toon_material.rs`.
-- Shaders: `assets/shaders/toon_lighting.wesl` (fragment), `toon_prepass.wesl`
-  (prepass fragment: normals). The vertex stages are Bevy's.
+- Shaders: `assets/shaders/toon_lighting.wesl` (fragment; also writes the
+  facing normal to the edge detector's target), vertex `scene/mesh_vertex.wesl`.
+  There is no separate prepass since 2026-11-08: the scene pass is one
+  geometry pass with the normal texture as a second colour target.
 - Pipeline key: `ToonMaterialKey { double_sided }`. Double-sided → no culling
-  and the `TOON_DOUBLE_SIDED` def on both passes, which flips the normal of a
-  back face (winding-corrected for mirrored meshes) — for probe lighting in
-  the colour pass and for the edge detector in the prepass. Single-sided →
-  back faces culled (front, under a view's `INVERT_CULLING`).
+  and the `TOON_DOUBLE_SIDED` def, which flips the normal of a back face
+  (winding-corrected for mirrored meshes) — for probe lighting and for the
+  edge detector alike. Single-sided → back faces culled.
 
 | Binding | What |
 |---------|------|
@@ -189,8 +190,8 @@ terrain goes through our own scene pass since 2026-11-07
 (`src/game/gfx/scene_pass/`, `docs/SCENE_PASS_PLAN.md` Phase 1), and so does
 `ToonMaterial` (Phase 3: vertex `scene/toon_vertex.wesl`, skinning from bevy's
 `SkinUniforms` buffer bound at group 0 binding 2). Terrain's stages: vertex
-`scene/terrain_vertex.wesl`, prepass fragment `scene/terrain_prepass.wesl`,
-colour fragment `terrain_toon.wesl`. Both materials are bind group **1**, not 3.
+`scene/terrain_vertex.wesl`, fragment `terrain_toon.wesl` (colour + the
+normal target). Both materials are bind group **1**, not 3.
 
 | Binding | What |
 |---------|------|
@@ -547,14 +548,12 @@ All are WESL except the compute bake.
 | File | Stage | Used by | Tested by |
 |------|-------|---------|-----------|
 | `scene/mesh_io.wesl` | module | scene-pass varyings (toon + sky) | `shader_check` (via its importers) |
-| `scene/mesh_vertex.wesl` | vertex | `ToonMaterial` + `SkyDomeMaterial`, both passes, `SKINNED` variant | `shader_check` (every variant) |
-| `toon_lighting.wesl` | fragment | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block); `shader_check` (every variant) |
-| `toon_prepass.wesl` | prepass fragment | `ToonMaterial` | `shader_check`; `both_passes_flip_normals_the_same_way` |
+| `scene/mesh_vertex.wesl` | vertex | `ToonMaterial`, `SkyDomeMaterial`, `UnlitMaterial`; `SKINNED` variant | `shader_check` (every variant) |
+| `toon_lighting.wesl` | fragment (colour + normal target) | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block); `the_normal_target_gets_the_facing_normal`; `shader_check` (every variant, with and without `SCENE_NORMAL_TARGET`) |
 | `scene/bindings.wesl` | module | scene pass (view + instance bind group) | `shader_check` (via its importers) |
 | `scene/terrain_io.wesl` | module | terrain vertex/fragment varyings | `shader_check` (via its importers) |
-| `scene/terrain_vertex.wesl` | vertex | `TerrainMaterial`, both passes | `shader_check` |
-| `scene/terrain_prepass.wesl` | prepass fragment | `TerrainMaterial` | `shader_check` |
-| `terrain_toon.wesl` | fragment | `TerrainMaterial` | `toon_curve_matches_the_shaders`; `shader_check` |
+| `scene/terrain_vertex.wesl` | vertex | `TerrainMaterial` | `shader_check` |
+| `terrain_toon.wesl` | fragment (colour + normal target) | `TerrainMaterial` | `toon_curve_matches_the_shaders`; `shader_check` |
 | `sky_dome.wesl` | fragment | `SkyDomeMaterial` (scene pass, background layer) | `shader_check` |
 | `edge_detection_post.wesl` | fragment (Bevy fullscreen vertex) | `EdgeDetectionPlugin` | naga validation via import substitution; uniform size; plane/step geometry (`post_process.rs` tests) |
 | `lightmap_bake.wgsl` | compute 16×16 | GPU terrain bake | naga validation, uniform size, f16 packing (`gpu.rs` tests) |

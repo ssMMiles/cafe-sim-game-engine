@@ -418,6 +418,9 @@ fn prepare_gizmo_draws(
         let view = SceneViewKey {
             msaa_samples: msaa.samples(),
             target_format: target.main_texture_format(),
+            // The gizmo pass binds the colour target alone (`gizmo_pass`);
+            // lines never write the edge detector's normals.
+            normal_target: false,
         };
         let view_layers = view_layers.cloned().unwrap_or_default();
         let mut list_for_view = Vec::new();

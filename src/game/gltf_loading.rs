@@ -228,7 +228,19 @@ fn convert_to_toon(
             let build = |toon_materials: &mut Assets<ToonMaterial>| {
                 let toon = match standard {
                     Some((_, standard)) => template.clone().with_surface_of(standard),
-                    None => template.clone(),
+                    // No glTF surface to copy: the mesh had no material, or
+                    // its `StandardMaterial` asset isn't in `Assets` (never
+                    // loaded, or already dropped). The result is the bare
+                    // template — flat white — so say so once rather than
+                    // leave a white object as the only clue.
+                    None => {
+                        bevy::log::warn_once!(
+                            "mesh {entity} has no readable glTF material (component present: {}); \
+                             converting to a plain white toon material",
+                            maybe_mat.is_some()
+                        );
+                        template.clone()
+                    }
                 };
                 toon_materials.add(toon)
             };

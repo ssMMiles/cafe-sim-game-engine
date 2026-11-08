@@ -21,6 +21,7 @@
 use std::{hash::Hash, marker::PhantomData};
 
 use bevy::{
+    core_pipeline::prepass::NormalPrepass,
     ecs::system::{SystemParamItem, lifetimeless::SRes},
     log::error_once,
     prelude::*,
@@ -47,7 +48,7 @@ use bevy::platform::collections::HashMap;
 
 use super::{
     SceneDraw, SceneDraws, SceneInstance, SceneInstances, SceneLayer, SceneQueue,
-    pipeline::{ScenePassKind, SceneViewKey},
+    pipeline::SceneViewKey,
 };
 
 /// A material type the scene pass draws: bevy's `Material` bound (for the
@@ -56,7 +57,7 @@ use super::{
 pub trait SceneMaterial: Material + AsBindGroup<Data: Clone + Hash + Eq + Send + Sync> {
     type Pipeline: ScenePipeline<Self>;
     /// Where in the frame this material's geometry is drawn, and whether it
-    /// has a prepass variant at all. Almost everything is [`SceneLayer::Opaque`].
+    /// writes the normal target. Almost everything is [`SceneLayer::Opaque`].
     const LAYER: SceneLayer = SceneLayer::Opaque;
 }
 
@@ -66,7 +67,7 @@ pub trait SceneMaterial: Material + AsBindGroup<Data: Clone + Hash + Eq + Send +
 pub trait ScenePipeline<M: AsBindGroup>:
     SpecializedMeshPipeline<Key: Send + Sync + 'static> + FromWorld + Resource
 {
-    fn key(view: SceneViewKey, pass: ScenePassKind, material: &M::Data) -> Self::Key;
+    fn key(view: SceneViewKey, material: &M::Data) -> Self::Key;
 }
 
 pub struct SceneMaterialPlugin<M>(PhantomData<fn() -> M>);
@@ -244,6 +245,11 @@ fn extract_instances<M: SceneMaterial>(
 /// material and one mesh is a single instanced draw; a lightmapped object owns
 /// its material and is a run of one, as is every terrain chunk.
 ///
+/// `Has<NormalPrepass>` is bevy's own marker on the render view
+/// (`extract_camera_prepass_phase` copies it from the camera), and the same
+/// condition `prepare_prepass_textures` creates the normal texture on — so a
+/// pipeline specialized with a normal target always meets an attachment.
+///
 /// Skinning: an entity `skin::extract_skins` uploaded joints for (it runs in
 /// the same `ExtractSchedule`) gets their offset in the joint buffer as its
 /// `skin_index`, which the `SKINNED` vertex variant indexes bind group 0's
@@ -266,6 +272,7 @@ fn queue_draws<M: SceneMaterial>(
             &RenderVisibleEntities,
             &Msaa,
             &ViewTarget,
+            Has<NormalPrepass>,
         ),
         With<Camera3d>,
     >,
@@ -274,7 +281,7 @@ fn queue_draws<M: SceneMaterial>(
         return;
     }
 
-    for (view_entity, view, visible, msaa, target) in &views {
+    for (view_entity, view, visible, msaa, target, normal_target) in &views {
         let view_position = view.world_from_view.translation();
         let Some(class) = visible.get::<Mesh3d>() else {
             continue;
@@ -282,6 +289,7 @@ fn queue_draws<M: SceneMaterial>(
         let view_key = SceneViewKey {
             msaa_samples: msaa.samples(),
             target_format: target.main_texture_format(),
+            normal_target,
         };
 
         // Sort so equal (material, mesh) pairs are adjacent; the run-length
@@ -312,21 +320,12 @@ fn queue_draws<M: SceneMaterial>(
                 continue;
             };
 
-            let mut specialize = |pass| {
-                pipelines.specialize(
-                    &pipeline_cache,
-                    &pipeline,
-                    M::Pipeline::key(view_key, pass, &material.key),
-                    &render_mesh.layout,
-                )
-            };
-            let colour = specialize(ScenePassKind::Colour);
-            // A background material has no prepass variant at all: see
-            // `SceneLayer::Background`.
-            let prepass = (M::LAYER == SceneLayer::Opaque)
-                .then(|| specialize(ScenePassKind::Prepass))
-                .transpose();
-            let (Ok(colour_pipeline), Ok(prepass_pipeline)) = (colour, prepass) else {
+            let Ok(pipeline_id) = pipelines.specialize(
+                &pipeline_cache,
+                &pipeline,
+                M::Pipeline::key(view_key, &material.key),
+                &render_mesh.layout,
+            ) else {
                 // A mesh missing an attribute the pipeline binds (a toon mesh
                 // with no normals, say). Bevy would have skipped it silently.
                 error_once!(
@@ -349,8 +348,7 @@ fn queue_draws<M: SceneMaterial>(
                 mesh: head.mesh,
                 material: material.bind_group.clone(),
                 layer: M::LAYER,
-                colour_pipeline,
-                prepass_pipeline,
+                pipeline: pipeline_id,
                 instances: start..instances.0.len() as u32,
                 distance,
             });

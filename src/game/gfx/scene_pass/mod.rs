@@ -4,12 +4,12 @@
 //! (Phase 3) — draw through here, not through bevy_pbr's `MaterialPlugin`.
 //! Everything bevy_pbr did for them — extract, specialize, queue, bin, batch,
 //! GPU-preprocess, build the `mesh_view` bind group — happens here instead, in
-//! a handful of systems and two render passes. What still goes through
-//! bevy_pbr: the sky dome (Phase 4), the `StandardMaterial` stragglers (ghosts,
-//! blob shadows, brush disc, thumbnails) and skinning's joint-matrix upload,
-//! which we bind rather than port. A material type migrates wholesale or not
-//! at all: bevy has no per-entity opt-out of a registered `MaterialPlugin`, so
-//! an entity reachable by both paths would be drawn twice.
+//! a handful of systems and one render pass. The sky dome (Phase 4), the
+//! translucent overlays (`UnlitMaterial`, Phase 5) and skinning (`skin.rs`)
+//! are ours too; nothing of ours is drawn by bevy_pbr, which is not even
+//! loaded (`lib.rs`). A material type migrates wholesale or not at all: bevy
+//! has no per-entity opt-out of a registered `MaterialPlugin`, so an entity
+//! reachable by both paths would be drawn twice.
 //!
 //! The dataflow, all in the render world, generic over the material type `M`
 //! (`material.rs`):
@@ -21,35 +21,41 @@
 //!    view's `RenderVisibleEntities` (so render layers and frustum culling are
 //!    bevy's, and the thumbnail rig on layer 7 sees none of it), appends to
 //!    the frame's instance list grouped by `(material, mesh)`, specializes the
-//!    colour and prepass pipelines (`pipeline.rs`), and appends to the view's
-//!    entry in [`SceneDraws`].
+//!    pipeline (`pipeline.rs`), and appends to the view's entry in
+//!    [`SceneDraws`].
 //! 3. [`prepare_scene_instances`] (`PrepareResources`) uploads the instance
 //!    list and the per-scene uniform ([`SceneUniform`]: sun, toon curve, probe
 //!    lattice — extracted from the main world's `ToonLook`);
 //!    [`prepare_scene_bind_group`] (`PrepareBindGroups`) builds bind group 0
 //!    from both plus bevy's own view uniform and joint-matrix buffer.
-//! 4. [`pass::scene_prepass`] and [`pass::scene_opaque`] draw it, as plain
-//!    `Core3d` systems — the same extension mechanism `post_process.rs` and
-//!    `atmosphere.rs` already use.
+//! 4. [`pass::scene_pass`] draws it, as a plain `Core3d` system — the same
+//!    extension mechanism `post_process.rs` and `atmosphere.rs` already use.
+//!    One pass: colour, depth, and world normals into
+//!    `ViewPrepassTextures.normal` as a second colour target for the edge
+//!    detector. There used to be a separate normal prepass; it was folded in
+//!    on 2026-11-08 because it rasterised the whole scene twice (`pass.rs`).
 //!
 //! **Clear ownership.** Bevy's `early_prepass` and `main_opaque_pass_3d` still
 //! run (they key off the *existence* of the view's binned phases, which
-//! bevy_core_pipeline creates, not off those phases having items), so the
-//! stragglers still draw and `early_prepass` still copies the depth buffer
-//! into `ViewPrepassTextures.depth` at its end. Both attachments clear on
-//! first use within the frame (`ColorAttachment`/`DepthAttachment` track that
-//! with an atomic), so ours runs *before* bevy's in each case: we clear, bevy
-//! loads, and the depth copy sees our geometry.
+//! bevy_core_pipeline creates, not off those phases having items), and
+//! `early_prepass` still copies the depth buffer into
+//! `ViewPrepassTextures.depth` at its end. Every attachment clears on first
+//! use within the frame (`ColorAttachment`/`DepthAttachment` track that with
+//! an atomic), so ours runs *before* bevy's prepass: we clear, bevy loads, and
+//! the depth copy sees our geometry.
 
 use bevy::{
     core_pipeline::{
-        Core3d, Core3dSystems, core_3d::main_opaque_pass_3d, prepass::node::early_prepass,
+        Core3d, Core3dSystems,
+        core_3d::{AlphaMask3d, Opaque3d, Transparent3d},
+        prepass::{AlphaMask3dPrepass, Opaque3dPrepass, node::early_prepass},
     },
     ecs::entity::EntityHashMap,
     prelude::*,
     render::{
         ExtractSchedule, Render, RenderApp, RenderSystems,
         extract_resource::ExtractResourcePlugin,
+        render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases},
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             BufferUsages, BufferVec, CachedRenderPipelineId, PipelineCache, ShaderStages,
@@ -59,6 +65,7 @@ use bevy::{
             },
         },
         renderer::{RenderDevice, RenderQueue},
+        view::ExtractedView,
         view::{ViewUniform, ViewUniforms},
     },
 };
@@ -220,24 +227,23 @@ pub struct SceneUniformBuffer(pub UniformBuffer<SceneUniform>);
 /// two consts that could be set inconsistently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SceneLayer {
-    /// Solid geometry: writes depth, and has a prepass variant so the edge
+    /// Solid geometry: writes depth and the normal target, so the edge
     /// detector and the atmosphere can see it. Drawn first.
     Opaque,
     /// Background: no depth *write* (it still tests, so the finished depth
-    /// buffer rejects whatever is in front of it) and **no prepass variant at
-    /// all**. Drawn after the opaque layer.
+    /// buffer rejects whatever is in front of it) and **no normal write**.
+    /// Drawn after the opaque layer.
     ///
-    /// Leaving it out of the prepass is not an optimisation, it is the
-    /// contract the atmosphere pass relies on: fog and god rays reconstruct
-    /// world position from prepass depth, and a sky that wrote depth would be
-    /// fogged as if it were a surface a few hundred metres away
-    /// (`docs/ATMOSPHERE.md`).
+    /// Keeping it out of depth is not an optimisation, it is the contract the
+    /// atmosphere pass relies on: fog and god rays reconstruct world position
+    /// from prepass depth, and a sky that wrote depth would be fogged as if
+    /// it were a surface a few hundred metres away (`docs/ATMOSPHERE.md`).
     Background,
     /// Translucent overlays (`UnlitMaterial`: the placement ghost, the brush
     /// disc, blob shadows): alpha-blended over the finished image, depth-tested
-    /// but not depth-writing, no prepass variant, drawn last and back to
-    /// front. Also not in the prepass, for a different reason than the sky:
-    /// a blob shadow in the depth buffer would get its own outline.
+    /// but not depth-writing, no normal write, drawn last and back to front.
+    /// Kept out of depth and normals for a different reason than the sky: a
+    /// blob shadow in either would get its own outline.
     Transparent,
 }
 
@@ -251,9 +257,7 @@ pub struct SceneDraw {
     pub mesh: AssetId<Mesh>,
     pub material: BindGroup,
     pub layer: SceneLayer,
-    pub colour_pipeline: CachedRenderPipelineId,
-    /// `None` for the layers the prepass skips (everything but `Opaque`).
-    pub prepass_pipeline: Option<CachedRenderPipelineId>,
+    pub pipeline: CachedRenderPipelineId,
     pub instances: std::ops::Range<u32>,
     /// Farthest instance of the run from the view, for ordering the
     /// transparent layer back to front. Unused by the other layers.
@@ -320,21 +324,17 @@ impl Plugin for ScenePassPlugin {
                         .after(SceneQueue),
                     (prepare_scene_instances, skin::prepare_skins)
                         .in_set(RenderSystems::PrepareResources),
-                    prepare_scene_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    (prepare_scene_bind_group, suppress_bevy_core3d_phases)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
                 Core3d,
-                (
-                    // Before bevy's, so we clear the attachments and its depth
-                    // copy into `ViewPrepassTextures` includes our geometry.
-                    pass::scene_prepass
-                        .in_set(Core3dSystems::Prepass)
-                        .before(early_prepass),
-                    pass::scene_opaque
-                        .in_set(Core3dSystems::MainPass)
-                        .before(main_opaque_pass_3d),
-                ),
+                // Before bevy's prepass, so we clear the attachments and its
+                // depth copy into `ViewPrepassTextures` includes our geometry.
+                pass::scene_pass
+                    .in_set(Core3dSystems::Prepass)
+                    .before(early_prepass),
             );
     }
 }
@@ -359,6 +359,54 @@ fn scene_bind_group_layout() -> SceneBindGroupLayout {
     ))
 }
 
+/// Drop the bevy_core_pipeline phase entries of every view the scene pass
+/// draws, so bevy's own passes become true no-ops for it.
+///
+/// With bevy_pbr gone nothing ever queues into the 3D phases, yet
+/// `early_prepass` and `main_opaque_pass_3d` still *began* a render pass per
+/// frame — their `is_empty` checks only guard the draw calls, and the early
+/// return is on the view's phase entry being **absent** — which on a 4×-MSAA
+/// 1920×1080 HDR target is two more full load+stores of every attachment for
+/// nothing. Removing the entries takes that early return.
+///
+/// The timing is load-bearing twice over:
+/// - **After `PrepareResources`** (this runs in `PrepareBindGroups`), because
+///   `prepare_prepass_textures` keys the creation of `ViewPrepassTextures`
+///   on these same phase maps — remove earlier and the normal target and the
+///   depth-copy destination never exist. `prepare_core_3d_depth_textures`
+///   reads cameras directly and doesn't care.
+/// - **Before `RenderGraphSystems::Render`**, where the camera driver runs
+///   the `Core3d` schedule that reads them.
+///
+/// Only views the scene pass actually draws ([`SceneDraws`] entries are only
+/// created non-empty): for those we own the attachment clears and `scene_pass`
+/// makes the `ViewPrepassTextures.depth` copy bevy's prepass used to make
+/// (suppressed along with the pass — see `pass.rs`). A 3D view with nothing
+/// of ours in it (a thumbnail rig whose subject is still loading) keeps its
+/// phases, so bevy's opaque pass still clears its target to the camera's
+/// background colour.
+fn suppress_bevy_core3d_phases(
+    draws: Res<SceneDraws>,
+    views: Query<&ExtractedView, With<Camera3d>>,
+    mut opaque_prepass: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
+    mut alpha_mask_prepass: ResMut<ViewBinnedRenderPhases<AlphaMask3dPrepass>>,
+    mut opaque: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
+    mut alpha_mask: ResMut<ViewBinnedRenderPhases<AlphaMask3d>>,
+    mut transparent: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+) {
+    for view_entity in draws.0.keys() {
+        let Ok(view) = views.get(*view_entity) else {
+            continue;
+        };
+        let retained = &view.retained_view_entity;
+        opaque_prepass.remove(retained);
+        alpha_mask_prepass.remove(retained);
+        opaque.remove(retained);
+        alpha_mask.remove(retained);
+        transparent.remove(retained);
+    }
+}
+
 /// Start the frame's instance list and draw lists empty; the [`SceneQueue`]
 /// systems refill them straight after.
 fn clear_scene_draws(mut instances: ResMut<SceneInstances>, mut draws: ResMut<SceneDraws>) {
@@ -370,11 +418,15 @@ fn clear_scene_draws(mut instances: ResMut<SceneInstances>, mut draws: ResMut<Sc
 /// the transparent layer back to front within itself.
 ///
 /// For the opaque and background layers this is about overdraw, not
-/// correctness: the prepass has already settled depth by the time the opaque
-/// pass runs, so a sky submitted first would be depth-rejected behind terrain
-/// anyway — but it would be rejected *after* being shaded, and the dome covers
-/// the whole screen. For the transparent layer it *is* correctness: blending
-/// is order-dependent, so a ghost behind a blob shadow has to be drawn first.
+/// correctness: depth testing settles what is visible whatever the order, but
+/// a sky dome submitted before the terrain would be shaded over the whole
+/// screen and then overwritten; last, it is depth-rejected before shading.
+/// (Within the opaque layer nothing is distance-sorted. A tile-based GPU —
+/// every Apple GPU, most phones — resolves visibility before shading anyway;
+/// on a desktop GPU front-to-back would save fragment work, which is what the
+/// separate prepass used to buy and the reason it was worth folding away
+/// here.) For the transparent layer it *is* correctness: blending is
+/// order-dependent, so a ghost behind a blob shadow has to be drawn first.
 /// The distance is per draw (a `(material, mesh)` run), not per instance, so
 /// two translucent things sharing a material and a mesh are ordered as a
 /// group; with a handful of overlays that never interleave, that is the right

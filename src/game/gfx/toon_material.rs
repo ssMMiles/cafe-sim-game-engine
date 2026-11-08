@@ -78,7 +78,6 @@ mod tests {
 
     const OBJECT_SHADER: &str = include_str!("../../../assets/shaders/toon_lighting.wesl");
     const TERRAIN_SHADER: &str = include_str!("../../../assets/shaders/terrain_toon.wesl");
-    const PREPASS_SHADER: &str = include_str!("../../../assets/shaders/toon_prepass.wesl");
 
     /// `fn facing_normal` through its closing brace.
     fn facing_normal(src: &str) -> Option<&str> {
@@ -87,18 +86,18 @@ mod tests {
         Some(&src[start..end])
     }
 
-    /// The colour pass and the normal prepass each flip a double-sided back
-    /// face's normal, with their own copy of the function. If they disagree,
-    /// probe lighting and outlines describe different surfaces.
+    /// Probe lighting and the edge detector's normal target must describe the
+    /// same surface: both come from `facing_normal`, which flips a
+    /// double-sided back face towards the viewer. (They used to be two copies
+    /// of the function in two shaders; since the prepass was folded into the
+    /// colour pass there is one, and what the test guards is that the normal
+    /// output is fed from it rather than from the raw vertex normal.)
     #[test]
-    fn both_passes_flip_normals_the_same_way() {
-        let colour = facing_normal(OBJECT_SHADER).expect("toon_lighting.wesl has facing_normal");
-        let prepass = facing_normal(PREPASS_SHADER).expect("toon_prepass.wesl has facing_normal");
-        assert_eq!(
-            colour, prepass,
-            "facing_normal has drifted between the passes"
-        );
-        assert!(colour.contains(&format!("@if({})", engine_api::TOON_DOUBLE_SIDED_DEF)));
+    fn the_normal_target_gets_the_facing_normal() {
+        let flip = facing_normal(OBJECT_SHADER).expect("toon_lighting.wesl has facing_normal");
+        assert!(flip.contains(&format!("@if({})", engine_api::TOON_DOUBLE_SIDED_DEF)));
+        assert!(OBJECT_SHADER.contains("let facing = facing_normal("));
+        assert!(OBJECT_SHADER.contains("out.normal = vec4<f32>(facing * 0.5"));
     }
 
     const BEGIN: &str = "// ─── TOON CURVE";

@@ -306,3 +306,23 @@ plugins, the prepass material systems and previous-frame transforms. What
 stays: `bevy_light`'s `LightPlugin` (main-world, added separately by
 `DefaultPlugins`; inert with no light components), `bevy_gizmos::GizmoPlugin`
 (main world — the `Gizmos` API, config store, `GizmoAsset` building).
+
+**Phase 6 — fold the prepass into the colour pass.** *Done (2026-11-08),
+unmeasured (`SCENE_PASS_BASELINE.md` §3.7).* Prompted by the Phase 5
+measurement: with the CPU cost gone the gameplay frame still floored at
+~7.3 ms with the render thread idle in the swapchain acquire — faster than
+the ProMotion panel's refresh, so GPU-bound. The two passes rasterised every
+chunk and object twice; on a tile-based GPU the colour pass already shades
+nothing hidden, so the prepass bought only what it wrote. Now `scene_pass`
+(in `Core3dSystems::Prepass`, before bevy's `early_prepass`, which still
+copies depth for the post passes) writes colour, depth and
+`ViewPrepassTextures.normal` as a second colour target; `toon_prepass.wesl`
+and `terrain_prepass.wesl` are gone and the colour fragments write
+`@location(1) normal`. The sky and transparent layers keep the output and
+get `ColorWrites::empty()` on that target. Views without a `NormalPrepass`
+(the thumbnail rigs) have no normal texture, so `SceneViewKey.normal_target`
+(bevy's `Has<NormalPrepass>` on the render view) drops the target and sets
+`SCENE_NORMAL_TARGET`, under which the shaders drop the output — wgpu merely
+logs an unmatched output, WebGPU rejects it. Known trade: on a desktop GPU
+the prepass was also early-Z against overdraw, and opaque draws are not
+distance-sorted (`order_scene_draws`).

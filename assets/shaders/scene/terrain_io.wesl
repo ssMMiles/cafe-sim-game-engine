@@ -6,9 +6,6 @@
 // three attributes and interpolates three varyings, and both fragment shaders
 // are ours, so the struct is written out rather than configured.
 //
-// The colour and prepass fragments take the *same* struct: a fragment entry
-// point may read a subset of the vertex stage's locations, so one vertex
-// shader serves both passes.
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -19,15 +16,15 @@ struct VertexOutput {
     @location(2) uv_b: vec2<f32>,
 }
 
-// The colour pass writes the view's HDR target.
+// The scene pass writes the view's HDR target and, as a second colour
+// target, `ViewPrepassTextures.normal` — the world normal the edge detector
+// reads, packed `n * 0.5 + 0.5` into `Rgb10a2Unorm` (the reader normalises).
+// See mesh_io.wesl.
+// `SCENE_NORMAL_TARGET` is set by the pipeline for views that have a normal
+// prepass texture (the 3D camera); the thumbnail rigs have none, and their
+// variant has a single colour target and no second output.
 struct FragmentOutput {
     @location(0) color: vec4<f32>,
-}
-
-// The prepass writes `ViewPrepassTextures.normal`; depth needs no fragment
-// work. Attachment 0 is the normal target — the layout
-// `bevy_core_pipeline::prepass::prepass_target_descriptors` fixes, which the
-// pass systems in scene_pass/pass.rs reproduce.
-struct PrepassOutput {
-    @location(0) normal: vec4<f32>,
+    @if(SCENE_NORMAL_TARGET)
+    @location(1) normal: vec4<f32>,
 }

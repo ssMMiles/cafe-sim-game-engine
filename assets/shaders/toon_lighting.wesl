@@ -329,8 +329,8 @@ fn toon_shade(radiance: vec3<f32>, curve: vec4<f32>) -> vec3<f32> {
 // The shading normal. A double-sided material's back faces are seen from
 // behind, so their normal is flipped towards the viewer; a mirrored mesh
 // (negative determinant) has its winding — and so `is_front` — reversed.
-// `toon_prepass.wesl` holds the same function for the normal prepass; keep
-// the two in step.
+// The same normal goes to the edge detector's normal target below, so
+// probe lighting and outlines always describe the same surface.
 fn facing_normal(world_normal: vec3<f32>, is_front: bool, instance_index: u32) -> vec3<f32> {
     let front = is_front == scene_instance_winds_forward(instance_index);
 @if(TOON_DOUBLE_SIDED)
@@ -354,10 +354,10 @@ fn fragment(
     // meshes that have no lightmap UVs at all. Both branches test the
     // uniform directly, so the samples inside sit in uniform control flow
     // (WebGPU/Tint requires it for `textureSample`).
+    let facing = facing_normal(in.world_normal, is_front, in.instance_index);
     var radiance = vec3<f32>(1.0);
     if (toon.unlit == 0u && toon.source == 2u) {
-        let n = normalize(facing_normal(in.world_normal, is_front, in.instance_index));
-        radiance = probe_radiance(in.world_position.xyz, n);
+        radiance = probe_radiance(in.world_position.xyz, normalize(facing));
     }
     if (toon.unlit == 0u && toon.source == 1u) {
 @if(VERTEX_UVS_B)
@@ -366,5 +366,10 @@ fn fragment(
 
     var out: FragmentOutput;
     out.color = vec4<f32>(base_color.rgb * toon_shade(radiance, scene.curve), base_color.a);
+    // The edge detector's normal target (docs/EDGE_DETECTION.md). Without the
+    // flip every leaf and thin double-sided part would show its back with an
+    // inverted normal: spurious crease outlines wherever the two sides meet.
+@if(SCENE_NORMAL_TARGET)
+    out.normal = vec4<f32>(facing * 0.5 + vec3<f32>(0.5), 1.0);
     return out;
 }

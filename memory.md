@@ -1675,3 +1675,65 @@ What Phase 5b had to replace and why:
   (bevy_render), bevy_egui (bevy_pbr is only a dev-dep there), avian (gizmos only).
 - `UniformComponentPlugin<C>` works for render-world-spawned components (that is how bevy_gizmos_render
   used it); bevy's tuple `IntoScheduleConfigs` stops at 20 systems — nest.
+
+## Frame pacing after Phase 5; the prepass folded into the colour pass — 8 November 2026
+
+Six gameplay snapshots on `f6fbe43` vs two on `bc2b5fe`: render busy 7.3 → 3.0 ms, main 6.4 → 4.2,
+frame 8.75 → 7.3, and the acquire wait went 0.13 → 1–4 ms. **The wait is idle, not work**: the
+render thread now reaches `get_current_texture` long before a drawable is free. Two reading traps:
+`prepare_windows`' self-time row *contains* the acquire wait (the `frame_pacing` brackets sit around
+it), so it is counted in both the header and the table and inflates "system work" by ~3 ms; and no
+CPU row can show what paces a 7.3 ms frame when main is 4.2 and render busy 3.0.
+
+What paces it (from evidence I could get without running the app): machine is an **M1 Pro, built-in
+ProMotion panel (max 120 Hz = 8.33 ms)**, vsync off (`editor_settings.json`), and wgpu-hal 30
+honours Immediate on Metal via `displaySyncEnabled = false` — so a 7.3 ms floor is *faster than any
+refresh pacing could give*, which leaves the GPU. The editor shows no wait only because its main
+thread (~7.6 ms, `editor_ui`) is the long pole there; the A/B bench can't see GPU cost unless the
+frame is GPU-bound *and* the effect is a big share of it. GPU suspects, verified in source:
+the camera has **no `Msaa` component → bevy's default `Sample4`** on a 1920×1080 HDR target
+(post_process.rs/atmosphere.rs bind the prepass textures as `*_multisampled`); bevy's
+`ColorAttachment::get_attachment` always `Store`s the multisampled texture as well as resolving;
+and bevy's `early_prepass` / `main_opaque_pass_3d` **begin a render pass even with empty phases**
+(their `is_empty` checks only guard the draw calls), i.e. a full load+store of every MSAA
+attachment twice more per frame. `main_transparent_pass_3d` does skip when empty.
+
+**Folded the prepass** (user's call): `scene_pass` draws colour + depth + `ViewPrepassTextures.normal`
+as colour target 1 (`NORMAL_PREPASS_FORMAT`), in `Core3dSystems::Prepass` `.before(early_prepass)` so
+bevy's depth copy still sees our geometry; `toon_prepass.wesl` / `terrain_prepass.wesl` deleted,
+`FragmentOutput` gained `@location(1) normal`. Layers that must leave no normal (sky, transparent)
+keep the output but get `ColorWrites::empty()` on target 1. Views without `NormalPrepass` (both
+thumbnail rigs — plain `Camera3d::default()`) have no normal texture, so `SceneViewKey.normal_target`
+(from `Has<NormalPrepass>` on the render view — bevy's `extract_camera_prepass_phase` inserts the
+marker, and `prepare_prepass_textures` creates the texture on the same condition) drops target 1 and
+sets `SCENE_NORMAL_TARGET`, under which the shaders drop the output: wgpu itself only `log::debug`s an
+unmatched fragment output, but WebGPU/Dawn wants outputs and targets to agree. `shader_check` now
+toggles that def for every scene fragment shader. Trade-off noted in `order_scene_draws`: on a
+desktop (IMR) GPU the prepass bought early-Z against overdraw; opaque draws are not distance-sorted.
+Unmeasured — `SCENE_PASS_BASELINE.md` §3.7 says what to look at (frame floor + wait, not the table).
+
+## Bevy's empty 3D passes suppressed; the frame floor is not our geometry — 8 November 2026
+
+Post-fold snapshots (four clean ones on `f6fbe43` + the folded build): render busy 3.0 → 2.8,
+frame **unchanged** (7.7–8.1), wait up to ~4.3. Removing GPU work converted 1:1 into acquire wait →
+the pacer is not our geometry pass; compositor pacing vs fixed GPU work (post passes / MSAA
+traffic / egui) is still undecided, and only a Metal System Trace can split them (per-encoder GPU
+track + display track; `xcrun xctrace record --template 'Metal System Trace' --attach game_engine`,
+then `xctrace export` to XML for analysis). MSAA stays ON for now — it is the only geometry AA
+(4×, bevy's default, the camera sets none; FXAA alone is weaker) and the user doesn't want the look
+changed blind.
+
+`suppress_bevy_core3d_phases` (scene_pass/mod.rs): for every view in `SceneDraws` (entries only
+exist non-empty), remove its `retained_view_entity` from the five 3D phase maps
+(Opaque3dPrepass/AlphaMask3dPrepass/Opaque3d/AlphaMask3d binned + Transparent3d sorted). Verified in
+bevy 0.20 source: the pass systems early-return on the entry being *absent* — before
+`begin_tracked_render_pass` — while `is_empty` only guards draws, so an empty pass still cost a full
+MSAA load+store+resolve ×2. Ordering is load-bearing: must run **after** `PrepareResources`
+(`prepare_prepass_textures` keys `ViewPrepassTextures` creation on those same maps;
+`prepare_core_3d_depth_textures` reads cameras directly) and **before** the camera driver
+(`RenderGraphSystems::Render`) — it sits in `PrepareBindGroups`. The absent-phase return also skips
+bevy's depth copy (same function, after its pass), so `scene_pass` now does the
+`copy_texture_to_texture` into `ViewPrepassTextures.depth` itself after its render pass. Views
+without scene draws keep their phases so bevy's opaque pass still clears them — that is what paints
+a thumbnail rig's background while the subject loads (black-until-drawn would fool the readback's
+non-background test and cache empty thumbnails).

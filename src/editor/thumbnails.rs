@@ -504,7 +504,7 @@ pub fn reset_thumbnail_rig(mut commands: Commands, rig: Option<Res<ThumbnailRig>
 /// [`drive_thumbnails`] only runs in the editor, so without this a job caught
 /// mid-flight by F1 froze with its camera *active* — and an active `Camera3d`
 /// renders every frame whether or not anything changes. Measured 2026-11-08:
-/// every per-view render system (`scene_prepass`, `main_opaque_pass_3d`,
+/// every per-view render system (`scene_pass`, `main_opaque_pass_3d`,
 /// `cluster_on_gpu`, …) at exactly 2 runs per frame throughout a gameplay
 /// session, i.e. a second full 3D view into a 128 px texture, for nothing.
 /// The dropped job's key is un-requested so the panel asks again when the

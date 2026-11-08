@@ -28,12 +28,10 @@ use wesl::{
 };
 
 const TOON: &str = include_str!("../../../assets/shaders/toon_lighting.wesl");
-const TOON_PREPASS: &str = include_str!("../../../assets/shaders/toon_prepass.wesl");
 const TERRAIN: &str = include_str!("../../../assets/shaders/terrain_toon.wesl");
 const SCENE_BINDINGS: &str = include_str!("../../../assets/shaders/scene/bindings.wesl");
 const TERRAIN_IO: &str = include_str!("../../../assets/shaders/scene/terrain_io.wesl");
 const TERRAIN_VERTEX: &str = include_str!("../../../assets/shaders/scene/terrain_vertex.wesl");
-const TERRAIN_PREPASS: &str = include_str!("../../../assets/shaders/scene/terrain_prepass.wesl");
 const MESH_IO: &str = include_str!("../../../assets/shaders/scene/mesh_io.wesl");
 const MESH_VERTEX: &str = include_str!("../../../assets/shaders/scene/mesh_vertex.wesl");
 const SKY: &str = include_str!("../../../assets/shaders/sky_dome.wesl");
@@ -75,12 +73,10 @@ impl Resolver for Stubs {
     fn resolve_source<'a>(&'a self, path: &ModulePath) -> Result<Cow<'a, str>, ResolveError> {
         let source = match path.to_string().as_str() {
             "package::shaders::toon_lighting" => TOON,
-            "package::shaders::toon_prepass" => TOON_PREPASS,
             "package::shaders::terrain_toon" => TERRAIN,
             "package::shaders::scene::bindings" => SCENE_BINDINGS,
             "package::shaders::scene::terrain_io" => TERRAIN_IO,
             "package::shaders::scene::terrain_vertex" => TERRAIN_VERTEX,
-            "package::shaders::scene::terrain_prepass" => TERRAIN_PREPASS,
             "package::shaders::scene::mesh_io" => MESH_IO,
             "package::shaders::scene::mesh_vertex" => MESH_VERTEX,
             "package::shaders::sky_dome" => SKY,
@@ -160,38 +156,40 @@ fn check_all(module: &str, always: &[&str], toggled: &[&str]) {
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
 
-/// The defs the toon pipeline sets from the mesh layout and the material key
-/// (`scene_pass::pipeline::ToonScenePipeline`). Every combination is a
-/// pipeline some mesh can ask for, so every combination has to compile.
+/// Set by the scene pipeline for a view that has a normal target (the 3D
+/// camera); off for the thumbnail rigs. Every fragment shader of the scene
+/// pass branches on it, so every one of them is checked both ways.
+const NORMAL_TARGET: &str = "SCENE_NORMAL_TARGET";
+
+/// The defs the toon pipeline sets from the mesh layout, the material key and
+/// the view (`scene_pass::pipeline::ToonScenePipeline`). Every combination is
+/// a pipeline some mesh can ask for, so every combination has to compile.
 const TOON_DEFS: &[&str] = &[
     "VERTEX_UVS_A",
     "VERTEX_UVS_B",
     "SKINNED",
     engine_api::TOON_DOUBLE_SIDED_DEF,
+    NORMAL_TARGET,
 ];
 
 #[test]
 fn toon_scene_pass_shaders_compile_for_every_variant() {
-    for module in [
-        "shaders::scene::mesh_vertex",
-        "shaders::toon_lighting",
-        "shaders::toon_prepass",
-    ] {
+    for module in ["shaders::scene::mesh_vertex", "shaders::toon_lighting"] {
         check_all(module, &[], TOON_DEFS);
     }
 }
 
 /// The sky dome shares `mesh_vertex` with the toon materials but sets no
-/// defs at all, and has no prepass variant (`SceneLayer::Background`).
+/// mesh defs at all (`SceneLayer::Background`).
 #[test]
-fn sky_dome_compiles() {
-    check_all("shaders::sky_dome", &[], &[]);
+fn sky_dome_compiles_for_every_variant() {
+    check_all("shaders::sky_dome", &[], &[NORMAL_TARGET]);
 }
 
 /// The translucent overlay material: textured or not.
 #[test]
 fn unlit_compiles_for_every_variant() {
-    check_all("shaders::unlit", &[], &["VERTEX_UVS_A"]);
+    check_all("shaders::unlit", &[], &["VERTEX_UVS_A", NORMAL_TARGET]);
 }
 
 /// bevy's line gizmo shader, copied into our tree and compiled against our
@@ -202,19 +200,14 @@ fn gizmo_lines_compile_for_every_variant() {
     check_all("shaders::gizmos::lines", &[], &["PERSPECTIVE"]);
 }
 
-/// Terrain's three stages, as the scene pass compiles them: one `const` def
-/// for the material bind group and nothing else. Every variant *is* the one
-/// variant — dropping bevy's mesh pipeline took the whole def matrix with it,
-/// which is half the point of owning the pass.
+/// Terrain's two stages, as the scene pass compiles them: one `const` def
+/// for the material bind group, the normal-target def, and nothing else —
+/// dropping bevy's mesh pipeline took the whole def matrix with it, which is
+/// half the point of owning the pass.
 #[test]
 fn terrain_scene_pass_shaders_compile() {
-    for module in [
-        "shaders::scene::terrain_vertex",
-        "shaders::scene::terrain_prepass",
-        "shaders::terrain_toon",
-    ] {
-        check_all(module, &[], &[]);
-    }
+    check_all("shaders::scene::terrain_vertex", &[], &[]);
+    check_all("shaders::terrain_toon", &[], &[NORMAL_TARGET]);
 }
 
 /// The harness itself: a shader that is wrong must fail, or the tests above

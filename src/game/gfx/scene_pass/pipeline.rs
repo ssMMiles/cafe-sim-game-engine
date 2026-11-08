@@ -1,20 +1,23 @@
 //! Pipelines for the scene pass: one specializer per material type, keyed on
-//! the pass it feeds, the view's MSAA and colour format, and whatever the
-//! material's own key adds (double-sidedness for toon). The mesh's vertex
+//! the view (MSAA, colour format, whether it has a normal target) and whatever
+//! the material's own key adds (double-sidedness for toon). The mesh's vertex
 //! layout is the other half of every key: `SpecializedMeshPipelines` (plain
 //! bevy_render, no bevy_pbr) caches on `(layout, key)` and hands the layout to
 //! `specialize`, which is where the vertex-buffer layout — and which `VERTEX_*`
 //! / `SKINNED` defs are set — comes from.
 //!
-//! The depth state, the prepass attachment list and the reverse-Z compare
-//! function all have to match bevy's, because bevy's own passes share the same
-//! textures for the stragglers: `CORE_3D_DEPTH_FORMAT`, `GreaterEqual`, and
-//! the four-slot prepass target list from `prepass_target_descriptors`
-//! (normal, motion vectors, deferred, deferred id) with only the first filled.
+//! One pass, two colour targets: the view's HDR target and, when the view has
+//! a `NormalPrepass`, bevy's `ViewPrepassTextures.normal` as target 1 — the
+//! world normal the edge detector reads. There is no separate prepass any
+//! more (folded 2026-11-08: the scene was being rasterised twice, and on a
+//! tile-based GPU the colour pass already shades nothing hidden). The depth
+//! state, the normal format and the reverse-Z compare function have to match
+//! bevy's, because bevy's own passes still open the same textures:
+//! `CORE_3D_DEPTH_FORMAT`, `NORMAL_PREPASS_FORMAT`, `GreaterEqual`.
 
 use bevy::{
     asset::AssetServer,
-    core_pipeline::{core_3d::CORE_3D_DEPTH_FORMAT, prepass::prepass_target_descriptors},
+    core_pipeline::{core_3d::CORE_3D_DEPTH_FORMAT, prepass::NORMAL_PREPASS_FORMAT},
     mesh::VertexBufferLayout,
     prelude::*,
     render::{
@@ -37,23 +40,21 @@ use super::{
     material::{MaterialLayout, ScenePipeline},
 };
 
-/// Which of the two passes a pipeline feeds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ScenePassKind {
-    /// Depth + the world-normal target the edge detector reads.
-    Prepass,
-    /// The view's HDR colour target.
-    Colour,
-}
-
 /// Everything about a *view* that changes a pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SceneViewKey {
     pub msaa_samples: u32,
-    /// The view target's colour format. Ignored by the prepass variant, whose
-    /// format is fixed by `prepass_target_descriptors`.
+    /// The view target's colour format.
     pub target_format: TextureFormat,
+    /// Whether the view has a `NormalPrepass`, and so a second colour target
+    /// to write world normals into. The 3D camera does; the thumbnail rigs
+    /// don't, and get a one-target variant (the shaders drop the output under
+    /// `SCENE_NORMAL_TARGET`, since WebGPU wants outputs and targets to agree).
+    pub normal_target: bool,
 }
+
+/// Shader def set on the pipelines of a view with a normal target.
+const SCENE_NORMAL_TARGET_DEF: &str = "SCENE_NORMAL_TARGET";
 
 /// Bind group 1 is the material's, so the fragment shaders' existing
 /// `@group(constants::MATERIAL_BIND_GROUP)` lines need no edit — bevy set the
@@ -65,36 +66,31 @@ struct SceneShaders {
     scene_layout: BindGroupLayoutDescriptor,
     material_layout: BindGroupLayoutDescriptor,
     vertex: Handle<Shader>,
-    colour: Handle<Shader>,
-    prepass: Handle<Shader>,
+    fragment: Handle<Shader>,
 }
 
 impl SceneShaders {
     fn load<M: bevy::render::render_resource::AsBindGroup + Asset>(
         world: &World,
         vertex: &'static str,
-        colour: &'static str,
-        prepass: &'static str,
+        fragment: &'static str,
     ) -> Self {
         let assets = world.resource::<AssetServer>();
         Self {
             scene_layout: world.resource::<SceneBindGroupLayout>().0.clone(),
             material_layout: world.resource::<MaterialLayout<M>>().0.clone(),
             vertex: assets.load(vertex),
-            colour: assets.load(colour),
-            prepass: assets.load(prepass),
+            fragment: assets.load(fragment),
         }
     }
 
     /// The whole descriptor given the per-material pieces: the vertex layout
     /// the mesh supports, the defs both stages share, the cull mode, and the
     /// layer (which decides depth *write* — a background material tests depth
-    /// but must not add to it).
-    #[expect(clippy::too_many_arguments, reason = "pipeline descriptor pieces")]
+    /// but must not add to it — and whether the normal target is written).
     fn descriptor(
         &self,
         label: &'static str,
-        pass: ScenePassKind,
         view: SceneViewKey,
         layer: SceneLayer,
         vertex_layout: VertexBufferLayout,
@@ -105,25 +101,30 @@ impl SceneShaders {
             "MATERIAL_BIND_GROUP".into(),
             MATERIAL_BIND_GROUP,
         ));
-        let (fragment_shader, targets) = match pass {
-            // Normal only. The list must stay four long and in this order:
-            // bevy's prepass node hands the render pass four attachment slots
-            // whenever a prepass runs at all.
-            ScenePassKind::Prepass => (
-                self.prepass.clone(),
-                prepass_target_descriptors(true, false, false),
-            ),
-            ScenePassKind::Colour => (
-                self.colour.clone(),
-                vec![Some(ColorTargetState {
-                    format: view.target_format,
-                    // Only the transparent layer blends; everything else
-                    // overwrites.
-                    blend: (layer == SceneLayer::Transparent).then_some(BlendState::ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-            ),
-        };
+        let mut targets = vec![Some(ColorTargetState {
+            format: view.target_format,
+            // Only the transparent layer blends; everything else overwrites.
+            blend: (layer == SceneLayer::Transparent).then_some(BlendState::ALPHA_BLENDING),
+            write_mask: ColorWrites::ALL,
+        })];
+        if view.normal_target {
+            shader_defs.push(SCENE_NORMAL_TARGET_DEF.into());
+            targets.push(Some(ColorTargetState {
+                format: NORMAL_PREPASS_FORMAT,
+                blend: None,
+                // Only solid geometry leaves a normal behind. The sky must
+                // not (the edge detector and the atmosphere treat "nothing
+                // written" as sky) and neither may a translucent overlay (a
+                // blob shadow would get its own outline). The shader still
+                // declares the output — WebGPU wants outputs and targets to
+                // agree — and the mask drops it.
+                write_mask: if layer == SceneLayer::Opaque {
+                    ColorWrites::ALL
+                } else {
+                    ColorWrites::empty()
+                },
+            }));
+        }
         RenderPipelineDescriptor {
             label: Some(label.into()),
             layout: vec![self.scene_layout.clone(), self.material_layout.clone()],
@@ -134,7 +135,7 @@ impl SceneShaders {
                 ..default()
             },
             fragment: Some(FragmentState {
-                shader: fragment_shader,
+                shader: self.fragment.clone(),
                 shader_defs,
                 targets,
                 ..default()
@@ -144,11 +145,6 @@ impl SceneShaders {
                 // builds one; glTF primitives default to one), so the topology
                 // is not in the key.
                 topology: PrimitiveTopology::TriangleList,
-                // The *same* cull mode in both passes. Bevy's prepass leaves
-                // culling off while its opaque pass turns it on, which lets a
-                // back face win the depth buffer on a pixel the colour pass
-                // then discards — a hole with fog in it. Keeping the two passes
-                // identical is the whole point of having a prepass.
                 cull_mode,
                 ..default()
             },
@@ -183,20 +179,18 @@ impl FromWorld for TerrainScenePipeline {
             world,
             "shaders/scene/terrain_vertex.wesl",
             "shaders/terrain_toon.wesl",
-            "shaders/scene/terrain_prepass.wesl",
         ))
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TerrainPipelineKey {
-    pub pass: ScenePassKind,
     pub view: SceneViewKey,
 }
 
 impl ScenePipeline<TerrainMaterial> for TerrainScenePipeline {
-    fn key(view: SceneViewKey, pass: ScenePassKind, _: &()) -> Self::Key {
-        TerrainPipelineKey { pass, view }
+    fn key(view: SceneViewKey, _: &()) -> Self::Key {
+        TerrainPipelineKey { view }
     }
 }
 
@@ -215,14 +209,9 @@ impl SpecializedMeshPipeline for TerrainScenePipeline {
             Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
             Mesh::ATTRIBUTE_UV_1.at_shader_location(2),
         ])?;
-        let label = match key.pass {
-            ScenePassKind::Prepass => "terrain_scene_prepass_pipeline",
-            ScenePassKind::Colour => "terrain_scene_colour_pipeline",
-        };
-        // Terrain is single-sided; back faces culled in both passes.
+        // Terrain is single-sided; back faces culled.
         Ok(self.0.descriptor(
-            label,
-            key.pass,
+            "terrain_scene_pipeline",
             key.view,
             SceneLayer::Opaque,
             vertex_layout,
@@ -245,22 +234,19 @@ impl FromWorld for ToonScenePipeline {
             world,
             "shaders/scene/mesh_vertex.wesl",
             "shaders/toon_lighting.wesl",
-            "shaders/toon_prepass.wesl",
         ))
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ToonPipelineKey {
-    pub pass: ScenePassKind,
     pub view: SceneViewKey,
     pub material: ToonMaterialKey,
 }
 
 impl ScenePipeline<ToonMaterial> for ToonScenePipeline {
-    fn key(view: SceneViewKey, pass: ScenePassKind, material: &ToonMaterialKey) -> Self::Key {
+    fn key(view: SceneViewKey, material: &ToonMaterialKey) -> Self::Key {
         ToonPipelineKey {
-            pass,
             view,
             material: *material,
         }
@@ -273,8 +259,8 @@ impl SpecializedMeshPipeline for ToonScenePipeline {
     /// The vertex layout and the `VERTEX_UVS_A` / `VERTEX_UVS_B` / `SKINNED`
     /// defs come from what the mesh actually carries — the same rule bevy's
     /// mesh pipeline applied, under the same def names, so the toon fragment
-    /// shaders' existing `@if`s are untouched. Shader locations are fixed by
-    /// `scene/toon_vertex.wesl`'s `Vertex` struct.
+    /// shader's existing `@if`s are untouched. Shader locations are fixed by
+    /// `scene/mesh_vertex.wesl`'s `Vertex` struct.
     fn specialize(
         &self,
         key: Self::Key,
@@ -302,21 +288,17 @@ impl SpecializedMeshPipeline for ToonScenePipeline {
         }
         let vertex_layout = layout.0.get_layout(&attributes)?;
 
-        // Double-sided: no culling, and both fragment shaders flip the normal
-        // on back faces (`TOON_DOUBLE_SIDED` in `facing_normal`).
+        // Double-sided: no culling, and the fragment shader flips the normal
+        // on back faces (`TOON_DOUBLE_SIDED` in `facing_normal`) — for the
+        // probe lighting and for the normal target alike.
         let cull_mode = if key.material.double_sided {
             shader_defs.push(TOON_DOUBLE_SIDED_DEF.into());
             None
         } else {
             Some(Face::Back)
         };
-        let label = match key.pass {
-            ScenePassKind::Prepass => "toon_scene_prepass_pipeline",
-            ScenePassKind::Colour => "toon_scene_colour_pipeline",
-        };
         Ok(self.0.descriptor(
-            label,
-            key.pass,
+            "toon_scene_pipeline",
             key.view,
             SceneLayer::Opaque,
             vertex_layout,
@@ -339,11 +321,6 @@ impl FromWorld for SkyScenePipeline {
             world,
             "shaders/scene/mesh_vertex.wesl",
             "shaders/sky_dome.wesl",
-            // Never used: the sky has no prepass variant
-            // (`SceneLayer::Background`). `SceneShaders` holds one handle per
-            // stage, so this names the colour shader rather than inventing a
-            // prepass the pass would refuse to draw.
-            "shaders/sky_dome.wesl",
         ))
     }
 }
@@ -354,7 +331,7 @@ pub struct SkyPipelineKey {
 }
 
 impl ScenePipeline<SkyDomeMaterial> for SkyScenePipeline {
-    fn key(view: SceneViewKey, _pass: ScenePassKind, _: &()) -> Self::Key {
+    fn key(view: SceneViewKey, _: &()) -> Self::Key {
         SkyPipelineKey { view }
     }
 }
@@ -376,7 +353,6 @@ impl SpecializedMeshPipeline for SkyScenePipeline {
         ])?;
         Ok(self.0.descriptor(
             "sky_scene_pipeline",
-            ScenePassKind::Colour,
             key.view,
             SceneLayer::Background,
             vertex_layout,
@@ -400,8 +376,6 @@ impl FromWorld for UnlitScenePipeline {
             world,
             "shaders/scene/mesh_vertex.wesl",
             "shaders/unlit.wesl",
-            // No prepass variant (`SceneLayer::Transparent`); see the sky.
-            "shaders/unlit.wesl",
         ))
     }
 }
@@ -412,7 +386,7 @@ pub struct UnlitPipelineKey {
 }
 
 impl ScenePipeline<UnlitMaterial> for UnlitScenePipeline {
-    fn key(view: SceneViewKey, _pass: ScenePassKind, _: &()) -> Self::Key {
+    fn key(view: SceneViewKey, _: &()) -> Self::Key {
         UnlitPipelineKey { view }
     }
 }
@@ -440,7 +414,6 @@ impl SpecializedMeshPipeline for UnlitScenePipeline {
         let vertex_layout = layout.0.get_layout(&attributes)?;
         Ok(self.0.descriptor(
             "unlit_scene_pipeline",
-            ScenePassKind::Colour,
             key.view,
             SceneLayer::Transparent,
             vertex_layout,

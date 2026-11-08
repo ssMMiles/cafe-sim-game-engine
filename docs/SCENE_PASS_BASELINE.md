@@ -201,22 +201,105 @@ goes. What the wider view costs on the *GPU* is not visible here: macOS has no
 in-pass timestamps (`docs/PERFORMANCE.md`), and most of the 5 ms of render-thread
 work has no span of its own.
 
-### 3.6 After Phase 5 — expected, not yet measured
+### 3.6 After Phase 5 — gameplay (taken 2026-11-08, build `f6fbe43`, vs `bc2b5fe` the same day)
 
-> **Not yet taken.** Take two gameplay snapshots on this build (F9). What the
-> table should show: **every `bevy_pbr::` row gone** (clusters, lights, GPU
-> preprocess, mesh/view bind groups, skins, previous-frame transforms —
-> ~1.5 ms on `bc2b5fe`), every `write_binned_instance_buffers` /
-> `write_indirect_parameters_buffers` / `write_batched_instance_buffers` row
-> gone, the `bevy_gizmos_render` rows gone, `check_entities_needing_specialization<StandardMaterial>`
-> gone. Appearing: `scene_pass::skin::extract_skins` + `prepare_skins` and the
-> `scene_pass::gizmos::` rows (extract, prepare, `gizmo_pass`), which should be
-> a few hundredths of a millisecond together. The `bevy_light::` rows stay but
-> have nothing to do (no light components).
+Six snapshots on `f6fbe43`, two on `bc2b5fe` immediately before, same scene.
+
+| | `bc2b5fe` (before) | `f6fbe43` (after) |
+|---|---:|---:|
+| Frame | 8.51–9.00 ms | 7.15–7.61 ms |
+| Main thread | 6.41–6.47 | 4.01–4.48 |
+| Render **busy** | 7.10–7.52 | **2.93–3.15** |
+| Render waiting (swapchain acquire) | 0.13 | **1.1–3.9** |
+| System work total | 7.1–7.4 | 6.3–7.5 † |
+
+† inflated — see the wait note below.
+
+Everything the prediction above listed happened: **every working `bevy_pbr::`
+row is gone** (only the two `Assets<StandardMaterial>` bookkeeping rows
+remain, and the asset type is kept deliberately), all
+`write_binned_instance_buffers` / indirect-parameters rows gone, all
+`bevy_gizmos_render` rows gone. Appeared: `scene_pass::skin::prepare_skins`
+(~0.03) + `extract_skins` (0.004) and the `scene_pass::gizmos::` rows (~0.02
+together). All `scene_pass` rows total **~0.3 ms**. `runs` on `scene_prepass`
+is **1.0** — the parked thumbnail rig (`4a0e889`) halved the per-view costs as
+hoped.
+
+Net: **render-thread CPU work more than halved (−4.3 ms), main thread −2.2 ms.**
+
+**The new big "wait" is not work.** With the render thread finishing its CPU
+work in ~3 ms, it now arrives at `get_current_texture` long before a drawable
+is free, so the acquire wait balloons from 0.1 to 1–4 ms — the slack between
+our pace and whatever paces presentation (the macOS compositor, or the GPU
+finishing the previous frame). Two traps when reading these tables:
+
+- `prepare_windows`' self-time row (2.5–3.7 ms, now the top row by far)
+  **contains** that same acquire wait — it is the span the
+  `frame_pacing` brackets sit around. The same idle time therefore appears in
+  both the "waiting" header *and* the system table, and inflates "system work
+  total" by ~3 ms. Honest spanned CPU work on this build is ~3.5 ms/frame.
+- The ~7.3 ms frame floor is **presentation- or GPU-bound, not CPU-bound**:
+  main is 4.2, render busy 3.0. No CPU row will show where it goes, and macOS
+  has no in-pass GPU timestamps. To find out which: A/B the post passes with
+  `EffectBench` (`docs/PERFORMANCE.md`) and/or shrink the window — a
+  GPU-bound wait scales with resolution, compositor pacing doesn't.
+
+With `prepare_windows` subtracted, no single hot row is left: the biggest
+real rows are `apply_extract_commands` (~0.15) and the profiler itself
+(~0.13–0.25); the rest is a long tail of hundreds of ≤0.09 ms systems, much
+of it machinery nothing uses (mesh2d/tilemap/sprite-mesh materials, OIT,
+SMAA/TAA/CAS pipeline prep, skybox, deferred, depth pyramids). Further CPU
+wins are plugin-level trims and schedule overhead, not any one system.
+
+### 3.7 After folding the prepass into the colour pass — not yet measured
+
+> Done 2026-11-08, on top of `f6fbe43`. The scene used to be rasterised
+> twice — `scene_prepass` (depth + normals) then `scene_opaque` (colour, depth
+> test `GreaterEqual` against it). Now `scene_pass` does colour, depth and the
+> normal target in one pass, before bevy's `early_prepass` (which still copies
+> the depth for the edge detector and the atmosphere). On a tile-based GPU
+> (every Apple GPU) hidden-surface removal already shades nothing occluded,
+> so the prepass bought nothing there and cost a full vertex + raster pass of
+> every chunk and object, plus the MSAA normal/depth stores.
 >
-> Also check `runs` on `scene_prepass`: it should be **1.0** now that the
-> thumbnail rig is parked on entering gameplay (`4a0e889`), and that alone
-> halves every per-view cost in these tables.
+> What to look at, in gameplay with vsync off: **the frame time and the
+> acquire wait**, not the system table — §3.6 established the frame is
+> GPU-bound at ~7.3 ms, which no CPU row shows. Expect `scene_prepass` gone
+> and `scene_pass` in its place at about what `scene_opaque` cost; the win,
+> if there is one, is a lower frame floor. The visual checklist in §4 applies
+> again (outlines on double-sided leaves, fog not touching the sky, blob
+> shadows outline-free, thumbnails still rendering — their cameras have no
+> `NormalPrepass` and use the one-target variant).
+>
+> Next GPU suspects, in order: the camera's default **`Msaa::Sample4`** on a
+> 1920×1080 HDR target (the post passes read the prepass textures as
+> multisampled, so turning it off needs their bind group layouts changed
+> too); bevy's **empty passes still open render passes** — `early_prepass`
+> and `main_opaque_pass_3d` begin a pass and load+store every multisampled
+> attachment even with nothing to draw (their `is_empty` checks only guard
+> the draw calls); and the five full-screen post/blit passes.
+
+**Measured on the folded build (same `f6fbe43` stamp, four clean gameplay
+snapshots):** frame 7.73–8.05, main ~4.1–4.5, render busy 2.77–2.90, wait
+4.26–4.32. Render busy *down* ~0.2 ms, **frame time unchanged, the wait
+absorbed everything** — the removed GPU work did not move the frame floor,
+which means our geometry cost was not the pacer. What paces the ~7.8 ms frame
+is still either the macOS compositor's drawable pacing or GPU work that
+didn't change (the post passes, the MSAA load/store/resolve traffic, egui).
+The CPU tables cannot distinguish these; an `xctrace` Metal System Trace can
+(per-encoder GPU occupancy + the display track), and that is the next
+measurement.
+
+**Empty bevy passes suppressed the same day:** `suppress_bevy_core3d_phases`
+(scene_pass/mod.rs) removes each drawn view's entries from the five 3D phase
+maps in `PrepareBindGroups` — after `prepare_prepass_textures` (which keys
+texture creation on those maps), before the camera driver — so `early_prepass`
+and `main_opaque_pass_3d` hit their absent-phase early return instead of
+opening and resolving a full-size MSAA pass each. That early return also
+skipped bevy's depth copy, so `scene_pass` now makes the
+`ViewPrepassTextures.depth` copy itself, same encoder position. Views with no
+scene draws (a thumbnail rig while its subject loads) keep their phases so
+bevy still clears their targets.
 
 ## 4. Visual checklist
 

@@ -191,5 +191,10 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 
     var out: FragmentOutput;
     out.color = vec4<f32>(base_color * toon_shade(radiance, scene.curve), terrain.base_color.a);
+    // The edge detector's normal target. Terrain is never double-sided, so
+    // there is no front/back flip; the skirt normal was fixed up in the
+    // vertex stage, where the mesh generator's zero normals come from.
+@if(SCENE_NORMAL_TARGET)
+    out.normal = vec4<f32>(in.world_normal * 0.5 + vec3<f32>(0.5), 1.0);
     return out;
 }
