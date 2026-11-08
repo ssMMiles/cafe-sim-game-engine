@@ -502,6 +502,46 @@ pub fn reset_thumbnail_rig(mut commands: Commands, rig: Option<Res<ThumbnailRig>
     }
 }
 
+/// `OnEnter(EditorMode::Gameplay)`: abandon the job in flight and switch the
+/// rig camera off.
+///
+/// [`drive_thumbnails`] only runs in the editor, so without this a job caught
+/// mid-flight by F1 froze with its camera *active* — and an active `Camera3d`
+/// renders every frame whether or not anything changes. Measured 2026-11-08:
+/// every per-view render system (`scene_prepass`, `main_opaque_pass_3d`,
+/// `cluster_on_gpu`, …) at exactly 2 runs per frame throughout a gameplay
+/// session, i.e. a second full 3D view into a 128 px texture, for nothing.
+/// The dropped job's key is un-requested so the panel asks again when the
+/// editor returns; nothing is lost but one thumbnail's head start.
+pub fn park_thumbnail_rig(
+    mut commands: Commands,
+    rig: Option<ResMut<ThumbnailRig>>,
+    mut cache: ResMut<ThumbnailCache>,
+    mut cameras: Query<&mut Camera>,
+) {
+    let Some(mut rig) = rig else {
+        return;
+    };
+    if let Ok(mut camera) = cameras.get_mut(rig.camera) {
+        camera.is_active = false;
+    }
+    let (key, entities): (String, Vec<Entity>) =
+        match std::mem::replace(&mut rig.state, RigState::Idle) {
+            RigState::Idle => return,
+            RigState::Loading { key, root, .. } => (key, vec![root]),
+            RigState::Settling {
+                key,
+                root,
+                readback,
+                ..
+            } => (key, vec![root, readback]),
+        };
+    for entity in entities {
+        commands.entity(entity).despawn();
+    }
+    cache.requested.remove(&key);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
