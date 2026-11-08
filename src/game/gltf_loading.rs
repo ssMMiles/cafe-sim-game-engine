@@ -2,9 +2,7 @@ use engine_api::dropped_standard_features;
 
 use crate::game::{
     GameEntity,
-    gfx::toon_material::{
-        DefaultToonLightmap, ProbeVolumeImages, ToonLook, ToonMaterial, ToonSource,
-    },
+    gfx::toon_material::{DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource},
 };
 pub use engine_api::{ConvertToToon, DynamicLit};
 
@@ -101,7 +99,6 @@ pub fn on_scene_ready(
     mut shared: ResMut<ProbeToonMaterials>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
     probes: Res<ProbeVolumeImages>,
-    look: Res<ToonLook>,
     mut warned: Local<HashSet<AssetId<StandardMaterial>>>,
 ) {
     let entity = trigger.entity;
@@ -176,11 +173,7 @@ pub fn on_scene_ready(
         } else {
             ToonSource::Lightmap
         };
-        let template = {
-            let mut m = ToonMaterial::new(source, lightmap_handle, &probes);
-            look.apply(&mut m.shading);
-            m
-        };
+        let template = ToonMaterial::new(source, lightmap_handle, &probes);
 
         let shared = (source == ToonSource::ProbeVolume).then_some(&mut *shared);
         convert_to_toon(

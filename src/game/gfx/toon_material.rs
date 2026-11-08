@@ -6,26 +6,26 @@
 //! materials (`ToonMaterial::new`) against the same `TypeId`s.
 
 pub use engine_api::toon_material::{
-    DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonShading, ToonSource,
-    create_default_toon_lightmap, create_probe_volume_images,
+    DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource, create_default_toon_lightmap,
+    create_probe_volume_images,
 };
 
 pub use engine_api::toon_curve::ToonCurve;
 
-use bevy::prelude::*;
+use bevy::{prelude::*, render::RenderApp, render::extract_resource::ExtractResource};
 
-use crate::game::world::terrain::{
-    material::TerrainMaterial,
-    storage::{EnvironmentData, TerrainWorld},
-};
+use crate::game::world::terrain::storage::{EnvironmentData, TerrainWorld};
 
-/// Everything a toon material needs from the level that isn't baked into
-/// its lightmap: the sun (which probe-lit surfaces evaluate per pixel) and
-/// the [`ToonCurve`] (which every surface is quantised through).
+/// Everything a toon surface needs from the level that isn't baked into its
+/// lightmap: the sun (which probe-lit surfaces evaluate per pixel) and the
+/// [`ToonCurve`] (which every surface is quantised through).
 ///
-/// One resource for both because they must reach *every* toon material,
+/// One resource for both because they must reach *every* toon surface,
 /// terrain and objects alike, in the same frame: a curve that differed
-/// between the two would draw a step along every place they meet.
+/// between the two would draw a step along every place they meet. It reaches
+/// them as the scene pass's per-scene uniform (`scene_pass::SceneUniform`,
+/// extracted from this each frame) — not by writing materials, which under
+/// the scene pass would rebuild every material bind group on each edit.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct ToonLook {
     /// Unit direction *toward* the sun.
@@ -49,10 +49,12 @@ impl ToonLook {
             curve: env.toon_curve(),
         }
     }
+}
 
-    pub fn apply(&self, shading: &mut ToonShading) {
-        shading.set_sun(self.sun_dir, self.sun_rgb);
-        shading.curve = self.curve.to_vec4();
+impl ExtractResource<RenderApp> for ToonLook {
+    type Source = Self;
+    fn extract_resource(source: &Self) -> Self {
+        *source
     }
 }
 
@@ -67,38 +69,6 @@ pub fn update_toon_look(terrain_world: Option<Res<TerrainWorld>>, mut look: ResM
     let next = ToonLook::from_environment(&world.metadata.environment);
     if *look != next {
         *look = next;
-    }
-}
-
-/// Write the look into every toon material when it changes, and into any
-/// material added since (a plugin building its own gets it a frame late).
-///
-/// Only `Added` events are watched, never `Modified`: writing a material
-/// here raises `Modified`, so reacting to that would loop every frame.
-pub fn sync_toon_look(
-    look: Res<ToonLook>,
-    mut events: MessageReader<AssetEvent<ToonMaterial>>,
-    mut materials: ResMut<Assets<ToonMaterial>>,
-    mut terrain: ResMut<Assets<TerrainMaterial>>,
-) {
-    if look.is_changed() {
-        events.clear();
-        for (_, mat) in materials.iter_mut() {
-            look.apply(&mut mat.shading);
-        }
-        // Terrain materials are few (one shared handle) and carry no sun, so
-        // they are rewritten wholesale rather than tracked by asset event.
-        for (_, mat) in terrain.iter_mut() {
-            mat.shading.curve = look.curve.to_vec4();
-        }
-        return;
-    }
-    for event in events.read() {
-        if let AssetEvent::Added { id } = event
-            && let Some(mut mat) = materials.get_mut(*id)
-        {
-            look.apply(&mut mat.shading);
-        }
     }
 }
 
@@ -157,7 +127,7 @@ mod tests {
         );
 
         // The WESL has no constants left to compare — the curve travels in
-        // the uniform — so what must match is the *shape*: every operation
+        // the scene uniform — so what must match is the *shape*: every operation
         // the Rust mirror performs has to appear in the shader.
         for needle in [
             "pow(clamp(lum / toon_white(curve), 0.0, 1.0), inv_gamma)",
@@ -174,20 +144,7 @@ mod tests {
         }
     }
 
-    /// The defaults a material is born with are the ones the curve module
-    /// documents — a material built by a plugin before any world loads must
-    /// not render through a different ramp than one built after.
-    #[test]
-    fn a_fresh_material_carries_the_default_curve() {
-        let shading = ToonShading::new(ToonSource::Lightmap);
-        assert_eq!(shading.curve, ToonCurve::default().to_vec4());
-        assert_eq!(
-            crate::game::world::terrain::material::TerrainShading::default().curve,
-            ToonCurve::default().to_vec4(),
-        );
-    }
-
-    /// `ToonLook` is the one place a world's ramp reaches a material, and it
+    /// `ToonLook` is the one place a world's ramp reaches the GPU, and it
     /// must sanitise: the values arrive from an inspector drag and from
     /// disk, and a zero `bands` would divide by zero in the neutral fade.
     #[test]

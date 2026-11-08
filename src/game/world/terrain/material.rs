@@ -2,23 +2,19 @@ use bevy::{
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
 };
-use engine_api::toon_curve::ToonCurve;
 
-/// Terrain's half of the toon uniform. Mirrors `TerrainShading` in
+/// Terrain's per-material uniform. Mirrors `TerrainShading` in
 /// `terrain_toon.wesl`.
 ///
-/// The curve is duplicated here rather than shared with `ToonShading`
-/// because the two materials are separate bind groups, but it must hold the
-/// *same* values: terrain and the objects standing on it meet along every
-/// contact shadow, and a ramp that differs between them shows up as a step
-/// right at the join. `sync_toon_look` writes both from one source.
+/// The toon curve used to be here too (and in `ToonShading`), written by
+/// `sync_toon_look` into every material; it is per scene, not per material,
+/// and travels in the scene pass's uniform now (`scene_pass::SceneUniform`),
+/// so terrain and the objects standing on it read literally the same ramp.
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct TerrainShading {
     /// 1 = shade from the baked lightmap, 0 = flat unlit debug view (Shift+L).
     pub use_lightmap: u32,
     pub _pad: Vec3,
-    /// The toon ramp as `(bands, floor, white, gamma)` — see [`ToonCurve`].
-    pub curve: Vec4,
     /// Ground colour where the stone texture doesn't darken it, linear RGBA.
     pub base_color: Vec4,
 }
@@ -28,7 +24,6 @@ impl Default for TerrainShading {
         Self {
             use_lightmap: 1,
             _pad: Vec3::ZERO,
-            curve: ToonCurve::default().to_vec4(),
             base_color: Vec4::ONE,
         }
     }

@@ -14,6 +14,10 @@
 // keeps preparing while `PbrPlugin` is in the app: `instance.skin_index` is
 // where a skinned instance's joints start in it. Only the `SKINNED` vertex
 // variant reads it; the layout entry is there for every pipeline.
+//
+// Binding 3 is the per-scene uniform: what every toon surface needs from the
+// level that isn't in its material — the sun, the toon curve, the probe
+// lattice. One write per frame instead of one per material.
 
 import bevy_render::view::View;
 
@@ -37,9 +41,21 @@ struct SceneInstance {
 // read today; mirrored in `SceneInstanceFlags` in scene_pass/instances.rs.
 const SCENE_INSTANCE_SIGN_DETERMINANT: u32 = 1u;
 
+// Mirrors `SceneUniform` in scene_pass/mod.rs field for field.
+struct SceneUniform {
+    // Unit direction toward the sun, and its radiance in lightmap units.
+    sun_dir: vec4<f32>,
+    sun_rgb: vec4<f32>,
+    // The toon ramp: (bands, floor, white, gamma). See `toon_shade`.
+    curve: vec4<f32>,
+    // xyz: probe volume texel dims; w: probe cell size in metres.
+    probe: vec4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<storage> instances: array<SceneInstance>;
 @group(0) @binding(2) var<storage> joint_matrices: array<mat4x4<f32>>;
+@group(0) @binding(3) var<uniform> scene: SceneUniform;
 
 fn scene_position_world_to_clip(world: vec3<f32>) -> vec4<f32> {
     return view.clip_from_world * vec4<f32>(world, 1.0);

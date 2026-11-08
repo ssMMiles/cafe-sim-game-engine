@@ -2,17 +2,10 @@ use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
     math::Affine2,
-    mesh::{MeshVertexBufferLayoutRef, UvChannel},
-    pbr::{MaterialPipeline, MaterialPipelineKey, MeshPipelineKey},
+    mesh::UvChannel,
     prelude::*,
-    render::render_resource::{
-        AsBindGroup, Extent3d, Face, RenderPipelineDescriptor, ShaderType,
-        SpecializedMeshPipelineError, TextureDimension, TextureFormat,
-    },
-    shader::ShaderRef,
+    render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
 };
-
-use crate::toon_curve::ToonCurve;
 
 /// A 1×1 white `Rgba16Float` image used as the default (unbaked) lightmap for
 /// every toon-shaded surface — placed meshes and terrain alike.
@@ -54,6 +47,13 @@ pub enum ToonSource {
 
 /// The per-material uniform behind the toon shader. Layout mirrors
 /// `ToonShading` in `toon_lighting.wesl` field for field.
+///
+/// Only what is genuinely *per material* lives here. The sun, the toon curve
+/// and the probe-lattice constants are per scene and travel in the scene
+/// pass's own uniform (bind group 0; `scene_pass::SceneUniform`), so an
+/// environment edit is one buffer write rather than a rewrite of every
+/// material — which under the scene pass would have been a bind-group rebuild
+/// storm (ABI 15; they lived here through ABI 14).
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct ToonShading {
     /// A [`ToonSource`] discriminant.
@@ -61,42 +61,14 @@ pub struct ToonShading {
     /// 1 = flat unlit debug view (Shift+L). Orthogonal to `source`, so
     /// toggling it never forgets which path the material is on.
     pub unlit: u32,
-    /// [`PROBE_CELL_SIZE`], so the shader and the bake agree on the lattice.
-    pub probe_cell_size: f32,
-    pub _pad: f32,
-    /// [`PROBE_VOLUME_DIMS`] as floats (w unused).
-    pub probe_dims: Vec4,
-    /// Unit direction *toward* the sun (w unused). Probe-lit surfaces
-    /// evaluate the sun exactly from the probe's stored visibility; the host
-    /// keeps this in step with the level's environment.
-    pub sun_dir: Vec4,
-    /// Sun colour × intensity in lightmap units (w unused).
-    pub sun_rgb: Vec4,
-    /// The toon ramp, as `(bands, floor, white, gamma)` — see [`ToonCurve`].
-    /// It lives in the uniform rather than in the shader so a world can be
-    /// exposed and graded from the inspector without a recompile; the host
-    /// keeps it in step with the level's environment for every material.
-    pub curve: Vec4,
 }
 
 impl ToonShading {
     pub fn new(source: ToonSource) -> Self {
-        let d = PROBE_VOLUME_DIMS;
         Self {
             source: source as u32,
             unlit: 0,
-            probe_cell_size: PROBE_CELL_SIZE,
-            _pad: 0.0,
-            probe_dims: Vec4::new(d[0] as f32, d[1] as f32, d[2] as f32, 0.0),
-            sun_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
-            sun_rgb: Vec4::ZERO,
-            curve: ToonCurve::default().to_vec4(),
         }
-    }
-
-    pub fn set_sun(&mut self, dir_to_sun: Vec3, rgb: Vec3) {
-        self.sun_dir = dir_to_sun.normalize_or(Vec3::Y).extend(0.0);
-        self.sun_rgb = rgb.extend(0.0);
     }
 }
 
@@ -252,8 +224,8 @@ pub const TOON_DOUBLE_SIDED_DEF: &str = "TOON_DOUBLE_SIDED";
 impl ToonMaterial {
     /// A white, single-sided material shading from `source`. `lightmap` is
     /// only sampled for [`ToonSource::Lightmap`]; pass the shared default for
-    /// anything else. The sun fields start empty — the host fills them for
-    /// every toon material from the level's environment.
+    /// anything else. The sun and the toon curve are not material properties
+    /// — the host's scene uniform carries them for every material at once.
     pub fn new(source: ToonSource, lightmap: Handle<Image>, probes: &ProbeVolumeImages) -> Self {
         Self {
             lightmap,
@@ -325,46 +297,16 @@ impl Default for ToonMaterial {
     }
 }
 
+/// Toon materials are **not** drawn by `MaterialPlugin`: the host's scene pass
+/// owns their extraction, pipelines and passes (`src/game/gfx/scene_pass`,
+/// `docs/SCENE_PASS_PLAN.md`). This impl survives only because
+/// `MeshMaterial3d<M>` — the authoring component, deliberately unchanged — is
+/// bounded on `M: Material`. Nothing reads it; the real pipeline derives
+/// culling and `TOON_DOUBLE_SIDED` from [`ToonMaterialKey`] itself.
 impl Material for ToonMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/toon_lighting.wesl".into()
-    }
-
-    /// Writes the prepass normal with the double-sided flip; bevy's default
-    /// prepass fragment would hand the edge detector inverted normals on the
-    /// back of every leaf.
-    fn prepass_fragment_shader() -> ShaderRef {
-        "shaders/toon_prepass.wesl".into()
-    }
-
-    /// Nothing casts a real-time shadow: all lighting is baked and
-    /// `BakedSun` has shadows off. Saying so skips the shadow specialisation.
+    /// Nothing casts a real-time shadow: all lighting is baked.
     fn enable_shadows() -> bool {
         false
-    }
-
-    /// Runs for the colour pass and the prepass alike.
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        let double_sided = key.bind_group_data.double_sided;
-        // Mirrors bevy's own rule: a view with INVERT_CULLING (mirrors)
-        // culls the opposite face.
-        descriptor.primitive.cull_mode = match (
-            double_sided,
-            key.mesh_key.contains(MeshPipelineKey::INVERT_CULLING),
-        ) {
-            (true, _) => None,
-            (false, false) => Some(Face::Back),
-            (false, true) => Some(Face::Front),
-        };
-        if double_sided && let Some(fragment) = descriptor.fragment.as_mut() {
-            fragment.shader_defs.push(TOON_DOUBLE_SIDED_DEF.into());
-        }
-        Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 # Replacing the bevy scene pass — plan
 
-Status: **Phases 0, 1 and 3 implemented; Phase 2 in progress** (plan written
-2026-11-06, Phases 1 and 3 landed 2026-11-07). Prerequisite already landed:
+Status: **Phases 0–3 implemented** (plan written 2026-11-06; Phases 1, 3 and
+then 2 landed 2026-11-07). Next: Phase 4 (sky dome, re-measure, tidy). Prerequisite already landed:
 `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose shaders
 import no bevy PBR fragment modules (ABI 14) — the material contract a custom
 pass must honour is already small and written down (`GRAPHICS.md` §5).
@@ -219,15 +219,16 @@ outlines, fog, god rays, Shift+L, bake arrival, chunk streaming and the web
 build all visually unchanged; draw count = chunk count; Phase 0 rows for
 terrain gone.
 
-**Phase 2 — Per-scene uniform refactor (ABI 15).** Move sun, toon curve and
-probe constants out of `ToonShading`/`TerrainShading` into the scene uniform;
-shrink `ToonShading` to `{source, unlit}`. Today `sync_toon_look` rewrites
-*every* toon material on any environment change — under the scene pass that
-would be a full bind-group rebuild storm, with the scene uniform it is one
-buffer write. Plugins rebuild (ABI bump); worlds/saves unaffected. This can
-land while toon still renders through bevy (the Material path reads the same
-uniform via a small shared binding) or be folded into Phase 3 — decide when
-Phase 1 has settled the bind-group layout.
+**Phase 2 — Per-scene uniform refactor (ABI 15).** *Done (2026-11-07), after
+Phase 3.* `scene_pass::SceneUniform { sun_dir, sun_rgb, curve, probe }` is
+bind group 0 binding 3, filled every frame from the main world's `ToonLook`
+(extracted with `ExtractResourcePlugin`); `ToonShading` is `{ source, unlit }`
+and `TerrainShading` lost its `curve`. `sync_toon_look` — which rewrote every
+toon and terrain material on each environment edit, and under the scene pass
+would have rebuilt every material bind group — is gone; `ToonLook::apply` and
+`ToonShading::set_sun` with it. Plugins rebuild (ABI bump); worlds and saves
+are unaffected. The dead `impl Material for ToonMaterial` was cut down to the
+`MeshMaterial3d` bound in the same engine-api change.
 
 **Phase 3 — ToonMaterial wholesale.** *Done (2026-11-07), before Phase 2 —
 the uniform refactor is simpler on top of our own pipeline than threaded

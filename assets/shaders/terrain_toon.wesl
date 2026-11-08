@@ -4,6 +4,7 @@
 // only adds the stochastic stone texture blend on top of the base colour.
 
 import package::shaders::scene::terrain_io::{VertexOutput, FragmentOutput};
+import package::shaders::scene::bindings::scene;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
 var stone_texture: texture_2d<f32>;
@@ -15,14 +16,12 @@ var lightmap_texture: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(103)
 var lightmap_sampler: sampler;
 
-// Mirrors `TerrainShading` in terrain/material.rs field for field.
+// Mirrors `TerrainShading` in terrain/material.rs field for field. The toon
+// curve is per scene, not per material: `scene.curve` (bind group 0).
 struct TerrainShading {
     // 1 = shade from the baked lightmap, 0 = flat unlit debug view.
     use_lightmap: u32,
     _pad: vec3<f32>,
-    // The toon ramp: (bands, floor, white, gamma). The same values the
-    // object materials carry — see `toon_shade`.
-    curve: vec4<f32>,
     // Ground colour where the stone doesn't darken it, linear RGBA.
     base_color: vec4<f32>,
 };
@@ -191,6 +190,6 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     }
 
     var out: FragmentOutput;
-    out.color = vec4<f32>(base_color * toon_shade(radiance, terrain.curve), terrain.base_color.a);
+    out.color = vec4<f32>(base_color * toon_shade(radiance, scene.curve), terrain.base_color.a);
     return out;
 }

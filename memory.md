@@ -1588,3 +1588,16 @@ group + `M::Data` as pipeline key) / per-view `queue_draws::<M>` grouped by `(ma
   ABI bump cleans it up). Measurements: `docs/SCENE_PASS_BASELINE.md` §3 — Phase 1 came out at
   ≈ −0.15 ms/frame, inside noise, as predicted; the Phase 0 snapshots the user first took were all
   the same build because the branch had been reset under the Phase 1 commit (restored by ff).
+
+## Scene pass Phase 2: per-scene uniform, ABI 15 — 7 November 2026
+
+`scene_pass::SceneUniform { sun_dir, sun_rgb, curve, probe(dims.xyz, cell.w) }` at group 0 binding 3,
+filled every frame from `ToonLook` (now `ExtractResource<RenderApp>`, extracted whole — it's `Copy`).
+`ToonShading` is `{source, unlit}`, `TerrainShading` lost `curve`, `sync_toon_look` / `ToonLook::apply` /
+`ToonShading::set_sun` are gone, and the dead `impl Material for ToonMaterial` body went with them.
+Shaders read `scene.curve` / `scene.sun_*` / `scene.probe`; the toon-curve block itself still takes the
+curve as a parameter, so `toon_curve_matches_the_shaders` didn't change. Order of landing was 1 → 3 → 2:
+doing the uniform on top of our own pipeline was simpler than threading a shared binding through
+bevy's `MaterialPlugin`, and it kept each commit to one kind of change. `ExtractResourcePlugin` is
+`bevy::render::extract_resource::ExtractResourcePlugin` (bevy_extract underneath; the trait is generic
+over the `AppLabel`, so `impl ExtractResource<RenderApp> for T`).

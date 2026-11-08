@@ -24,8 +24,10 @@
 //!    colour and prepass pipelines (`pipeline.rs`), and appends to the view's
 //!    entry in [`SceneDraws`].
 //! 3. [`prepare_scene_instances`] (`PrepareResources`) uploads the instance
-//!    list, [`prepare_scene_bind_group`] (`PrepareBindGroups`) builds bind
-//!    group 0 from it plus bevy's own view uniform and joint-matrix buffer.
+//!    list and the per-scene uniform ([`SceneUniform`]: sun, toon curve, probe
+//!    lattice — extracted from the main world's `ToonLook`);
+//!    [`prepare_scene_bind_group`] (`PrepareBindGroups`) builds bind group 0
+//!    from both plus bevy's own view uniform and joint-matrix buffer.
 //! 4. [`pass::scene_prepass`] and [`pass::scene_opaque`] draw it, as plain
 //!    `Core3d` systems — the same extension mechanism `post_process.rs` and
 //!    `atmosphere.rs` already use.
@@ -48,10 +50,11 @@ use bevy::{
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
+        extract_resource::ExtractResourcePlugin,
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             BufferUsages, BufferVec, CachedRenderPipelineId, PipelineCache, ShaderStages,
-            ShaderType,
+            ShaderType, UniformBuffer,
             binding_types::{
                 storage_buffer_read_only, storage_buffer_read_only_sized, uniform_buffer,
             },
@@ -60,7 +63,12 @@ use bevy::{
         view::{ViewUniform, ViewUniforms},
     },
 };
-use engine_api::ToonMaterial;
+use engine_api::{
+    ToonMaterial,
+    toon_material::{PROBE_CELL_SIZE, PROBE_VOLUME_DIMS},
+};
+
+use crate::game::gfx::toon_material::ToonLook;
 
 use crate::game::world::terrain::material::TerrainMaterial;
 
@@ -165,6 +173,50 @@ pub struct SceneDraw {
     pub instances: std::ops::Range<u32>,
 }
 
+/// Everything a toon surface needs from the level that isn't in its material:
+/// one buffer for every draw of every material. Mirrors `SceneUniform` in
+/// `assets/shaders/scene/bindings.wesl` field for field.
+///
+/// Filled from the main world's `ToonLook` each frame. Having this be one
+/// uniform rather than fields on every material is the whole point: an
+/// environment edit used to rewrite every toon *and* terrain material
+/// (`sync_toon_look`), which under the scene pass would have rebuilt every
+/// material bind group; now it is one 64-byte write.
+#[derive(Clone, Copy, Debug, ShaderType)]
+pub struct SceneUniform {
+    /// Unit direction *toward* the sun (w unused).
+    pub sun_dir: Vec4,
+    /// Sun colour × intensity in lightmap units (w unused).
+    pub sun_rgb: Vec4,
+    /// The toon ramp as `(bands, floor, white, gamma)` — `ToonCurve`.
+    pub curve: Vec4,
+    /// `PROBE_VOLUME_DIMS` as floats in xyz, `PROBE_CELL_SIZE` in w, so the
+    /// shader and the bake agree on the lattice.
+    pub probe: Vec4,
+}
+
+impl From<&ToonLook> for SceneUniform {
+    fn from(look: &ToonLook) -> Self {
+        let [w, h, d] = PROBE_VOLUME_DIMS;
+        Self {
+            sun_dir: look.sun_dir.normalize_or(Vec3::Y).extend(0.0),
+            sun_rgb: look.sun_rgb.extend(0.0),
+            curve: look.curve.to_vec4(),
+            probe: Vec4::new(w as f32, h as f32, d as f32, PROBE_CELL_SIZE),
+        }
+    }
+}
+
+impl Default for SceneUniform {
+    fn default() -> Self {
+        Self::from(&ToonLook::default())
+    }
+}
+
+/// The GPU side of [`SceneUniform`].
+#[derive(Resource, Default)]
+pub struct SceneUniformBuffer(pub UniformBuffer<SceneUniform>);
+
 /// What each view draws this frame, in submission order, by render-world view
 /// entity.
 ///
@@ -176,7 +228,7 @@ pub struct SceneDraw {
 pub struct SceneDraws(pub EntityHashMap<Vec<SceneDraw>>);
 
 /// Bind group 0: bevy's view uniform (dynamic offset), our instance array,
-/// and bevy's joint-matrix buffer. One for the whole frame — the view
+/// bevy's joint-matrix buffer, and our scene uniform. One for the whole frame — the view
 /// uniform's offset is what makes it per-view. Rebuilt every frame because
 /// `prepare_skins` swaps its current and previous buffers each frame.
 #[derive(Resource)]
@@ -194,6 +246,7 @@ impl Plugin for ScenePassPlugin {
         app.add_plugins((
             SceneMaterialPlugin::<TerrainMaterial>::default(),
             SceneMaterialPlugin::<ToonMaterial>::default(),
+            ExtractResourcePlugin::<ToonLook>::default(),
         ));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -206,6 +259,7 @@ impl Plugin for ScenePassPlugin {
             // `material::init_scene_material` for why that ordering matters).
             .insert_resource(scene_bind_group_layout())
             .init_resource::<SceneInstances>()
+            .init_resource::<SceneUniformBuffer>()
             .init_resource::<SceneDraws>()
             .add_systems(
                 Render,
@@ -244,6 +298,7 @@ fn scene_bind_group_layout() -> SceneBindGroupLayout {
             // bevy's joint matrices: a runtime array of mat4x4, read by the
             // `SKINNED` vertex variant only.
             storage_buffer_read_only_sized(false, None),
+            uniform_buffer::<SceneUniform>(false),
         ),
     );
     SceneBindGroupLayout(BindGroupLayoutDescriptor::new(
@@ -259,14 +314,18 @@ fn clear_scene_draws(mut instances: ResMut<SceneInstances>, mut draws: ResMut<Sc
     draws.0.clear();
 }
 
-/// Upload the frame's instances.
+/// Upload the frame's instances and the scene uniform.
 ///
 /// A zero-length buffer has no binding, and a frame with nothing of ours in
 /// view (the main menu, a world still streaming in) is ordinary — one padding
 /// instance keeps bind-group creation unconditional rather than making every
-/// later step handle the hole.
+/// later step handle the hole. The scene uniform is 64 bytes and written
+/// every frame rather than on change; `ToonLook` is a `Copy` resource the
+/// extract step copies whole anyway.
 fn prepare_scene_instances(
     mut instances: ResMut<SceneInstances>,
+    mut scene: ResMut<SceneUniformBuffer>,
+    look: Option<Res<ToonLook>>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
 ) {
@@ -274,6 +333,12 @@ fn prepare_scene_instances(
         instances.0.push(SceneInstance::default());
     }
     instances.0.write_buffer(&device, &queue);
+
+    // `ToonLook` is extracted every frame once `GfxPlugin` has initialised it;
+    // until then (the very first frame) the default look is as good as any.
+    let look = look.as_deref().copied().unwrap_or_default();
+    scene.0.set(SceneUniform::from(&look));
+    scene.0.write_buffer(&device, &queue);
 }
 
 fn prepare_scene_bind_group(
@@ -284,10 +349,13 @@ fn prepare_scene_bind_group(
     view_uniforms: Res<ViewUniforms>,
     instances: Res<SceneInstances>,
     skins: Res<SkinUniforms>,
+    scene: Res<SceneUniformBuffer>,
 ) {
-    let (Some(view_binding), Some(instance_binding)) =
-        (view_uniforms.uniforms.binding(), instances.0.binding())
-    else {
+    let (Some(view_binding), Some(instance_binding), Some(scene_binding)) = (
+        view_uniforms.uniforms.binding(),
+        instances.0.binding(),
+        scene.0.binding(),
+    ) else {
         commands.remove_resource::<SceneBindGroup>();
         return;
     };
@@ -299,6 +367,7 @@ fn prepare_scene_bind_group(
             view_binding,
             instance_binding,
             skins.current_buffer.as_entire_binding(),
+            scene_binding,
         )),
     );
     commands.insert_resource(SceneBindGroup(bind_group));

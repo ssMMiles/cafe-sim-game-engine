@@ -61,7 +61,11 @@ pub use toon_material::{
 ///   `ExtendedMaterial<StandardMaterial, _>` extension; the `ToonMat` alias
 ///   is gone. Surface fields (`base_color`, `base_color_texture`,
 ///   `uv_transform`, `double_sided`) live on the material itself.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 14;
+/// - 15: [`ToonShading`] is just `{ source, unlit }`. The sun, the toon
+///   curve and the probe-lattice constants moved into the host scene pass's
+///   per-scene uniform, so an environment change is one buffer write instead
+///   of a rewrite of every toon material. `ToonShading::set_sun` is gone.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 15;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///

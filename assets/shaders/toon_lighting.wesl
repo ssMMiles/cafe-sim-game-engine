@@ -17,7 +17,7 @@
 // varyings and the per-instance winding flag come from our modules, and
 // nothing here reads bevy_pbr at all.
 import package::shaders::scene::toon_io::{VertexOutput, FragmentOutput};
-import package::shaders::scene::bindings::scene_instance_winds_forward;
+import package::shaders::scene::bindings::{scene, scene_instance_winds_forward};
 
 // Mirrors `ToonSurfaceUniform` in engine-api's toon_material.rs.
 struct ToonSurface {
@@ -41,19 +41,13 @@ var lightmap_texture: texture_2d<f32>;
 var lightmap_sampler: sampler;
 
 // Mirrors `ToonShading` in engine-api's toon_material.rs field for field.
+// The sun, the toon curve and the probe lattice are per scene, not per
+// material: `scene` (bind group 0).
 struct ToonShading {
     // 1 = lightmap, 2 = probe volume.
     source: u32,
     // 1 = flat unlit debug view (Shift+L).
     unlit: u32,
-    probe_cell_size: f32,
-    _pad: f32,
-    probe_dims: vec4<f32>,
-    // Unit direction toward the sun, and its radiance in lightmap units.
-    sun_dir: vec4<f32>,
-    sun_rgb: vec4<f32>,
-    // The toon ramp: (bands, floor, white, gamma). See `toon_shade`.
-    curve: vec4<f32>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(102)
 var<uniform> toon: ToonShading;
@@ -172,7 +166,7 @@ fn bspline_axis(u: f32) -> BsplineAxis {
 fn sample_probe_volume(world_pos: vec3<f32>) -> ProbeTaps {
     // Texel coordinates: cell i's probe sits at (i + 0.5) · cell and texel
     // i's centre at i + 0.5, so world / cell is already texel space.
-    let u = world_pos / toon.probe_cell_size;
+    let u = world_pos / scene.probe.w;
     let bx = bspline_axis(u.x);
     let by = bspline_axis(u.y);
     let bz = bspline_axis(u.z);
@@ -195,7 +189,7 @@ fn sample_probe_volume(world_pos: vec3<f32>) -> ProbeTaps {
         let w = xw[ix] * yw[iy] * zw[iz];
         // The sampler repeats, so the lattice is toroidal and no wrap is
         // needed here — the same reason the trilinear read needed no origin.
-        let p = vec3<f32>(xs[ix], ys[iy], zs[iz]) / toon.probe_dims.xyz;
+        let p = vec3<f32>(xs[ix], ys[iy], zs[iz]) / scene.probe.xyz;
         taps.c0 = taps.c0 + textureSampleLevel(probe_c0, probe_sampler, p, 0.0) * w;
         taps.c1 = taps.c1 + textureSampleLevel(probe_c1, probe_sampler, p, 0.0) * w;
         taps.c2 = taps.c2 + textureSampleLevel(probe_c2, probe_sampler, p, 0.0) * w;
@@ -220,7 +214,7 @@ fn probe_radiance(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         probe_channel(s.c0.g, vec3<f32>(s.c1.g, s.c2.g, s.c3.g), n),
         probe_channel(s.c0.b, vec3<f32>(s.c1.b, s.c2.b, s.c3.b), n),
     );
-    let sun = toon.sun_rgb.rgb * (s.c0.a * max(dot(n, toon.sun_dir.xyz), 0.0));
+    let sun = scene.sun_rgb.rgb * (s.c0.a * max(dot(n, scene.sun_dir.xyz), 0.0));
     return l1 + sun;
 }
 
@@ -371,6 +365,6 @@ fn fragment(
     }
 
     var out: FragmentOutput;
-    out.color = vec4<f32>(base_color.rgb * toon_shade(radiance, toon.curve), base_color.a);
+    out.color = vec4<f32>(base_color.rgb * toon_shade(radiance, scene.curve), base_color.a);
     return out;
 }

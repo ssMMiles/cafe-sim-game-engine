@@ -24,7 +24,7 @@ use profiling::{GfxProfilingPlugin, run_effect_bench};
 use crate::editor::EditorMode;
 use crate::game::gfx::toon_material::{
     DefaultToonLightmap, ToonLook, create_default_toon_lightmap, create_probe_volume_images,
-    sync_toon_look, update_toon_look,
+    update_toon_look,
 };
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -65,12 +65,7 @@ impl Plugin for GfxPlugin {
         app.insert_resource(DefaultToonLightmap(handle));
         app.insert_resource(probes);
         app.init_resource::<ToonLook>();
-        app.add_systems(
-            Update,
-            (update_toon_look, sync_toon_look)
-                .chain()
-                .in_set(GfxSet::InGame),
-        );
+        app.add_systems(Update, update_toon_look.in_set(GfxSet::InGame));
 
         app.add_systems(Update, update_crosshair_display.in_set(GfxSet::InGame));
 
