@@ -1,14 +1,14 @@
 use bevy::prelude::*;
 use engine_api::{
     AutoCollider, ConvertToToon, DefaultToonLightmap, DynamicLit, PlayerCamera, ProbeVolumeImages,
-    ToonMaterial,
+    ToonMaterial, UnlitMaterial,
 };
 use std::collections::HashMap;
 
 use crate::catalog::{PieceDef, PieceKind};
 use crate::grid::{CafeAnchor, PIECE_SCALE};
 use crate::menus::ActiveMenu;
-use crate::shading::{ProbeLitColors, probe_lit};
+use crate::shading::{ProbeLitColors, flat, probe_lit};
 use crate::spawn::SpawnOwnedCommands;
 
 /// Currently selected piece for placement.
@@ -61,13 +61,15 @@ pub struct PaintMaterial {
     pub shading: PaintShading,
 }
 
-/// How a tinted piece is lit. See [`crate::shading`].
+/// How a tinted piece is shaded. See [`crate::shading`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PaintShading {
-    /// Bevy's PBR under the engine's sun and ambient — for the placement
-    /// ghost (toon can't be translucent) and the thumbnail rig, which has
-    /// its own light.
-    Pbr,
+    /// A translucent silhouette in the colour — the placement ghost
+    /// (`UnlitMaterial`, the scene pass's transparent layer).
+    Ghost,
+    /// The colour, flat and opaque, unlit — the shop thumbnails, which have
+    /// no lights and want to read as a swatch. `alpha` is ignored.
+    Flat,
     /// The toon shading the level uses, lit from the probe volume where the
     /// piece stands. Opaque only; `alpha` is ignored.
     ProbeLit,
@@ -126,7 +128,7 @@ pub fn sync_preview(
             preview.insert(PaintMaterial {
                 color: piece.color(),
                 alpha: 0.55,
-                shading: PaintShading::Pbr,
+                shading: PaintShading::Ghost,
             });
         }
         preview_entity.0 = Some(preview.id());
@@ -137,7 +139,7 @@ pub fn sync_preview(
 /// descendants, replace their materials with the requested tint.
 pub fn apply_paint_when_loaded(
     mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut unlit_materials: ResMut<Assets<UnlitMaterial>>,
     mut toon_materials: ResMut<Assets<ToonMaterial>>,
     mut colors: ResMut<ProbeLitColors>,
     lightmap: Res<DefaultToonLightmap>,
@@ -165,20 +167,34 @@ pub fn apply_paint_when_loaded(
 
         let meshes = descendants.iter().copied().filter(|&e| mesh_q.contains(e));
         match paint.shading {
-            PaintShading::Pbr => {
+            PaintShading::Ghost => {
                 let srgba = paint.color.to_srgba();
-                let alpha_mode = if paint.alpha < 1.0 {
-                    AlphaMode::Blend
-                } else {
-                    AlphaMode::Opaque
-                };
-                let tinted = materials.add(StandardMaterial {
-                    base_color: Color::srgba(srgba.red, srgba.green, srgba.blue, paint.alpha),
-                    alpha_mode,
-                    ..default()
-                });
+                let tinted = unlit_materials.add(UnlitMaterial::new(Color::srgba(
+                    srgba.red,
+                    srgba.green,
+                    srgba.blue,
+                    paint.alpha,
+                )));
                 for e in meshes {
-                    commands.entity(e).insert(MeshMaterial3d(tinted.clone()));
+                    commands
+                        .entity(e)
+                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .insert(MeshMaterial3d(tinted.clone()));
+                }
+            }
+            PaintShading::Flat => {
+                let tinted = flat(
+                    paint.color,
+                    &mut colors,
+                    &mut toon_materials,
+                    &lightmap,
+                    &probes,
+                );
+                for e in meshes {
+                    commands
+                        .entity(e)
+                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .insert(MeshMaterial3d(tinted.clone()));
                 }
             }
             PaintShading::ProbeLit => {

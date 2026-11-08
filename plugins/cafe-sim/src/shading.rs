@@ -14,15 +14,19 @@
 //!   shared — a probe-lit material carries nothing per instance, and
 //!   same-mesh-same-material instances batch into one draw.
 //!
-//! The ghost preview stays `StandardMaterial`: toon is always opaque, so a
-//! translucent toon ghost is not possible.
+//! The ghost preview is the engine's `UnlitMaterial` (translucent, unlit, the
+//! scene pass's transparent layer); the shop thumbnails are a flat toon
+//! colour. Neither is lit — bevy's PBR isn't in the app at all.
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use engine_api::{DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource};
 
-/// Shared probe-lit toon materials by colour.
+/// Shared toon materials by colour: probe-lit ones and flat (unlit) ones.
 #[derive(Resource, Default)]
-pub struct ProbeLitColors(HashMap<[u8; 4], Handle<ToonMaterial>>);
+pub struct ProbeLitColors {
+    probe_lit: HashMap<[u8; 4], Handle<ToonMaterial>>,
+    flat: HashMap<[u8; 4], Handle<ToonMaterial>>,
+}
 
 /// The probe-lit toon material for `color`, building it on first use.
 pub fn probe_lit(
@@ -33,13 +37,35 @@ pub fn probe_lit(
     probes: &ProbeVolumeImages,
 ) -> Handle<ToonMaterial> {
     cache
-        .0
+        .probe_lit
         .entry(color.to_srgba().to_u8_array())
         .or_insert_with(|| {
             materials.add(
                 ToonMaterial::new(ToonSource::ProbeVolume, lightmap.0.clone(), probes)
                     .with_base_color(color),
             )
+        })
+        .clone()
+}
+
+/// The flat, unlit toon material for `color` — exactly the colour, no
+/// shading — building it on first use. For the shop thumbnails, which have no
+/// lights and want to read as swatches.
+pub fn flat(
+    color: Color,
+    cache: &mut ProbeLitColors,
+    materials: &mut Assets<ToonMaterial>,
+    lightmap: &DefaultToonLightmap,
+    probes: &ProbeVolumeImages,
+) -> Handle<ToonMaterial> {
+    cache
+        .flat
+        .entry(color.to_srgba().to_u8_array())
+        .or_insert_with(|| {
+            let mut material = ToonMaterial::new(ToonSource::Lightmap, lightmap.0.clone(), probes)
+                .with_base_color(color);
+            material.shading.unlit = 1;
+            materials.add(material)
         })
         .clone()
 }

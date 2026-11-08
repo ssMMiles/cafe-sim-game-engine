@@ -1,9 +1,15 @@
 //! 3D mesh thumbnails for the buy menu.
 //!
 //! For every piece in the catalog we spin up a private mini-scene on its own
-//! render layer: a `Camera3d` rendering to an `Image`, a key light, and the
-//! piece itself painted in its catalog color. The shop UI renders the image
-//! as an `ImageNode` inside each piece card.
+//! render layer: a `Camera3d` rendering to an `Image` and the piece itself,
+//! flat-shaded in its catalog color (or its own textures). The shop UI
+//! renders the image as an `ImageNode` inside each piece card.
+//!
+//! The cameras render for a fixed number of frames once every piece has its
+//! meshes, then switch off: an active `Camera3d` is a whole 3D view every
+//! frame, and there is one per piece. The budget is generous because what
+//! has to land in that window is a pipeline compile and a texture upload per
+//! piece, not just a frame.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{ClearColorConfig, RenderTarget, visibility::RenderLayers};
@@ -15,6 +21,7 @@ use crate::catalog::CATALOG;
 use crate::grid::PIECE_SCALE;
 use crate::placement::{PaintMaterial, PaintShading};
 use crate::spawn::SpawnOwnedWorld;
+use engine_api::ConvertToToon;
 
 const THUMB_SIZE: u32 = 256;
 /// First render layer reserved for thumbnails. Each piece reserves the next
@@ -24,6 +31,15 @@ const FIRST_THUMB_LAYER: usize = 8;
 /// Y offset for the hidden thumbnail world. Far enough above the cafe that no
 /// stray physics or culling logic in the main scene can reach the previews.
 const THUMB_WORLD_Y: f32 = 1000.0;
+/// Frames the cameras keep rendering after the last piece's meshes appear.
+const SETTLE_FRAMES: u32 = 120;
+
+/// A thumbnail camera, and how many frames it still renders once every
+/// piece has loaded (`None` until then).
+#[derive(Component)]
+pub struct ThumbnailCamera {
+    frames_left: Option<u32>,
+}
 
 #[derive(Resource, Default)]
 pub struct PieceThumbnails(pub HashMap<&'static str, Handle<Image>>);
@@ -75,33 +91,24 @@ pub fn init_thumbnails(world: &mut World) {
             RenderTarget::Image(image_handle.clone().into()),
             Transform::from_translation(origin + cam_offset).looking_at(origin, Vec3::Y),
             layers.clone(),
+            ThumbnailCamera { frames_left: None },
         ));
 
-        // Key light for the thumbnail scene.
-        world.spawn_owned((
-            DirectionalLight {
-                illuminance: 6000.0,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::from_translation(origin + Vec3::new(3.0, 4.0, 3.0))
-                .looking_at(origin, Vec3::Y),
-            layers.clone(),
-        ));
-
-        // The piece itself — painted with the catalog color, unless the piece
-        // opts out of tinting to keep its own model material.
+        // The piece itself — converted to toon by the host (lightmap source
+        // with no lightmap: flat, in its own colours), then painted with the
+        // catalog color unless the piece opts out of tinting.
         let scene: Handle<WorldAsset> = world.resource::<AssetServer>().load(piece.asset_path);
         let mut thumb = world.spawn_owned((
             WorldAssetRoot(scene),
             Transform::from_translation(origin).with_scale(Vec3::splat(PIECE_SCALE)),
             ThumbnailScene(layers),
+            ConvertToToon,
         ));
         if piece.tint {
             thumb.insert(PaintMaterial {
                 color: piece.color(),
                 alpha: 1.0,
-                shading: PaintShading::Pbr,
+                shading: PaintShading::Flat,
             });
         }
 
@@ -138,5 +145,26 @@ pub fn propagate_thumbnail_layers(
             commands.entity(e).insert(marker.0.clone());
         }
         commands.entity(root).remove::<ThumbnailScene>();
+    }
+}
+
+/// Switch the thumbnail cameras off [`SETTLE_FRAMES`] after the last piece
+/// has its meshes (every [`ThumbnailScene`] marker gone).
+pub fn settle_thumbnail_cameras(
+    pending: Query<(), With<ThumbnailScene>>,
+    mut cameras: Query<(&mut Camera, &mut ThumbnailCamera)>,
+) {
+    if !pending.is_empty() {
+        return;
+    }
+    for (mut camera, mut thumb) in &mut cameras {
+        if !camera.is_active {
+            continue;
+        }
+        let left = thumb.frames_left.get_or_insert(SETTLE_FRAMES);
+        *left = left.saturating_sub(1);
+        if *left == 0 {
+            camera.is_active = false;
+        }
     }
 }

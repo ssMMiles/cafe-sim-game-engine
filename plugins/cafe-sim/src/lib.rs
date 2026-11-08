@@ -86,7 +86,7 @@ use staff::{
 use staff_agent::{
     PayrollNotice, init_staff_assets, staff_day_lifecycle, tick_notice_toast, tick_staff,
 };
-use thumbnails::{init_thumbnails, propagate_thumbnail_layers};
+use thumbnails::{init_thumbnails, propagate_thumbnail_layers, settle_thumbnail_cameras};
 use time::{GameTime, advance_game_time, spawn_time_hud, update_time_text};
 use ui::{UiTheme, update_interactive_visuals};
 
@@ -237,7 +237,7 @@ impl DynamicPlugin for CafeSimPlugin {
                     sync_shop_name_display,
                     sync_preview,
                     apply_paint_when_loaded,
-                    propagate_thumbnail_layers,
+                    (propagate_thumbnail_layers, settle_thumbnail_cameras),
                     update_preview_transform,
                     handle_place_click,
                     manage_placement_hint,

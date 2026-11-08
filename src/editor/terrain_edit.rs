@@ -17,6 +17,8 @@ use bevy::{
     prelude::*,
 };
 
+use engine_api::UnlitMaterial;
+
 use crate::editor::history::{Change, History};
 use crate::editor::picking::{EditorRay, ViewportInput};
 use crate::game::world::terrain::{
@@ -139,21 +141,16 @@ pub fn update_brush_preview(
     brush_hit: Res<TerrainBrushHit>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<UnlitMaterial>>,
     mut preview_query: Query<(&mut Transform, &mut Visibility), With<BrushPreviewMarker>>,
     mut gizmos: Gizmos,
 ) {
     if preview_query.is_empty() {
         commands.spawn((
             Mesh3d(meshes.add(Circle::new(1.0))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgba(0.4, 0.85, 1.0, 0.35),
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                double_sided: true,
-                cull_mode: None,
-                ..default()
-            })),
+            // Translucent, unlit, visible from both sides — the scene pass's
+            // transparent layer does all three.
+            MeshMaterial3d(materials.add(UnlitMaterial::new(Color::srgba(0.4, 0.85, 1.0, 0.35)))),
             Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
             Visibility::Hidden,
             NotShadowCaster,

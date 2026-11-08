@@ -40,7 +40,7 @@ use bevy::{
         storage::GpuShaderBuffer,
         sync_world::MainEntity,
         texture::GpuImage,
-        view::{RenderVisibleEntities, ViewTarget},
+        view::{ExtractedView, RenderVisibleEntities, ViewTarget},
     },
 };
 
@@ -260,13 +260,23 @@ fn queue_draws<M: SceneMaterial>(
     meshes: Res<RenderAssets<RenderMesh>>,
     materials: Res<RenderAssets<PreparedMaterial<M>>>,
     skins: Res<SkinUniforms>,
-    views: Query<(Entity, &RenderVisibleEntities, &Msaa, &ViewTarget), With<Camera3d>>,
+    views: Query<
+        (
+            Entity,
+            &ExtractedView,
+            &RenderVisibleEntities,
+            &Msaa,
+            &ViewTarget,
+        ),
+        With<Camera3d>,
+    >,
 ) {
     if sources.0.is_empty() {
         return;
     }
 
-    for (view_entity, visible, msaa, target) in &views {
+    for (view_entity, view, visible, msaa, target) in &views {
+        let view_position = view.world_from_view.translation();
         let Some(class) = visible.get::<Mesh3d>() else {
             continue;
         };
@@ -328,9 +338,12 @@ fn queue_draws<M: SceneMaterial>(
             };
 
             let start = instances.0.len() as u32;
+            let mut distance = 0.0f32;
             for (main_entity, source) in run {
                 let mut instance = source.instance;
                 instance.skin_index = skins.skin_index(*main_entity).unwrap_or(0);
+                let origin = instance.world_from_local.w_axis.truncate();
+                distance = distance.max(origin.distance(view_position));
                 instances.0.push(instance);
             }
             draws.push(SceneDraw {
@@ -340,6 +353,7 @@ fn queue_draws<M: SceneMaterial>(
                 colour_pipeline,
                 prepass_pipeline,
                 instances: start..instances.0.len() as u32,
+                distance,
             });
         }
 

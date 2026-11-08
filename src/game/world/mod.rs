@@ -1,4 +1,5 @@
-use bevy::{light::NotShadowCaster, prelude::*};
+use bevy::prelude::*;
+use engine_api::{DefaultToonLightmap, ProbeVolumeImages, ToonMaterial, ToonSource};
 
 pub mod baking;
 pub mod chunk_assets;
@@ -117,65 +118,42 @@ pub struct SunDebugMarker;
 
 /// Conversion from lightmap units to the physical units Bevy's PBR path wants.
 ///
-/// All toon surfaces (terrain, placed meshes) read baked lightmaps and ignore
-/// real-time lights entirely. The one `DirectionalLight` and the ambient
-/// resource exist only for meshes that still use `StandardMaterial` — the
-/// player character and editor previews. 1.0 sun ≙ 10 000 lux and 0.25
-/// ambient ≙ brightness 80, the values the engine historically hard-coded.
-const PBR_LUX_PER_UNIT: f32 = 10_000.0;
-const PBR_AMBIENT_BRIGHTNESS_PER_UNIT: f32 = 320.0;
-
-fn sun_light(env: &terrain::storage::EnvironmentData) -> DirectionalLight {
-    DirectionalLight {
-        color: env.sun_color(),
-        illuminance: env.sun_intensity * PBR_LUX_PER_UNIT,
-        // Shadows are baked; this light never casts any.
-        shadow_maps_enabled: false,
-        ..default()
-    }
-}
-
-fn ambient_brightness(env: &terrain::storage::EnvironmentData) -> f32 {
-    env.ambient_intensity * PBR_AMBIENT_BRIGHTNESS_PER_UNIT
-}
-
+/// All lighting is baked: no surface in the game reads a bevy light, and
+/// since 2026-11-08 bevy_pbr isn't even in the app (`docs/SCENE_PASS_PLAN.md`
+/// Phase 5). The sun exists as a `Transform` on [`baking::BakedSun`] — the
+/// bake reads its direction — plus the debug cone below; the ambient lives
+/// in `EnvironmentData` and reaches the shaders through the scene uniform.
 pub fn setup(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    toon_materials: &mut ResMut<Assets<ToonMaterial>>,
+    default_lightmap: &DefaultToonLightmap,
+    probes: &ProbeVolumeImages,
 ) {
     log::info!("Setting up the game world");
 
     terrain::setup(commands);
 
-    // Seed lighting from the environment defaults. Once the world's metadata
-    // finishes loading, `apply_environment` overwrites these with whatever the
-    // level saved; the defaults are the same values the engine used to
-    // hard-code here, so an unsaved world looks identical either way.
+    // Seed the sun from the environment defaults. Once the world's metadata
+    // finishes loading, `apply_environment` overwrites it with whatever the
+    // level saved.
     let env = terrain::storage::EnvironmentData::default();
-
-    commands.insert_resource(GlobalAmbientLight {
-        color: env.ambient_color(),
-        brightness: ambient_brightness(&env),
-        ..default()
-    });
-
     let sun_transform = env.sun_transform();
 
-    commands.spawn((GameEntity, baking::BakedSun, sun_light(&env), sun_transform));
+    commands.spawn((GameEntity, baking::BakedSun, sun_transform));
 
-    // Debug sun position with yellow cone
+    // Debug sun position: a yellow cone, flat-shaded (a toon material with
+    // `unlit` set is the opaque "just this colour" material; the translucent
+    // one is `UnlitMaterial`).
+    let mut yellow = ToonMaterial::new(ToonSource::Lightmap, default_lightmap.0.clone(), probes)
+        .with_base_color(Color::srgb(1.0, 1.0, 0.0));
+    yellow.shading.unlit = 1;
+    yellow.double_sided = true;
     commands.spawn((
         GameEntity,
         SunDebugMarker,
         Mesh3d(meshes.add(Cone::new(1.0, 3.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 1.0, 0.0),      // Bright yellow
-            emissive: Color::srgb(1.0, 1.0, 0.0).into(), // Fully emissive so it glows
-            cull_mode: None,                             // Show both sides
-            ..Default::default()
-        })),
-        NotShadowCaster, // Prevent casting shadows
+        MeshMaterial3d(toon_materials.add(yellow)),
         sun_debug_transform(&sun_transform),
     ));
 }
@@ -201,8 +179,7 @@ fn sun_debug_transform(sun: &Transform) -> Transform {
 fn apply_environment(
     terrain_world: Option<Res<terrain::storage::TerrainWorld>>,
     active: Option<Res<crate::projects::ActiveProject>>,
-    mut ambient: ResMut<GlobalAmbientLight>,
-    mut sun_query: Query<(&mut Transform, &mut DirectionalLight), With<baking::BakedSun>>,
+    mut sun_query: Query<&mut Transform, With<baking::BakedSun>>,
     mut cone_query: Query<&mut Transform, (With<SunDebugMarker>, Without<baking::BakedSun>)>,
 ) {
     let Some(terrain_world) = terrain_world else {
@@ -214,13 +191,9 @@ fn apply_environment(
 
     let env = &terrain_world.metadata.environment;
 
-    ambient.color = env.ambient_color();
-    ambient.brightness = ambient_brightness(env);
-
     let sun_transform = env.sun_transform();
-    for (mut t, mut light) in sun_query.iter_mut() {
+    for mut t in sun_query.iter_mut() {
         *t = sun_transform;
-        *light = sun_light(env);
     }
     for mut t in cone_query.iter_mut() {
         *t = sun_debug_transform(&sun_transform);

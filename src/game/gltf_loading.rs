@@ -1,4 +1,4 @@
-use engine_api::dropped_standard_features;
+use engine_api::{UnlitMaterial, dropped_standard_features};
 
 use crate::game::{
     GameEntity,
@@ -15,13 +15,13 @@ use bevy::{
     world_serialization::WorldInstanceReady,
 };
 
-/// Overrides a specific material after scene load, replacing all mesh materials.
+/// Dress every mesh of a scene in one translucent unlit tint once it has
+/// loaded — the placement ghost. The scene's own materials are replaced, not
+/// layered under: a ghost is a silhouette of where the thing would go.
 #[derive(Component, Clone)]
 pub struct PendingMaterial {
+    /// Linear RGBA; the alpha is the ghost's opacity.
     pub base_color: Color,
-    pub metallic: f32,
-    pub perceptual_roughness: f32,
-    pub alpha_mode: bevy::material::AlphaMode,
 }
 
 /// One probe-lit toon material per glTF material, shared by every dynamic
@@ -43,10 +43,13 @@ pub struct PendingMaterial {
 #[derive(Resource, Default)]
 pub struct ProbeToonMaterials(HashMap<Option<AssetId<StandardMaterial>>, Handle<ToonMaterial>>);
 
-pub fn apply_material_to_meshes(
+/// Put `material` on every mesh under `children`, taking the glTF's own
+/// `StandardMaterial` off — nothing renders that type any more, but leaving
+/// it would keep its asset alive for nothing.
+pub fn apply_material_to_meshes<M: Material>(
     commands: &mut Commands,
     children: &Children,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<M>,
     mesh_query: &Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
     children_query: &Query<&Children>,
 ) {
@@ -54,6 +57,7 @@ pub fn apply_material_to_meshes(
         if let Ok((entity, _)) = mesh_query.get(child) {
             commands
                 .entity(entity)
+                .remove::<MeshMaterial3d<StandardMaterial>>()
                 .insert(MeshMaterial3d(material.clone()));
         }
 
@@ -94,8 +98,9 @@ pub fn on_scene_ready(
     )>,
     mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
     children_query: Query<&Children>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    std_materials: Res<Assets<StandardMaterial>>,
     mut toon_materials: ResMut<Assets<ToonMaterial>>,
+    mut unlit_materials: ResMut<Assets<UnlitMaterial>>,
     mut shared: ResMut<ProbeToonMaterials>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
     probes: Res<ProbeVolumeImages>,
@@ -135,13 +140,7 @@ pub fn on_scene_ready(
     }
 
     if let Some(pending_material) = maybe_pending_material {
-        let material = std_materials.add(StandardMaterial {
-            base_color: pending_material.base_color,
-            metallic: pending_material.metallic,
-            perceptual_roughness: pending_material.perceptual_roughness,
-            alpha_mode: pending_material.alpha_mode,
-            ..default()
-        });
+        let material = unlit_materials.add(UnlitMaterial::new(pending_material.base_color));
 
         apply_material_to_meshes(
             &mut commands,

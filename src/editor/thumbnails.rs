@@ -1,12 +1,14 @@
 //! Rendered thumbnails for the Assets tab.
 //!
-//! One persistent offscreen rig — a `Camera3d` and a `DirectionalLight` on
-//! their own [`RenderLayers`] layer, parked far below the world — renders
+//! One persistent offscreen rig — a `Camera3d` on its own [`RenderLayers`]
+//! layer, parked far below the world — renders
 //! one queued asset at a time into a small linear-sampled image, which the
 //! [`ThumbnailCache`] keeps by catalog key and `editor_ui` binds for egui.
-//! Subjects are spawned *without* `ConvertToToon`, so they render with their
-//! glTF `StandardMaterial`s under the rig's own light (the toon pipeline
-//! would sample a lightmap that doesn't exist for them).
+//! Subjects are spawned *with* `ConvertToToon` and no lightmap ever lands on
+//! them, so they render flat in their glTF base colours and textures — the
+//! shared white lightmap texel reads as "fully lit". Nothing in the app draws
+//! `StandardMaterial` (there is no bevy_pbr), so this is also the only way a
+//! subject renders at all.
 //!
 //! The job pipeline advances one state per frame: spawn the subject, wait for
 //! its meshes to load (`Aabb`s appear, and the scene's dependencies — its
@@ -37,6 +39,8 @@ use bevy::{
         },
     },
 };
+
+use engine_api::ConvertToToon;
 
 use super::catalog::{AssetEntry, AssetKind};
 use crate::game::GameEntity;
@@ -205,20 +209,6 @@ fn spawn_rig(commands: &mut Commands, images: &mut Assets<Image>) -> ThumbnailRi
             layer.clone(),
         ))
         .id();
-    // Key light from the camera's side; the world's own sun is on layer 0 and
-    // never reaches this view.
-    commands.spawn((
-        GameEntity,
-        Name::new("thumbnail light"),
-        DirectionalLight {
-            illuminance: 12_000.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::from_translation(RIG_ORIGIN + Vec3::new(3.0, 6.0, 4.0))
-            .looking_at(RIG_ORIGIN, Vec3::Y),
-        layer,
-    ));
     ThumbnailRig {
         camera,
         state: RigState::Idle,
@@ -268,6 +258,12 @@ fn spawn_subject(
             transform,
             GlobalTransform::default(),
             Visibility::Inherited,
+            // Toon, lightmap source, and no lightmap ever lands: the shared
+            // white texel reads as "fully lit", so the subject renders flat
+            // in its own base colour and texture. Nothing in the app draws
+            // `StandardMaterial` any more (no bevy_pbr), so this is also the
+            // only way it renders at all.
+            ConvertToToon,
         ));
     }
     Some(root)

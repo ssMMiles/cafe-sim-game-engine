@@ -184,9 +184,6 @@ pub fn setup_placement_preview(
                 Visibility::Inherited,
                 PendingMaterial {
                     base_color: Color::srgba(0.8, 0.8, 0.8, 0.4),
-                    metallic: 0.0,
-                    perceptual_roughness: 0.9,
-                    alpha_mode: AlphaMode::Blend,
                 },
             ));
         }
@@ -208,9 +205,6 @@ pub fn setup_placement_preview(
                     Visibility::Hidden,
                     PendingMaterial {
                         base_color: Color::srgba(0.8, 0.8, 0.8, 0.4),
-                        metallic: 0.0,
-                        perceptual_roughness: 0.9,
-                        alpha_mode: AlphaMode::Blend,
                     },
                 ))
                 .id()

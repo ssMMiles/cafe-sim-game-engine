@@ -12,6 +12,7 @@ pub use bevy;
 pub mod script;
 pub mod toon_curve;
 pub mod toon_material;
+pub mod unlit_material;
 pub use script::{
     LevelDataHooks, PropDef, PropDefault, PropValue, RegisteredScript, ScriptBinding,
     ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
@@ -22,6 +23,7 @@ pub use toon_material::{
     ToonShading, ToonSource, ToonSurfaceUniform, create_default_toon_lightmap,
     create_probe_volume_images, dropped_standard_features,
 };
+pub use unlit_material::{UnlitMaterial, UnlitUniform};
 
 // ---------------------------------------------------------------------------
 // Dynamic plugin interface
@@ -65,7 +67,13 @@ pub use toon_material::{
 ///   curve and the probe-lattice constants moved into the host scene pass's
 ///   per-scene uniform, so an environment change is one buffer write instead
 ///   of a rewrite of every toon material. `ToonShading::set_sun` is gone.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 15;
+/// - 16: [`UnlitMaterial`] — the translucent unlit tint for ghosts, discs and
+///   blob shadows, drawn by the host's scene pass. `StandardMaterial` is no
+///   longer rendered at all (bevy's `PbrPlugin` is gone); a plugin that put
+///   one on a mesh gets nothing on screen. `ToonMaterial` with
+///   `shading.unlit = 1` is the opaque flat colour, this is the translucent
+///   one.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 16;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///

@@ -37,6 +37,7 @@ const TERRAIN_PREPASS: &str = include_str!("../../../assets/shaders/scene/terrai
 const MESH_IO: &str = include_str!("../../../assets/shaders/scene/mesh_io.wesl");
 const MESH_VERTEX: &str = include_str!("../../../assets/shaders/scene/mesh_vertex.wesl");
 const SKY: &str = include_str!("../../../assets/shaders/sky_dome.wesl");
+const UNLIT: &str = include_str!("../../../assets/shaders/unlit.wesl");
 
 /// bevy_render's `view.wesl`, cut down to the fields the scene pass reads.
 /// The *layout* can't drift unnoticed: the bind group entry is built from the
@@ -71,6 +72,7 @@ impl Resolver for Stubs {
             "package::shaders::scene::mesh_io" => MESH_IO,
             "package::shaders::scene::mesh_vertex" => MESH_VERTEX,
             "package::shaders::sky_dome" => SKY,
+            "package::shaders::unlit" => UNLIT,
             "bevy_render::view" => RENDER_VIEW,
             "constants" => CONSTANTS,
             other => {
@@ -170,6 +172,12 @@ fn toon_scene_pass_shaders_compile_for_every_variant() {
 #[test]
 fn sky_dome_compiles() {
     check_all("shaders::sky_dome", &[], &[]);
+}
+
+/// The translucent overlay material: textured or not.
+#[test]
+fn unlit_compiles_for_every_variant() {
+    check_all("shaders::unlit", &[], &["VERTEX_UVS_A"]);
 }
 
 /// Terrain's three stages, as the scene pass compiles them: one `const` def

@@ -64,7 +64,7 @@ use bevy::{
     },
 };
 use engine_api::{
-    ToonMaterial,
+    ToonMaterial, UnlitMaterial,
     toon_material::{PROBE_CELL_SIZE, PROBE_VOLUME_DIMS},
 };
 
@@ -77,7 +77,7 @@ pub mod pass;
 pub mod pipeline;
 
 use material::{SceneMaterial, SceneMaterialPlugin};
-use pipeline::{SkyScenePipeline, TerrainScenePipeline, ToonScenePipeline};
+use pipeline::{SkyScenePipeline, TerrainScenePipeline, ToonScenePipeline, UnlitScenePipeline};
 
 impl SceneMaterial for TerrainMaterial {
     type Pipeline = TerrainScenePipeline;
@@ -90,6 +90,11 @@ impl SceneMaterial for ToonMaterial {
 impl SceneMaterial for SkyDomeMaterial {
     type Pipeline = SkyScenePipeline;
     const LAYER: SceneLayer = SceneLayer::Background;
+}
+
+impl SceneMaterial for UnlitMaterial {
+    type Pipeline = UnlitScenePipeline;
+    const LAYER: SceneLayer = SceneLayer::Transparent;
 }
 
 /// Every system that appends to [`SceneInstances`] and writes a view's
@@ -227,6 +232,12 @@ pub enum SceneLayer {
     /// fogged as if it were a surface a few hundred metres away
     /// (`docs/ATMOSPHERE.md`).
     Background,
+    /// Translucent overlays (`UnlitMaterial`: the placement ghost, the brush
+    /// disc, blob shadows): alpha-blended over the finished image, depth-tested
+    /// but not depth-writing, no prepass variant, drawn last and back to
+    /// front. Also not in the prepass, for a different reason than the sky:
+    /// a blob shadow in the depth buffer would get its own outline.
+    Transparent,
 }
 
 /// One `draw_indexed` call: a run of instances sharing a mesh and a material.
@@ -240,9 +251,12 @@ pub struct SceneDraw {
     pub material: BindGroup,
     pub layer: SceneLayer,
     pub colour_pipeline: CachedRenderPipelineId,
-    /// `None` for [`SceneLayer::Background`], which the prepass skips.
+    /// `None` for the layers the prepass skips (everything but `Opaque`).
     pub prepass_pipeline: Option<CachedRenderPipelineId>,
     pub instances: std::ops::Range<u32>,
+    /// Farthest instance of the run from the view, for ordering the
+    /// transparent layer back to front. Unused by the other layers.
+    pub distance: f32,
 }
 
 /// What each view draws this frame, in submission order, by render-world view
@@ -275,6 +289,7 @@ impl Plugin for ScenePassPlugin {
             SceneMaterialPlugin::<TerrainMaterial>::default(),
             SceneMaterialPlugin::<ToonMaterial>::default(),
             SceneMaterialPlugin::<SkyDomeMaterial>::default(),
+            SceneMaterialPlugin::<UnlitMaterial>::default(),
             ExtractResourcePlugin::<ToonLook>::default(),
         ));
 
@@ -346,21 +361,32 @@ fn clear_scene_draws(mut instances: ResMut<SceneInstances>, mut draws: ResMut<Sc
     draws.0.clear();
 }
 
-/// Put each view's draws in layer order once every material has queued.
+/// Put each view's draws in layer order once every material has queued, and
+/// the transparent layer back to front within itself.
 ///
-/// This is about overdraw, not correctness: the prepass has already settled
-/// depth by the time the opaque pass runs, so a sky submitted first would be
-/// depth-rejected behind terrain anyway. But it would be rejected *after*
-/// being shaded, and the dome covers the whole screen — so submitting it last
-/// is the difference between shading the visible sky and shading all of it.
-/// It also makes submission order deterministic, which the `SceneQueue`
-/// systems alone are not (they are unordered with respect to each other).
+/// For the opaque and background layers this is about overdraw, not
+/// correctness: the prepass has already settled depth by the time the opaque
+/// pass runs, so a sky submitted first would be depth-rejected behind terrain
+/// anyway — but it would be rejected *after* being shaded, and the dome covers
+/// the whole screen. For the transparent layer it *is* correctness: blending
+/// is order-dependent, so a ghost behind a blob shadow has to be drawn first.
+/// The distance is per draw (a `(material, mesh)` run), not per instance, so
+/// two translucent things sharing a material and a mesh are ordered as a
+/// group; with a handful of overlays that never interleave, that is the right
+/// trade for keeping the runs that make them batch.
 ///
-/// A *stable* sort, so each material's `(material, mesh)` grouping — the thing
-/// that makes its draws batch — survives untouched.
+/// A *stable* sort, so each material's grouping survives untouched.
 fn order_scene_draws(mut draws: ResMut<SceneDraws>) {
     for list in draws.0.values_mut() {
-        list.sort_by_key(|draw| draw.layer);
+        list.sort_by(|a, b| {
+            a.layer.cmp(&b.layer).then_with(|| {
+                if a.layer == SceneLayer::Transparent {
+                    b.distance.total_cmp(&a.distance)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        });
     }
 }
 

@@ -14,7 +14,8 @@
 //! material alpha, so the shared material is never rewritten and the discs
 //! cost nothing per frame beyond their transforms.
 //!
-//! The material is unlit and alpha-blended: it stays out of the depth
+//! The material (`UnlitMaterial`, drawn by the scene pass's transparent
+//! layer) is unlit and alpha-blended: it stays out of the depth
 //! prepass, so the edge-detection post-process never draws an outline around
 //! it, and it never casts into any shadow pass.
 
@@ -29,6 +30,7 @@ use bevy::{
 use std::f32::consts::FRAC_PI_2;
 
 pub use engine_api::BlobShadow;
+use engine_api::UnlitMaterial;
 
 use crate::game::GameEntity;
 
@@ -48,7 +50,7 @@ const TEXTURE_SIZE: u32 = 64;
 #[derive(Resource)]
 pub struct BlobShadowAssets {
     mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
+    material: Handle<UnlitMaterial>,
 }
 
 /// The disc entity that follows one caster.
@@ -64,15 +66,9 @@ impl Plugin for BlobShadowPlugin {
         let assets = {
             let world = app.world_mut();
             let texture = world.resource_mut::<Assets<Image>>().add(radial_falloff());
-            let material = world
-                .resource_mut::<Assets<StandardMaterial>>()
-                .add(StandardMaterial {
-                    base_color: Color::srgba(0.0, 0.0, 0.0, BLOB_ALPHA),
-                    base_color_texture: Some(texture),
-                    alpha_mode: AlphaMode::Blend,
-                    unlit: true,
-                    ..default()
-                });
+            let material = world.resource_mut::<Assets<UnlitMaterial>>().add(
+                UnlitMaterial::new(Color::srgba(0.0, 0.0, 0.0, BLOB_ALPHA)).with_texture(texture),
+            );
             let mesh = world.resource_mut::<Assets<Mesh>>().add(Circle::new(1.0));
             BlobShadowAssets { mesh, material }
         };

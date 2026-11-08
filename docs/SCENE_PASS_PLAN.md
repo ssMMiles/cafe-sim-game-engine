@@ -1,9 +1,9 @@
 # Replacing the bevy scene pass — plan
 
-Status: **Phases 0–4 implemented** (plan written 2026-11-06; Phases 1, 3, 2
-and 4 landed 2026-11-07). Only Phase 5 (evicting `PbrPlugin`) is left, and it
-was always conditional on measurement — see the numbers in
-`docs/SCENE_PASS_BASELINE.md` §3, which now argue *for* it more than expected. Prerequisite already landed:
+Status: **Phases 0–5 implemented** (plan written 2026-11-06; Phases 1, 3, 2
+and 4 landed 2026-11-07, Phase 5 on 2026-11-08). The gameplay measurement in
+`docs/SCENE_PASS_BASELINE.md` §3.4 is what tipped Phase 5 from "default: skip"
+to worth doing: bevy_pbr was still ~1.5 ms a frame with nothing of ours in it. Prerequisite already landed:
 `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose shaders
 import no bevy PBR fragment modules (ABI 14) — the material contract a custom
 pass must honour is already small and written down (`GRAPHICS.md` §5).
@@ -263,25 +263,46 @@ come from the layer. `scene/toon_io.wesl` / `toon_vertex.wesl` were renamed
 `mesh_io` / `mesh_vertex` now that three materials share them (terrain keeps
 its own narrower pair). Measurement: `SCENE_PASS_BASELINE.md` §3.4-3.5.
 
-**Phase 5 — optional: evict PbrPlugin.** Still optional, but the Phase 3/4
-gameplay measurement makes the case better than expected: with nothing of
-ours left in bevy's phases, bevy_pbr still spends **~0.5 ms a frame** on
-machinery for the handful of `StandardMaterial` stragglers —
-`prepare_clusters_for_gpu_clustering` 0.24 ms (clustered lighting, in a game
-where *all* lighting is baked), `prepare_preprocess_bind_groups` 0.10 ms, and
-~0.15 ms across the `write_binned_instance_buffers` instantiations. That is
-roughly twice what our entire scene pass costs.
+**Phase 5 — evict PbrPlugin.** *Done (2026-11-08), in two commits.* The
+gameplay table on build `19225e1`/`bc2b5fe` showed bevy_pbr still costing
+~1.5 ms a frame with none of our geometry in its phases — `prepare_clusters_for_gpu_clustering`
+0.40, `prepare_lights` 0.16, GPU preprocessing ~0.75 across its systems,
+mesh/view bind groups, previous-frame transforms, skins — roughly five times
+what our own pass costs, for four translucent overlays and a debug cone.
 
-Requires porting: skinning (`extract_skins`/`prepare_skins`, both `pub`), the
-stragglers (ghosts + blob shadows need a small alpha-blend pipeline in our
-pass with back-to-front sorting over a handful of entities; brush disc
-likewise), and a lit path for thumbnails (or accepting flat thumbnails); plus
-verifying bevy_gltf still functions without `PbrPlugin` registering
-`Assets<StandardMaterial>` (the glTF loader and `with_surface_of` conversion
-still need the asset type to exist). `DirectionalLight`/`GlobalAmbientLight`
-and `world/mod.rs`'s derivation of them go with it.
+*5a — nothing of ours on `StandardMaterial`.* engine-api gained
+`UnlitMaterial` (ABI 16): a translucent unlit tint drawn by a new
+`SceneLayer::Transparent` (alpha blend, depth test, no depth write, no
+prepass variant, drawn last, back to front per `(material, mesh)` run). The
+placement ghost (`PendingMaterial` is now just a colour), the brush disc,
+blob shadows and cafe-sim's placement ghost use it; the sun debug cone and
+cafe-sim's thumbnail tints are flat toon (`shading.unlit = 1`); both thumbnail
+rigs lost their `DirectionalLight` and spawn subjects with `ConvertToToon`, so
+thumbnails render flat in their own colours and textures; `BakedSun` is a
+bare `Transform` and `GlobalAmbientLight` is gone. cafe-sim's thumbnail
+cameras — one per catalog piece, previously active forever — switch off
+120 frames after the last piece's meshes appear.
 
-A cheaper intermediate worth measuring first: those three rows are driven by
-lights and by meshes in bevy's binned phases. Culling the one `BakedSun`
-`DirectionalLight` (it exists only to light `StandardMaterial` previews) may
-take `prepare_clusters_for_gpu_clustering` with it for a fraction of the work.
+*5b — `PbrPlugin` and `GizmoRenderPlugin` disabled.* What had to be replaced:
+**skinning** (`scene_pass/skin.rs`: joint × inverse-bindpose matrices for
+every visible `SkinnedMesh`, rebuilt each frame into our own storage buffer,
+replacing bevy's `SkinUniforms` at bind group 0 binding 2); **3D line
+gizmos** (`scene_pass/gizmos.rs` + `shaders/gizmos/lines.wesl`, bevy's own
+shader): bevy's 3D gizmo pipeline is only installed when `PbrPlugin` is
+present and is built on `MeshPipeline`'s view layout, and everything it uses
+inside `bevy_gizmos_render` is private, so this is a from-scratch renderer
+over `bevy_gizmos`' public `GizmoHandles`/`GizmoAsset` — solid, dotted and
+dashed lines, list and strip, perspective width, depth bias; **line joints
+are not supported** (nothing here configures them) and neither are retained
+`Gizmo` components (nothing uses them); and **`StandardMaterial` as an
+asset**, which the glTF loader still produces and `with_surface_of` converts:
+`init_asset` + `register_type::<MeshMaterial3d<StandardMaterial>>` by hand,
+the way Phase 1 did for terrain.
+
+What goes with `PbrPlugin`: `MaterialPlugin<StandardMaterial>`, the mesh
+render plugin (extraction, GPU preprocessing, binned phases, `mesh_view` bind
+groups), lights/clusters/shadows, SSAO/SSR/fog/volumetrics/decals/atmosphere
+plugins, the prepass material systems and previous-frame transforms. What
+stays: `bevy_light`'s `LightPlugin` (main-world, added separately by
+`DefaultPlugins`; inert with no light components), `bevy_gizmos::GizmoPlugin`
+(main world — the `Gizmos` API, config store, `GizmoAsset` building).

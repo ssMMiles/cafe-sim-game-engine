@@ -20,7 +20,7 @@ use bevy::{
     render::{
         mesh::MeshVertexBufferLayoutRef,
         render_resource::{
-            BindGroupLayoutDescriptor, ColorTargetState, ColorWrites, CompareFunction,
+            BindGroupLayoutDescriptor, BlendState, ColorTargetState, ColorWrites, CompareFunction,
             DepthBiasState, DepthStencilState, Face, FragmentState, MultisampleState,
             PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, SpecializedMeshPipeline,
             SpecializedMeshPipelineError, StencilState, TextureFormat, VertexState,
@@ -28,7 +28,7 @@ use bevy::{
     },
     shader::{Shader, ShaderDefVal},
 };
-use engine_api::{TOON_DOUBLE_SIDED_DEF, ToonMaterial, ToonMaterialKey};
+use engine_api::{TOON_DOUBLE_SIDED_DEF, ToonMaterial, ToonMaterialKey, UnlitMaterial};
 
 use crate::game::world::{sky::SkyDomeMaterial, terrain::material::TerrainMaterial};
 
@@ -117,7 +117,9 @@ impl SceneShaders {
                 self.colour.clone(),
                 vec![Some(ColorTargetState {
                     format: view.target_format,
-                    blend: None,
+                    // Only the transparent layer blends; everything else
+                    // overwrites.
+                    blend: (layer == SceneLayer::Transparent).then_some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
             ),
@@ -380,6 +382,69 @@ impl SpecializedMeshPipeline for SkyScenePipeline {
             vertex_layout,
             Vec::new(),
             // The camera is *inside* the sphere.
+            None,
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unlit (translucent overlays)
+// ---------------------------------------------------------------------------
+
+#[derive(Resource)]
+pub struct UnlitScenePipeline(SceneShaders);
+
+impl FromWorld for UnlitScenePipeline {
+    fn from_world(world: &mut World) -> Self {
+        Self(SceneShaders::load::<UnlitMaterial>(
+            world,
+            "shaders/scene/mesh_vertex.wesl",
+            "shaders/unlit.wesl",
+            // No prepass variant (`SceneLayer::Transparent`); see the sky.
+            "shaders/unlit.wesl",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UnlitPipelineKey {
+    pub view: SceneViewKey,
+}
+
+impl ScenePipeline<UnlitMaterial> for UnlitScenePipeline {
+    fn key(view: SceneViewKey, _pass: ScenePassKind, _: &()) -> Self::Key {
+        UnlitPipelineKey { view }
+    }
+}
+
+impl SpecializedMeshPipeline for UnlitScenePipeline {
+    type Key = UnlitPipelineKey;
+
+    /// Position, normal (the shared vertex stage wants one) and UV0 when the
+    /// mesh has it. Culling off: a disc is seen from both sides, and a ghost
+    /// is translucent so its back faces are part of the look.
+    fn specialize(
+        &self,
+        key: Self::Key,
+        layout: &MeshVertexBufferLayoutRef,
+    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
+        let mut attributes = vec![
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+        ];
+        let mut shader_defs = Vec::new();
+        if layout.0.contains(Mesh::ATTRIBUTE_UV_0) {
+            attributes.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
+            shader_defs.push("VERTEX_UVS_A".into());
+        }
+        let vertex_layout = layout.0.get_layout(&attributes)?;
+        Ok(self.0.descriptor(
+            "unlit_scene_pipeline",
+            ScenePassKind::Colour,
+            key.view,
+            SceneLayer::Transparent,
+            vertex_layout,
+            shader_defs,
             None,
         ))
     }

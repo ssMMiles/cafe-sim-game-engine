@@ -8,13 +8,18 @@ use crate::game::gfx::camera::setup_camera;
 use crate::game::gltf_loading::{ConvertToToon, DynamicLit};
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
-use engine_api::{BlobShadow, CharacterState, GameEntity, SimulationConfig};
+use engine_api::{
+    BlobShadow, CharacterState, DefaultToonLightmap, GameEntity, ProbeVolumeImages,
+    SimulationConfig, ToonMaterial,
+};
 pub use engine_api::{Player, PlayerCollider};
 
 pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut toon_materials: ResMut<Assets<ToonMaterial>>,
+    default_lightmap: Res<DefaultToonLightmap>,
+    probes: Res<ProbeVolumeImages>,
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     mut cursor_options: Single<&mut CursorOptions>,
@@ -64,7 +69,13 @@ pub fn setup(
     commands.insert_resource(SimulationConfig::default());
 
     // Setup the game world
-    crate::game::world::setup(&mut commands, &mut meshes, &mut materials);
+    crate::game::world::setup(
+        &mut commands,
+        &mut meshes,
+        &mut toon_materials,
+        &default_lightmap,
+        &probes,
+    );
 }
 
 pub fn exit(
