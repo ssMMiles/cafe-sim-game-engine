@@ -88,21 +88,58 @@ no `TIMESTAMP_QUERY_INSIDE_PASSES`. On a machine where they work, the
 
 ## 3. Baselines
 
-### 3.1 Before Phase 1 — editor, terrain world
+### 3.1 Before Phase 1 — editor, terrain world (taken 2026-11-07, Phase 0 build)
 
-> **Not yet taken.** `cargo run-profiling`, follow §1, paste the snapshot
-> here. This is the row set Phase 1 is judged against.
+Six snapshots, standing still, vsync off. Representative one
+(`perf-snapshot-1794093637`): frame 10.0 ms · main 9.2 · render 5.9 busy +
+0.1 waiting · 8.97 ms of system work.
+
+| ms | system |
+|---:|---|
+| 1.97 | `editor::ui::editor_ui` |
+| 1.27 | `system_timing::collect_system_timings` (the measurement itself) |
+| 0.21 + 0.20 | `write_binned_instance_buffers<Opaque3d>` / `<Opaque3dPrepass>` |
+| 0.16 | `gpu_preprocess::prepare_preprocess_bind_groups` |
+| ~0.07 | **all ten `…<TerrainMaterial>` rows together** (extract, sweep, specialization checks, erased render asset, `Assets` bookkeeping) |
+| ~0.03 | `specialize_material_meshes` + `queue_material_meshes` + `queue_prepass_material_meshes` |
+
+So the ceiling on what Phase 1 could remove was ~0.1–0.3 ms of a ~9 ms frame.
+The two biggest rows are the editor's own egui pass and the profiler; nothing
+in bevy_pbr is near them at this scene size.
 
 ### 3.2 Before Phase 1 — cafe, gameplay
 
-> **Not yet taken.** The control: Phase 1 touches no toon material, so this
-> table should be unchanged afterwards apart from noise.
-
-### 3.3 After Phase 1
-
 > **Not yet taken.**
 
-## 4. Visual checklist for Phase 1
+### 3.3 After Phase 1 — editor, terrain world (taken 2026-11-07)
+
+Representative (`perf-snapshot-1794097050`): frame 9.8 ms · main 8.9 ·
+render 5.4 busy + 0.1 waiting · 8.45 ms of system work.
+
+- **Vanished**: all eight `MaterialPlugin::<TerrainMaterial>` rows. The two
+  `Assets<TerrainMaterial>` bookkeeping rows remain (they're bevy_asset's, and
+  the asset type still exists).
+- **Appeared**: nine `scene_pass` rows, **0.09 ms together** —
+  `scene_prepass` 0.019, `prepare_scene_instances` 0.015, `scene_opaque`
+  0.011, `queue_terrain_draws` 0.011, `extract_render_asset<PreparedTerrainMaterial>`
+  0.011, `prepare_scene_bind_group` 0.008, `extract_terrain_instances` 0.006,
+  `prepare_assets<…>` 0.005, `clear_scene_draws` 0.003.
+- **Shrank**: `write_binned_instance_buffers` 0.41 → 0.27 ms (both),
+  `prepare_preprocess_bind_groups` 0.16 → 0.11, `early_prepass` 0.05 → 0.04.
+
+Net ≈ **−0.15 ms** per frame, inside the run-to-run noise of the totals
+(8.3–9.4 ms across the six Phase 0 snapshots). As the plan said: the win is
+ownership, not milliseconds, at this scene size.
+
+### 3.4 After Phase 3 — editor terrain world and cafe
+
+> **Not yet taken.** Expect `MaterialPlugin::<ToonMaterial>`'s rows to go the
+> same way, and — the one that might actually register — the two
+> `write_binned_instance_buffers` and `prepare_preprocess_bind_groups` rows to
+> fall to their straggler-only floor, since every toon sub-mesh left bevy's
+> binned phases too.
+
+## 4. Visual checklist for Phases 1 and 3
 
 Measurement is half of it; the exit criterion is "visually unchanged". With a
 terrain world loaded:
@@ -122,3 +159,17 @@ terrain world loaded:
 - [ ] Thumbnails in the Assets panel are unaffected (the rig is a `Camera3d`
       on layer 7, so it must see no terrain).
 - [ ] Web build: `tools/web.sh`, same checks, no `[Invalid ShaderModule]`.
+
+With objects placed (and the cafe, for the player + furniture):
+
+- [ ] Placed objects render with their textures, toon bands and lightmaps.
+- [ ] Double-sided materials (trees, rock, table2) show both faces with the
+      normal flipped on the back — no spurious crease outlines along leaves.
+- [ ] The player renders, animates (skinning) and is probe-lit; its blob
+      shadow (a `StandardMaterial` straggler) still draws under it.
+- [ ] Shift+L flips objects to unlit too.
+- [ ] Shift+B object bakes land on the right sub-meshes.
+- [ ] A `DynamicLit` toggle in the inspector swaps lightmap ↔ probe source.
+- [ ] Cafe furniture: draw count stays ≈ number of distinct (material, mesh)
+      pairs, not number of pieces.
+- [ ] Placement ghost, brush disc and thumbnails (all still bevy's) unaffected.

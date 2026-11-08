@@ -12,15 +12,12 @@
 // docs/DYNAMIC_LIGHTING_PLAN.md §8. Either way the banding below is shared. That keeps the WASM/WebGPU path free of
 // shadow maps and clustered lighting entirely.
 
-// The material is standalone (engine-api `ToonMaterial`, not an extension of
-// StandardMaterial), so nothing below reads bevy's PBR fragment modules: only
-// the vertex-output struct and the mesh flags, both of which any mesh pass
-// has to provide.
-import bevy_pbr::render::{
-    forward_io::{VertexOutput, FragmentOutput},
-    mesh_bindings::mesh,
-    mesh_types::MESH_FLAGS_SIGN_DETERMINANT_MODEL_3X3_BIT,
-};
+// The material is standalone (engine-api `ToonMaterial`) and drawn by our own
+// scene pass (`src/game/gfx/scene_pass`, docs/SCENE_PASS_PLAN.md): the
+// varyings and the per-instance winding flag come from our modules, and
+// nothing here reads bevy_pbr at all.
+import package::shaders::scene::toon_io::{VertexOutput, FragmentOutput};
+import package::shaders::scene::bindings::scene_instance_winds_forward;
 
 // Mirrors `ToonSurfaceUniform` in engine-api's toon_material.rs.
 struct ToonSurface {
@@ -341,9 +338,7 @@ fn toon_shade(radiance: vec3<f32>, curve: vec4<f32>) -> vec3<f32> {
 // `toon_prepass.wesl` holds the same function for the normal prepass; keep
 // the two in step.
 fn facing_normal(world_normal: vec3<f32>, is_front: bool, instance_index: u32) -> vec3<f32> {
-    let positive_determinant =
-        (mesh[instance_index].flags & MESH_FLAGS_SIGN_DETERMINANT_MODEL_3X3_BIT) != 0u;
-    let front = is_front == positive_determinant;
+    let front = is_front == scene_instance_winds_forward(instance_index);
 @if(TOON_DOUBLE_SIDED)
     return select(-world_normal, world_normal, front);
 @else

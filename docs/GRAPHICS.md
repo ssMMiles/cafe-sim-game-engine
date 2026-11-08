@@ -186,9 +186,11 @@ Fragment logic (`toon_lighting.wesl`, `fn fragment`):
 
 `src/game/world/terrain/material.rs`. **Not drawn by `MaterialPlugin`** —
 terrain goes through our own scene pass since 2026-11-07
-(`src/game/gfx/scene_pass/`, `docs/SCENE_PASS_PLAN.md` Phase 1). Vertex
+(`src/game/gfx/scene_pass/`, `docs/SCENE_PASS_PLAN.md` Phase 1), and so does
+`ToonMaterial` (Phase 3: vertex `scene/toon_vertex.wesl`, skinning from bevy's
+`SkinUniforms` buffer bound at group 0 binding 2). Terrain's stages: vertex
 `scene/terrain_vertex.wesl`, prepass fragment `scene/terrain_prepass.wesl`,
-colour fragment `terrain_toon.wesl`; bind group **1**, not 3.
+colour fragment `terrain_toon.wesl`. Both materials are bind group **1**, not 3.
 
 | Binding | What |
 |---------|------|
@@ -544,6 +546,8 @@ All are WESL except the compute bake.
 
 | File | Stage | Used by | Tested by |
 |------|-------|---------|-----------|
+| `scene/toon_io.wesl` | module | toon varyings | `shader_check` (via its importers) |
+| `scene/toon_vertex.wesl` | vertex | `ToonMaterial`, both passes, `SKINNED` variant | `shader_check` (every variant) |
 | `toon_lighting.wesl` | fragment | `ToonMaterial` | `toon_curve_matches_the_shaders` (curve block); `shader_check` (every variant) |
 | `toon_prepass.wesl` | prepass fragment | `ToonMaterial` | `shader_check`; `both_passes_flip_normals_the_same_way` |
 | `scene/bindings.wesl` | module | scene pass (view + instance bind group) | `shader_check` (via its importers) |

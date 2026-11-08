@@ -34,7 +34,7 @@ use bevy::{
 
 use bevy::render::render_phase::TrackedRenderPass;
 
-use super::{SceneBindGroup, SceneDraw, SceneDraws, terrain::PreparedTerrainMaterial};
+use super::{SceneBindGroup, SceneDraw, SceneDraws};
 
 /// Depth + world normals for everything the scene pass owns.
 pub fn scene_prepass(
@@ -48,7 +48,6 @@ pub fn scene_prepass(
     bind_group: Option<Res<SceneBindGroup>>,
     pipeline_cache: Res<PipelineCache>,
     meshes: Res<RenderAssets<RenderMesh>>,
-    materials: Res<RenderAssets<PreparedTerrainMaterial>>,
     mesh_allocator: Res<MeshAllocator>,
     mut ctx: RenderContext,
 ) {
@@ -104,7 +103,6 @@ pub fn scene_prepass(
         view_offset,
         &pipeline_cache,
         &meshes,
-        &materials,
         &mesh_allocator,
     );
 
@@ -123,7 +121,6 @@ pub fn scene_opaque(
     bind_group: Option<Res<SceneBindGroup>>,
     pipeline_cache: Res<PipelineCache>,
     meshes: Res<RenderAssets<RenderMesh>>,
-    materials: Res<RenderAssets<PreparedTerrainMaterial>>,
     mesh_allocator: Res<MeshAllocator>,
     mut ctx: RenderContext,
 ) {
@@ -161,15 +158,14 @@ pub fn scene_opaque(
         view_offset,
         &pipeline_cache,
         &meshes,
-        &materials,
         &mesh_allocator,
     );
 
     span.end(&mut pass);
 }
 
-/// The draw loop both passes share: one `draw_indexed` per [`SceneDraw`],
-/// with state set only when it actually changes.
+/// The draw loop both passes share: one `draw_indexed` per [`SceneDraw`].
+/// Material-agnostic: a draw carries its prepared bind group.
 ///
 /// `@builtin(instance_index)` is `firstInstance + i` under WebGPU, so passing
 /// the draw's instance range is all the shader needs to find its own slice of
@@ -177,13 +173,12 @@ pub fn scene_opaque(
 #[expect(clippy::too_many_arguments, reason = "render pass state")]
 fn render_draws<'w>(
     pass: &mut TrackedRenderPass<'w>,
-    draws: &[SceneDraw],
+    draws: &'w [SceneDraw],
     pipeline_of: impl Fn(&SceneDraw) -> CachedRenderPipelineId,
     bind_group: &'w SceneBindGroup,
     view_offset: &ViewUniformOffset,
     pipeline_cache: &'w PipelineCache,
     meshes: &RenderAssets<RenderMesh>,
-    materials: &'w RenderAssets<PreparedTerrainMaterial>,
     mesh_allocator: &'w MeshAllocator,
 ) {
     pass.set_bind_group(0, &bind_group.0, &[view_offset.offset]);
@@ -192,8 +187,7 @@ fn render_draws<'w>(
         let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_of(draw)) else {
             continue; // Still compiling.
         };
-        let (Some(mesh), Some(material)) = (meshes.get(draw.mesh), materials.get(draw.material))
-        else {
+        let Some(mesh) = meshes.get(draw.mesh) else {
             continue;
         };
         let Some(vertices) = mesh_allocator.mesh_vertex_slice(&draw.mesh) else {
@@ -201,7 +195,7 @@ fn render_draws<'w>(
         };
 
         pass.set_render_pipeline(pipeline);
-        pass.set_bind_group(1, &material.bind_group, &[]);
+        pass.set_bind_group(1, &draw.material, &[]);
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
 
         match &mesh.buffer_info {

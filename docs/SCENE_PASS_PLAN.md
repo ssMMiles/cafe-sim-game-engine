@@ -1,7 +1,7 @@
 # Replacing the bevy scene pass — plan
 
-Status: **Phase 0 tooling in place, Phase 1 implemented** (plan written
-2026-11-06, Phase 1 landed 2026-11-07). Prerequisite already landed:
+Status: **Phases 0, 1 and 3 implemented; Phase 2 in progress** (plan written
+2026-11-06, Phases 1 and 3 landed 2026-11-07). Prerequisite already landed:
 `ToonMaterial` and `TerrainMaterial` are standalone `Material`s whose shaders
 import no bevy PBR fragment modules (ABI 14) — the material contract a custom
 pass must honour is already small and written down (`GRAPHICS.md` §5).
@@ -229,15 +229,25 @@ land while toon still renders through bevy (the Material path reads the same
 uniform via a small shared binding) or be folded into Phase 3 — decide when
 Phase 1 has settled the bind-group layout.
 
-**Phase 3 — ToonMaterial wholesale.** The big one: textures + UV transform,
-double-sided variants (`TOON_DOUBLE_SIDED` def from our key), lightmapped vs
-probe-lit, the skinned player via bevy's `SkinUniforms`, material-asset event
-handling (lightmap arrival, source swaps, Shift+L), and instance grouping so
-probe-lit furniture still batches. Unregister `MaterialPlugin::<ToonMaterial>`.
-*Exit:* the full visual checklist (trees/rock/table2 double-sided, player
-animation + probe lighting, cafe furniture batching = draw-count check, object
-bake arrival), plugins unchanged apart from the Phase 2 rebuild, web build
-clean through `tint-check`.
+**Phase 3 — ToonMaterial wholesale.** *Done (2026-11-07), before Phase 2 —
+the uniform refactor is simpler on top of our own pipeline than threaded
+through bevy's, and this way it is its own commit with no render-path change
+mixed in.* The terrain-specific code became a generic
+`material::SceneMaterialPlugin<M>` (extract, `PreparedMaterial<M>` render
+asset carrying `M::Data` as the pipeline key, per-view `queue_draws::<M>`),
+with one `ScenePipeline` specializer per material in `pipeline.rs`.
+`ToonScenePipeline` sets `VERTEX_UVS_A` / `VERTEX_UVS_B` / `SKINNED` from the
+mesh layout under bevy's def names, so the fragment shaders' `@if`s were
+untouched; `TOON_DOUBLE_SIDED` + no culling from `ToonMaterialKey`. Skinning
+binds bevy's `SkinUniforms.current_buffer` as bind group 0 binding 2 and
+`SceneInstance.skin_index` is `SkinUniforms::skin_index(main_entity)` at
+queue time; `scene/toon_vertex.wesl` ports `skin_model` + the inverse-transpose
+normal. The winding flag the double-sided flip reads comes from our instance
+flags (`scene_instance_winds_forward`), replacing bevy's mesh flags. Grouping
+by `(material, mesh)` is what keeps probe-lit furniture batching.
+*Exit (unverified until run — `SCENE_PASS_BASELINE.md` §4):* trees/rock/table2
+double-sided, player animation + probe lighting, cafe furniture draw count,
+object bake arrival, web build clean.
 
 **Phase 4 — Sky + measure + tidy.** Port the sky dome (one pipeline: cull
 off, depth write off, draw last in our opaque pass). Re-run Phase 0's

@@ -1560,3 +1560,31 @@ V1–V6 all resolved (details in SCENE_PASS_PLAN.md §5). The ones worth remembe
 - Bevy's prepass leaves back-face culling **off** while its opaque pass turns it on; ours culls in
   both. Fixed in passing: the terrain skirt-normal fix-up now reaches the prepass (one vertex shader
   for both passes), closing the open end in GRAPHICS.md §17 / EDGE_DETECTION.md §7.
+
+## Scene pass Phase 3: toon is off MaterialPlugin too — 7 November 2026
+
+Done before Phase 2 (the scene-uniform refactor is simpler on top of our own pipeline, and this keeps
+each commit to one kind of change). `scene_pass/terrain.rs` became the generic
+`scene_pass/material.rs`: `SceneMaterialPlugin<M>` (M: `SceneMaterial`, i.e. `Material + AsBindGroup`
+with a `ScenePipeline<M>` specializer type) does extract / `PreparedMaterial<M>` render asset (bind
+group + `M::Data` as pipeline key) / per-view `queue_draws::<M>` grouped by `(material, mesh)`.
+`SceneDraw.material` is the prepared `BindGroup` itself, so `pass.rs` knows no material types.
+
+- **Skinning without porting it**: bevy_pbr's `extract_skins`/`prepare_skins` keep running while
+  PbrPlugin is in the app; `SkinUniforms.current_buffer` is a storage buffer on every target we ship
+  (`skins_use_uniform_buffers` is the WebGL2 path), bound as group 0 binding 2, and
+  `SkinUniforms::skin_index(main_entity)` gives the joint offset at queue time → `SceneInstance.skin_index`.
+  `prepare_skins` swaps current/prev buffers every frame, which is why our bind group is rebuilt every
+  frame (it already was). `scene/toon_vertex.wesl` ports `skin_model` and the inverse-transpose normal.
+- The toon pipeline derives `VERTEX_UVS_A` / `VERTEX_UVS_B` / `SKINNED` from the mesh layout under
+  bevy's def names so the fragment shaders' `@if`s didn't change; a lightmapped mesh *gains* UV1 at
+  bake time and `SpecializedMeshPipelines` keys on the layout, so it re-specializes by itself.
+- The double-sided winding test now reads our instance flag (`scene_instance_winds_forward`) instead
+  of bevy's `MESH_FLAGS_SIGN_DETERMINANT_MODEL_3X3_BIT`; same polarity.
+- `VertexBufferLayout` is `bevy::mesh::VertexBufferLayout`, not in `render_resource`.
+- `SpecializedMeshPipelines<P>` needs `P::Key: Send + Sync` for `init_resource` — bound it on the
+  `ScenePipeline` trait.
+- Engine-api untouched in this phase (its `impl Material for ToonMaterial` is dead code until Phase 2's
+  ABI bump cleans it up). Measurements: `docs/SCENE_PASS_BASELINE.md` §3 — Phase 1 came out at
+  ≈ −0.15 ms/frame, inside noise, as predicted; the Phase 0 snapshots the user first took were all
+  the same build because the branch had been reset under the Phase 1 commit (restored by ff).

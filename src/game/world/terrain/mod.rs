@@ -16,7 +16,6 @@ pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
 use crate::game::GameEntity;
 use bootstrap::{TerrainRenderAssets, TerrainSetupMarker, create_terrain};
 use lod::{TerrainLodState, update_terrain_lod};
-use material::TerrainMaterial;
 use storage::{TerrainChunkRegistry, TerrainWorld};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -29,17 +28,9 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        // Terrain draws through our own scene pass (`gfx::scene_pass`), not
-        // `MaterialPlugin` — see docs/SCENE_PASS_PLAN.md. What the plugin did
-        // that still has to happen: register the asset type, and register
-        // `MeshMaterial3d<TerrainMaterial>` for reflection. Everything else it
-        // added (render-world extraction, specialization, queueing) is
-        // replaced; `TerrainScenePlugin` owns the render side.
-        //
-        // A material type migrates wholesale: with `MaterialPlugin` still on,
-        // every chunk would be drawn twice, once by each path.
-        app.init_asset::<TerrainMaterial>()
-            .register_type::<MeshMaterial3d<TerrainMaterial>>();
+        // No `MaterialPlugin::<TerrainMaterial>`: terrain draws through our
+        // own scene pass, whose `SceneMaterialPlugin` registers the asset type
+        // (`gfx::scene_pass`, docs/SCENE_PASS_PLAN.md).
 
         app.init_resource::<TerrainLodState>();
         app.init_resource::<storage::WorldConfig>();

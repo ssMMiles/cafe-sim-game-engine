@@ -23,8 +23,8 @@ use profiling::{GfxProfilingPlugin, run_effect_bench};
 
 use crate::editor::EditorMode;
 use crate::game::gfx::toon_material::{
-    DefaultToonLightmap, ToonLook, ToonMaterial, create_default_toon_lightmap,
-    create_probe_volume_images, sync_toon_look, update_toon_look,
+    DefaultToonLightmap, ToonLook, create_default_toon_lightmap, create_probe_volume_images,
+    sync_toon_look, update_toon_look,
 };
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -92,7 +92,9 @@ impl Plugin for GfxPlugin {
                 .run_if(in_state(EditorMode::Gameplay)),
         );
 
-        app.add_plugins(MaterialPlugin::<ToonMaterial>::default());
+        // Toon and terrain materials draw through our own scene pass, not
+        // `MaterialPlugin` (docs/SCENE_PASS_PLAN.md). The plugin registers the
+        // asset types itself.
         app.add_plugins(scene_pass::ScenePassPlugin);
         app.add_plugins(EdgeDetectionPlugin);
         app.add_plugins(AtmospherePlugin);

@@ -1,28 +1,31 @@
 //! Our own geometry passes for the 3D view — see `docs/SCENE_PASS_PLAN.md`.
 //!
-//! Phase 1 scope: **terrain only**. `MaterialPlugin::<TerrainMaterial>` is
-//! gone (`terrain/mod.rs`), and everything bevy_pbr used to do for a terrain
-//! chunk — extract, specialize, queue, bin, batch, GPU-preprocess, build the
-//! `mesh_view` bind group — happens here instead, in four systems and two
-//! render passes. Toon materials still go through `MaterialPlugin`; a material
-//! type migrates wholesale or not at all, because bevy has no per-entity
-//! opt-out of a registered `MaterialPlugin` and an entity drawn by both paths
-//! would be drawn twice.
+//! Both of our materials — `TerrainMaterial` (Phase 1) and `ToonMaterial`
+//! (Phase 3) — draw through here, not through bevy_pbr's `MaterialPlugin`.
+//! Everything bevy_pbr did for them — extract, specialize, queue, bin, batch,
+//! GPU-preprocess, build the `mesh_view` bind group — happens here instead, in
+//! a handful of systems and two render passes. What still goes through
+//! bevy_pbr: the sky dome (Phase 4), the `StandardMaterial` stragglers (ghosts,
+//! blob shadows, brush disc, thumbnails) and skinning's joint-matrix upload,
+//! which we bind rather than port. A material type migrates wholesale or not
+//! at all: bevy has no per-entity opt-out of a registered `MaterialPlugin`, so
+//! an entity reachable by both paths would be drawn twice.
 //!
-//! The dataflow, all in the render world:
+//! The dataflow, all in the render world, generic over the material type `M`
+//! (`material.rs`):
 //!
-//! 1. [`terrain::extract_terrain_instances`] (`ExtractSchedule`) — every
-//!    visible terrain chunk's mesh id, material id and transform, rebuilt each
-//!    frame into [`SceneSources`]. At ≤81 chunks that is microseconds; a
-//!    retained map keyed by `MainEntity` is the upgrade if it ever isn't.
-//! 2. [`terrain::queue_terrain_draws`] (`RenderSystems::Queue`) — per view,
-//!    walks that view's `RenderVisibleEntities` (so render layers and frustum
-//!    culling are bevy's, and the thumbnail rig on layer 7 never sees
-//!    terrain), appends to the frame's instance list, specializes the colour
-//!    and prepass pipelines, and leaves a [`SceneDraws`] component on the view.
+//! 1. `extract_instances::<M>` (`ExtractSchedule`) — every visible `M`
+//!    entity's mesh id, material id and transform, rebuilt each frame into
+//!    `SceneSources<M>`.
+//! 2. `queue_draws::<M>` (`RenderSystems::Queue`) — per view, walks that
+//!    view's `RenderVisibleEntities` (so render layers and frustum culling are
+//!    bevy's, and the thumbnail rig on layer 7 sees none of it), appends to
+//!    the frame's instance list grouped by `(material, mesh)`, specializes the
+//!    colour and prepass pipelines (`pipeline.rs`), and appends to the view's
+//!    entry in [`SceneDraws`].
 //! 3. [`prepare_scene_instances`] (`PrepareResources`) uploads the instance
 //!    list, [`prepare_scene_bind_group`] (`PrepareBindGroups`) builds bind
-//!    group 0 from it plus bevy's own view uniform.
+//!    group 0 from it plus bevy's own view uniform and joint-matrix buffer.
 //! 4. [`pass::scene_prepass`] and [`pass::scene_opaque`] draw it, as plain
 //!    `Core3d` systems — the same extension mechanism `post_process.rs` and
 //!    `atmosphere.rs` already use.
@@ -40,6 +43,8 @@ use bevy::{
     core_pipeline::{
         Core3d, Core3dSystems, core_3d::main_opaque_pass_3d, prepass::node::early_prepass,
     },
+    ecs::entity::EntityHashMap,
+    pbr::SkinUniforms,
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
@@ -47,25 +52,36 @@ use bevy::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             BufferUsages, BufferVec, CachedRenderPipelineId, PipelineCache, ShaderStages,
             ShaderType,
-            binding_types::{storage_buffer_read_only, uniform_buffer},
+            binding_types::{
+                storage_buffer_read_only, storage_buffer_read_only_sized, uniform_buffer,
+            },
         },
         renderer::{RenderDevice, RenderQueue},
-        sync_world::MainEntity,
         view::{ViewUniform, ViewUniforms},
     },
 };
-
-use bevy::{ecs::entity::EntityHashMap, platform::collections::HashMap};
+use engine_api::ToonMaterial;
 
 use crate::game::world::terrain::material::TerrainMaterial;
 
+pub mod material;
 pub mod pass;
 pub mod pipeline;
-pub mod terrain;
+
+use material::{SceneMaterial, SceneMaterialPlugin};
+use pipeline::{TerrainScenePipeline, ToonScenePipeline};
+
+impl SceneMaterial for TerrainMaterial {
+    type Pipeline = TerrainScenePipeline;
+}
+
+impl SceneMaterial for ToonMaterial {
+    type Pipeline = ToonScenePipeline;
+}
 
 /// Every system that appends to [`SceneInstances`] and writes a view's
 /// [`SceneDraws`], so [`clear_scene_draws`] can be ordered before all of them
-/// at once. One member in Phase 1; Phase 3 adds the toon queue.
+/// at once: one `queue_draws::<M>` per material type.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SceneQueue;
 
@@ -82,6 +98,10 @@ pub struct SceneInstance {
     /// scale.
     pub normal_from_local: Mat3,
     pub flags: u32,
+    /// Where this instance's joint matrices start in bevy's `SkinUniforms`
+    /// buffer (bind group 0, binding 2). Set at queue time; 0 when not
+    /// skinned, and then never read.
+    pub skin_index: u32,
 }
 
 impl SceneInstance {
@@ -102,6 +122,7 @@ impl SceneInstance {
             } else {
                 0
             },
+            skin_index: 0,
         }
     }
 }
@@ -112,19 +133,9 @@ impl Default for SceneInstance {
             world_from_local: Mat4::IDENTITY,
             normal_from_local: Mat3::IDENTITY,
             flags: Self::SIGN_DETERMINANT,
+            skin_index: 0,
         }
     }
-}
-
-/// What extraction leaves for the queue step: one entry per visible entity the
-/// scene pass owns, keyed by its main-world entity so a view's
-/// `RenderVisibleEntities` can be joined against it directly.
-///
-/// Rebuilt every frame (`clear` + fill), which is why it is a plain map rather
-/// than anything change-driven.
-#[derive(Resource, Default)]
-pub struct SceneSources {
-    pub terrain: HashMap<MainEntity, terrain::TerrainSource>,
 }
 
 /// The frame's instance array: every view's instances in one buffer, each draw
@@ -142,12 +153,13 @@ impl Default for SceneInstances {
 
 /// One `draw_indexed` call: a run of instances sharing a mesh and a material.
 ///
-/// Terrain chunks each own their lightmap and therefore their material, so
-/// every run is length 1 and the draw count equals the loaded chunk count.
-/// The structure is what makes Phase 3's probe-lit furniture batch.
+/// Terrain chunks and lightmapped objects each own their material, so their
+/// runs are length 1; probe-lit furniture sharing a material and a mesh is one
+/// instanced draw. The material is its prepared bind group (cheap `Arc`
+/// clone), so the pass needs to know nothing about material types.
 pub struct SceneDraw {
     pub mesh: AssetId<Mesh>,
-    pub material: AssetId<TerrainMaterial>,
+    pub material: BindGroup,
     pub colour_pipeline: CachedRenderPipelineId,
     pub prepass_pipeline: CachedRenderPipelineId,
     pub instances: std::ops::Range<u32>,
@@ -163,9 +175,10 @@ pub struct SceneDraw {
 #[derive(Resource, Default)]
 pub struct SceneDraws(pub EntityHashMap<Vec<SceneDraw>>);
 
-/// Bind group 0: bevy's view uniform (dynamic offset) + our instance array.
-/// One for the whole frame — the view uniform's offset is what makes it
-/// per-view.
+/// Bind group 0: bevy's view uniform (dynamic offset), our instance array,
+/// and bevy's joint-matrix buffer. One for the whole frame — the view
+/// uniform's offset is what makes it per-view. Rebuilt every frame because
+/// `prepare_skins` swaps its current and previous buffers each frame.
 #[derive(Resource)]
 pub struct SceneBindGroup(pub BindGroup);
 
@@ -178,7 +191,10 @@ pub struct ScenePassPlugin;
 
 impl Plugin for ScenePassPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(terrain::TerrainScenePlugin);
+        app.add_plugins((
+            SceneMaterialPlugin::<TerrainMaterial>::default(),
+            SceneMaterialPlugin::<ToonMaterial>::default(),
+        ));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -186,12 +202,9 @@ impl Plugin for ScenePassPlugin {
 
         render_app
             // Inserted at build time, not in `RenderStartup`: it needs no
-            // device, and `init_terrain_scene_pipeline` reads it there. Two
-            // unordered `RenderStartup` systems with a resource between them
-            // is a coin flip the loser never gets to retry — the schedule
-            // runs once.
+            // device, and the material pipelines read it there (see
+            // `material::init_scene_material` for why that ordering matters).
             .insert_resource(scene_bind_group_layout())
-            .init_resource::<SceneSources>()
             .init_resource::<SceneInstances>()
             .init_resource::<SceneDraws>()
             .add_systems(
@@ -222,13 +235,15 @@ impl Plugin for ScenePassPlugin {
 
 fn scene_bind_group_layout() -> SceneBindGroupLayout {
     let entries = BindGroupLayoutEntries::sequential(
-        // The instance array is only read by the vertex stage today, but
-        // `VERTEX_FRAGMENT` costs nothing and Phase 3's toon fragment wants
-        // the instance flags for its front/back test.
+        // The toon fragment reads the instance flags for its front/back test,
+        // so the instance array is visible to both stages.
         ShaderStages::VERTEX_FRAGMENT,
         (
             uniform_buffer::<ViewUniform>(true),
             storage_buffer_read_only::<SceneInstance>(false),
+            // bevy's joint matrices: a runtime array of mat4x4, read by the
+            // `SKINNED` vertex variant only.
+            storage_buffer_read_only_sized(false, None),
         ),
     );
     SceneBindGroupLayout(BindGroupLayoutDescriptor::new(
@@ -246,8 +261,8 @@ fn clear_scene_draws(mut instances: ResMut<SceneInstances>, mut draws: ResMut<Sc
 
 /// Upload the frame's instances.
 ///
-/// A zero-length buffer has no binding, and a frame with no terrain loaded
-/// (the main menu, a world still streaming in) is ordinary — one padding
+/// A zero-length buffer has no binding, and a frame with nothing of ours in
+/// view (the main menu, a world still streaming in) is ordinary — one padding
 /// instance keeps bind-group creation unconditional rather than making every
 /// later step handle the hole.
 fn prepare_scene_instances(
@@ -268,6 +283,7 @@ fn prepare_scene_bind_group(
     layout: Res<SceneBindGroupLayout>,
     view_uniforms: Res<ViewUniforms>,
     instances: Res<SceneInstances>,
+    skins: Res<SkinUniforms>,
 ) {
     let (Some(view_binding), Some(instance_binding)) =
         (view_uniforms.uniforms.binding(), instances.0.binding())
@@ -279,7 +295,11 @@ fn prepare_scene_bind_group(
     let bind_group = device.create_bind_group(
         "scene_bind_group",
         &pipeline_cache.get_bind_group_layout(&layout.0),
-        &BindGroupEntries::sequential((view_binding, instance_binding)),
+        &BindGroupEntries::sequential((
+            view_binding,
+            instance_binding,
+            skins.current_buffer.as_entire_binding(),
+        )),
     );
     commands.insert_resource(SceneBindGroup(bind_group));
 }
