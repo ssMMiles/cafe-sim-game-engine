@@ -201,48 +201,37 @@ goes. What the wider view costs on the *GPU* is not visible here: macOS has no
 in-pass timestamps (`docs/PERFORMANCE.md`), and most of the 5 ms of render-thread
 work has no span of its own.
 
-## 4. Visual checklist for Phases 1, 3 and 4
+### 3.6 After Phase 5 — expected, not yet measured
 
-Measurement is half of it; the exit criterion is "visually unchanged". With a
-terrain world loaded:
+> **Not yet taken.** Take two gameplay snapshots on this build (F9). What the
+> table should show: **every `bevy_pbr::` row gone** (clusters, lights, GPU
+> preprocess, mesh/view bind groups, skins, previous-frame transforms —
+> ~1.5 ms on `bc2b5fe`), every `write_binned_instance_buffers` /
+> `write_indirect_parameters_buffers` / `write_batched_instance_buffers` row
+> gone, the `bevy_gizmos_render` rows gone, `check_entities_needing_specialization<StandardMaterial>`
+> gone. Appearing: `scene_pass::skin::extract_skins` + `prepare_skins` and the
+> `scene_pass::gizmos::` rows (extract, prepare, `gizmo_pass`), which should be
+> a few hundredths of a millisecond together. The `bevy_light::` rows stay but
+> have nothing to do (no light components).
+>
+> Also check `runs` on `scene_prepass`: it should be **1.0** now that the
+> thumbnail rig is parked on entering gameplay (`4a0e889`), and that alone
+> halves every per-view cost in these tables.
 
-- [ ] Terrain renders at all, with its stone texture and toon bands.
-- [ ] Baked lightmaps still land: Shift+B over a region, chunks update.
-- [ ] Shift+L flips between baked and flat unlit on terrain.
-- [ ] Outlines trace terrain silhouettes and creases (the prepass normals are
-      now ours — chunk edges and skirts are where a mistake would show).
-- [ ] Fog and god rays still affect terrain (they read the prepass depth,
-      which is now written by our pass and copied by bevy's).
-- [ ] Streaming: walk out and back, chunks load and unload with no flicker.
-- [ ] LOD: the chunk ring changes mesh with distance and nothing pops to
-      black.
-- [ ] Draw count = loaded chunk count (one per chunk, each has its own
-      lightmap and therefore its own material).
-- [ ] Thumbnails in the Assets panel are unaffected (the rig is a `Camera3d`
-      on layer 7, so it must see no terrain).
-- [ ] Web build: `tools/web.sh`, same checks, no `[Invalid ShaderModule]`.
+## 4. Visual checklist
 
-With objects placed (and the cafe, for the player + furniture):
+Phase 5 (nothing on bevy_pbr):
 
-- [ ] Placed objects render with their textures, toon bands and lightmaps.
-- [ ] Double-sided materials (trees, rock, table2) show both faces with the
-      normal flipped on the back — no spurious crease outlines along leaves.
-- [ ] The player renders, animates (skinning) and is probe-lit; its blob
-      shadow (a `StandardMaterial` straggler) still draws under it.
-- [ ] Shift+L flips objects to unlit too.
-- [ ] Shift+B object bakes land on the right sub-meshes.
-- [ ] A `DynamicLit` toggle in the inspector swaps lightmap ↔ probe source.
-- [ ] Cafe furniture: draw count stays ≈ number of distinct (material, mesh)
-      pairs, not number of pieces.
-- [ ] Placement ghost, brush disc and thumbnails (all still bevy's) unaffected.
-
-Phase 4 (the sky):
-
-- [ ] The sky dome renders, with its gradient and sun disc.
-- [ ] Fog and god rays still **do not** touch the sky (it writes no prepass
-      depth) while still fogging terrain and objects in front of it.
-- [ ] Outlines do not trace the dome.
-- [ ] Terrain and objects occlude the sky correctly from every angle,
-      including looking straight up and from below the terrain.
-- [ ] Changing the sun angle or ambient in the inspector moves the sky with
-      the lighting, as before.
+- [ ] Editor: the transform gizmo, selection boxes, light markers (F8) and
+      collision view (Shift+P) all draw, in front of geometry as before
+      (`EditorGizmoGroup`'s `depth_bias: -1`).
+- [ ] The placement ghost is a translucent grey silhouette; the brush disc a
+      translucent cyan disc; blob shadows under the player and furniture.
+- [ ] The player still animates (skinning is ours now).
+- [ ] Assets-panel thumbnails render — flat, in their own colours/textures.
+- [ ] cafe-sim: the shop's piece thumbnails render and then their cameras
+      switch off (no `runs: 2.0+` in a gameplay snapshot after a minute);
+      the placement ghost is a translucent tinted silhouette.
+- [ ] The sun debug cone is flat yellow.
+- [ ] Startup log: no "PbrPlugin was not detected" warning (the gizmo render
+      plugin is disabled, not just unsatisfied).

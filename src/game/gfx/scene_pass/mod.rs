@@ -46,10 +46,9 @@ use bevy::{
         Core3d, Core3dSystems, core_3d::main_opaque_pass_3d, prepass::node::early_prepass,
     },
     ecs::entity::EntityHashMap,
-    pbr::SkinUniforms,
     prelude::*,
     render::{
-        Render, RenderApp, RenderSystems,
+        ExtractSchedule, Render, RenderApp, RenderSystems,
         extract_resource::ExtractResourcePlugin,
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
@@ -72,9 +71,11 @@ use crate::game::gfx::toon_material::ToonLook;
 
 use crate::game::world::{sky::SkyDomeMaterial, terrain::material::TerrainMaterial};
 
+pub mod gizmos;
 pub mod material;
 pub mod pass;
 pub mod pipeline;
+pub mod skin;
 
 use material::{SceneMaterial, SceneMaterialPlugin};
 use pipeline::{SkyScenePipeline, TerrainScenePipeline, ToonScenePipeline, UnlitScenePipeline};
@@ -116,9 +117,9 @@ pub struct SceneInstance {
     /// scale.
     pub normal_from_local: Mat3,
     pub flags: u32,
-    /// Where this instance's joint matrices start in bevy's `SkinUniforms`
-    /// buffer (bind group 0, binding 2). Set at queue time; 0 when not
-    /// skinned, and then never read.
+    /// Where this instance's joint matrices start in the joint buffer
+    /// (`skin::SceneSkins`, bind group 0 binding 2). Set at queue time; 0
+    /// when not skinned, and then never read.
     pub skin_index: u32,
 }
 
@@ -270,9 +271,9 @@ pub struct SceneDraw {
 pub struct SceneDraws(pub EntityHashMap<Vec<SceneDraw>>);
 
 /// Bind group 0: bevy's view uniform (dynamic offset), our instance array,
-/// bevy's joint-matrix buffer, and our scene uniform. One for the whole frame — the view
-/// uniform's offset is what makes it per-view. Rebuilt every frame because
-/// `prepare_skins` swaps its current and previous buffers each frame.
+/// our joint-matrix buffer, and our scene uniform. One for the whole frame —
+/// the view uniform's offset is what makes it per-view. Rebuilt every frame
+/// because the instance and joint buffers can be reallocated by growth.
 #[derive(Resource)]
 pub struct SceneBindGroup(pub BindGroup);
 
@@ -291,6 +292,7 @@ impl Plugin for ScenePassPlugin {
             SceneMaterialPlugin::<SkyDomeMaterial>::default(),
             SceneMaterialPlugin::<UnlitMaterial>::default(),
             ExtractResourcePlugin::<ToonLook>::default(),
+            gizmos::GizmoScenePlugin,
         ));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -305,6 +307,8 @@ impl Plugin for ScenePassPlugin {
             .init_resource::<SceneInstances>()
             .init_resource::<SceneUniformBuffer>()
             .init_resource::<SceneDraws>()
+            .init_resource::<skin::SceneSkins>()
+            .add_systems(ExtractSchedule, skin::extract_skins)
             .add_systems(
                 Render,
                 (
@@ -314,7 +318,8 @@ impl Plugin for ScenePassPlugin {
                     order_scene_draws
                         .in_set(RenderSystems::Queue)
                         .after(SceneQueue),
-                    prepare_scene_instances.in_set(RenderSystems::PrepareResources),
+                    (prepare_scene_instances, skin::prepare_skins)
+                        .in_set(RenderSystems::PrepareResources),
                     prepare_scene_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
@@ -342,8 +347,8 @@ fn scene_bind_group_layout() -> SceneBindGroupLayout {
         (
             uniform_buffer::<ViewUniform>(true),
             storage_buffer_read_only::<SceneInstance>(false),
-            // bevy's joint matrices: a runtime array of mat4x4, read by the
-            // `SKINNED` vertex variant only.
+            // Joint matrices (`skin::SceneSkins`): a runtime array of
+            // mat4x4, read by the `SKINNED` vertex variant only.
             storage_buffer_read_only_sized(false, None),
             uniform_buffer::<SceneUniform>(false),
         ),
@@ -424,12 +429,13 @@ fn prepare_scene_bind_group(
     layout: Res<SceneBindGroupLayout>,
     view_uniforms: Res<ViewUniforms>,
     instances: Res<SceneInstances>,
-    skins: Res<SkinUniforms>,
+    skins: Res<skin::SceneSkins>,
     scene: Res<SceneUniformBuffer>,
 ) {
-    let (Some(view_binding), Some(instance_binding), Some(scene_binding)) = (
+    let (Some(view_binding), Some(instance_binding), Some(skin_binding), Some(scene_binding)) = (
         view_uniforms.uniforms.binding(),
         instances.0.binding(),
+        skins.binding(),
         scene.0.binding(),
     ) else {
         commands.remove_resource::<SceneBindGroup>();
@@ -442,7 +448,7 @@ fn prepare_scene_bind_group(
         &BindGroupEntries::sequential((
             view_binding,
             instance_binding,
-            skins.current_buffer.as_entire_binding(),
+            skin_binding,
             scene_binding,
         )),
     );

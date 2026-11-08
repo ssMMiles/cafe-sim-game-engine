@@ -23,7 +23,6 @@ use std::{hash::Hash, marker::PhantomData};
 use bevy::{
     ecs::system::{SystemParamItem, lifetimeless::SRes},
     log::error_once,
-    pbr::SkinUniforms,
     prelude::*,
     render::{
         Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
@@ -245,9 +244,9 @@ fn extract_instances<M: SceneMaterial>(
 /// material and one mesh is a single instanced draw; a lightmapped object owns
 /// its material and is a run of one, as is every terrain chunk.
 ///
-/// Skinning: an entity bevy's `extract_skins` allocated joints for (it runs in
-/// the same `ExtractSchedule`) gets their offset in `SkinUniforms`' buffer as
-/// its `skin_index`, which the `SKINNED` vertex variant indexes bind group 0's
+/// Skinning: an entity `skin::extract_skins` uploaded joints for (it runs in
+/// the same `ExtractSchedule`) gets their offset in the joint buffer as its
+/// `skin_index`, which the `SKINNED` vertex variant indexes bind group 0's
 /// joint-matrix binding with. Nothing here decides whether a mesh *is*
 /// skinned — the pipeline does, from the vertex layout.
 fn queue_draws<M: SceneMaterial>(
@@ -259,7 +258,7 @@ fn queue_draws<M: SceneMaterial>(
     pipeline_cache: Res<PipelineCache>,
     meshes: Res<RenderAssets<RenderMesh>>,
     materials: Res<RenderAssets<PreparedMaterial<M>>>,
-    skins: Res<SkinUniforms>,
+    skins: Res<super::skin::SceneSkins>,
     views: Query<
         (
             Entity,

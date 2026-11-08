@@ -76,8 +76,25 @@ pub fn run() {
                     ..default()
                 }),
                 ..default()
-            }),
+            })
+            // Nothing of ours renders through bevy_pbr: every material has
+            // its own pass (`game::gfx::scene_pass`, docs/SCENE_PASS_PLAN.md
+            // Phase 5). With it gone go clustered lighting, GPU mesh
+            // preprocessing, the binned phases and the `mesh_view` bind
+            // groups — ~1.5 ms a frame that was being spent on nothing.
+            // bevy's 3D gizmo pipeline is built on bevy_pbr and only
+            // installed when it is present, so the gizmo render plugin goes
+            // too; `scene_pass::gizmos` draws them instead.
+            .disable::<bevy::pbr::PbrPlugin>()
+            .disable::<bevy::gizmos_render::GizmoRenderPlugin>(),
     )
+    // `StandardMaterial` is still an *asset*: the glTF loader produces one per
+    // material and `ToonMaterial::with_surface_of` reads it. `MaterialPlugin`
+    // used to register the type and the component; now we do, the way the
+    // scene pass does for its own materials.
+    .init_asset::<StandardMaterial>()
+    .register_asset_reflect::<StandardMaterial>()
+    .register_type::<MeshMaterial3d<StandardMaterial>>()
     // Per-pass GPU timings, surfaced in the editor (inspector → nothing
     // selected → GPU timings). Bevy only adds this itself under
     // `tracing-tracy`; it costs two timestamps per recorded span and falls

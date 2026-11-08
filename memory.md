@@ -1639,3 +1639,39 @@ still costs **~0.5 ms** with nothing of ours in its phases — `prepare_clusters
 across eight `write_binned_instance_buffers` instantiations. That is twice our own pass and the
 first real argument for Phase 5; a cheaper probe first is to drop the `BakedSun` `DirectionalLight`
 (it only lights `StandardMaterial` previews) and see if the clustering row goes with it.
+
+## Scene pass Phase 5: bevy_pbr is out — 8 November 2026
+
+Decided by measurement: on `bc2b5fe` in gameplay, with none of our geometry in bevy's phases,
+bevy_pbr still cost ~1.5 ms/frame (`prepare_clusters_for_gpu_clustering` 0.40, `prepare_lights`
+0.16, GPU preprocessing ~0.75 across systems, mesh/view bind groups, skins, prev-frame transforms).
+Three commits: `4a0e889` (thumbnail rig camera left *active* across F1 → every per-view system ran
+2×; `drive_thumbnails` is editor-only so a mid-flight job froze with the camera on), `1879cc0`
+Phase 5a (`UnlitMaterial` in engine-api, ABI 16, `SceneLayer::Transparent`; ghosts/disc/blob
+shadows/cafe ghost on it; sun cone + cafe thumbnail tints are toon `unlit=1`; thumbnails
+`ConvertToToon` → flat; all `DirectionalLight`/`GlobalAmbientLight` gone; cafe thumbnail cameras
+switch off after 120 frames), and Phase 5b (`PbrPlugin` + `GizmoRenderPlugin` disabled).
+
+What Phase 5b had to replace and why:
+- **Gizmos were the real blocker.** `bevy_gizmos_render` installs its 3D pipeline only if
+  `is_plugin_added::<PbrPlugin>()`, builds it on `MeshPipeline`'s view layout, and every type the
+  pipeline uses (`GpuLineGizmo`, `DrawLineGizmo`, the uniform bind group) is private. So
+  `scene_pass/gizmos.rs` is a from-scratch renderer over the *public* main-world half
+  (`GizmoHandles::handles()`, `GizmoAsset::buffer()` with pub `list_/strip_positions/colors`,
+  `GizmoConfigStore::get_config_dyn`), with bevy's `lines.wesl` copied to `shaders/gizmos/`. It
+  draws in a `Core3d` system `.after(main_transparent_pass_3d)` — no phase items, no
+  `RenderCommand`s — reusing our bind group 0 (the shader declares only `view`; a layout with more
+  bindings is fine). Joints and retained `Gizmo`s unsupported (unused here); `GizmoLineStyle` is
+  `#[non_exhaustive]`, so unknown styles draw solid.
+- **Skinning** (`scene_pass/skin.rs`): joint_world × inverse_bindpose per joint of each visible
+  `SkinnedMesh`, rebuilt every frame into a `BufferVec<Mat4>` (one player, ~60 joints). Same matrix
+  bevy computes.
+- **`StandardMaterial` stays as an asset**: `init_asset` + `register_asset_reflect` +
+  `register_type::<MeshMaterial3d<StandardMaterial>>` in lib.rs (bevy_world_serialization panics on
+  an unregistered component type and glTF scenes carry that component). Nothing renders it.
+- Still in `DefaultPlugins` and fine without pbr: `bevy_light::LightPlugin` (separate entry),
+  `bevy_gizmos::GizmoPlugin`, bevy_core_pipeline (its `early_prepass`/`main_opaque_pass_3d` still run
+  on empty phases and still own the attachment clears when we draw nothing), `GpuPreprocessingSupport`
+  (bevy_render), bevy_egui (bevy_pbr is only a dev-dep there), avian (gizmos only).
+- `UniformComponentPlugin<C>` works for render-world-spawned components (that is how bevy_gizmos_render
+  used it); bevy's tuple `IntoScheduleConfigs` stops at 20 systems — nest.

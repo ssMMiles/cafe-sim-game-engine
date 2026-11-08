@@ -38,15 +38,27 @@ const MESH_IO: &str = include_str!("../../../assets/shaders/scene/mesh_io.wesl")
 const MESH_VERTEX: &str = include_str!("../../../assets/shaders/scene/mesh_vertex.wesl");
 const SKY: &str = include_str!("../../../assets/shaders/sky_dome.wesl");
 const UNLIT: &str = include_str!("../../../assets/shaders/unlit.wesl");
+const GIZMO_LINES: &str = include_str!("../../../assets/shaders/gizmos/lines.wesl");
 
-/// bevy_render's `view.wesl`, cut down to the fields the scene pass reads.
-/// The *layout* can't drift unnoticed: the bind group entry is built from the
-/// Rust `ViewUniform` and the runtime shader imports bevy's real module, so
-/// only this test sees the short version.
+/// bevy_render's `view.wesl`, cut down to the fields our shaders read (the
+/// scene pass: `clip_from_world`; the gizmo shader: the clip/view matrices
+/// and `viewport`). The *layout* can't drift unnoticed: the bind group entry
+/// is built from the Rust `ViewUniform` and the runtime shader imports bevy's
+/// real module, so only this test sees the short version.
 const RENDER_VIEW: &str = "
 struct View {
     clip_from_world: mat4x4<f32>,
+    world_from_clip: mat4x4<f32>,
+    view_from_clip: mat4x4<f32>,
     world_position: vec3<f32>,
+    viewport: vec4<f32>,
+}
+";
+
+/// bevy_render's `maths.wesl`, the one function the gizmo shader imports.
+const RENDER_MATHS: &str = "
+fn affine3_to_square(affine: mat3x4<f32>) -> mat4x4<f32> {
+    return transpose(mat4x4<f32>(affine[0], affine[1], affine[2], vec4<f32>(0.0, 0.0, 0.0, 1.0)));
 }
 ";
 
@@ -73,6 +85,8 @@ impl Resolver for Stubs {
             "package::shaders::scene::mesh_vertex" => MESH_VERTEX,
             "package::shaders::sky_dome" => SKY,
             "package::shaders::unlit" => UNLIT,
+            "package::shaders::gizmos::lines" => GIZMO_LINES,
+            "bevy_render::maths" => RENDER_MATHS,
             "bevy_render::view" => RENDER_VIEW,
             "constants" => CONSTANTS,
             other => {
@@ -178,6 +192,14 @@ fn sky_dome_compiles() {
 #[test]
 fn unlit_compiles_for_every_variant() {
     check_all("shaders::unlit", &[], &["VERTEX_UVS_A"]);
+}
+
+/// bevy's line gizmo shader, copied into our tree and compiled against our
+/// bind group 0 (`scene_pass::gizmos`). All three fragment entry points are
+/// in the module, so one compile covers solid, dotted and dashed.
+#[test]
+fn gizmo_lines_compile_for_every_variant() {
+    check_all("shaders::gizmos::lines", &[], &["PERSPECTIVE"]);
 }
 
 /// Terrain's three stages, as the scene pass compiles them: one `const` def
