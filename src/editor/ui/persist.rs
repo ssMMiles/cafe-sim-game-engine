@@ -26,6 +26,7 @@ use super::{DockLayout, EditorTab};
 use crate::game::gfx::atmosphere::AtmosphereStyle;
 use crate::game::gfx::frame_pacing::DisplaySettings;
 use crate::game::gfx::post_process::EdgeStyle;
+use crate::game::world::terrain::lod::TerrainLodSettings;
 use egui_dock::DockState;
 
 /// Native path (working directory) and OPFS key.
@@ -39,6 +40,7 @@ struct EditorSettingsFile<'a> {
     edges: &'a EdgeStyle,
     atmosphere: &'a AtmosphereStyle,
     display: &'a DisplaySettings,
+    lod: &'a TerrainLodSettings,
 }
 
 /// Every persisted setting, read-only: what a save serializes.
@@ -48,6 +50,7 @@ pub struct Persisted<'w> {
     edges: Res<'w, EdgeStyle>,
     atmosphere: Res<'w, AtmosphereStyle>,
     display: Res<'w, DisplaySettings>,
+    lod: Res<'w, TerrainLodSettings>,
 }
 
 impl Persisted<'_> {
@@ -57,6 +60,7 @@ impl Persisted<'_> {
             edges: &self.edges,
             atmosphere: &self.atmosphere,
             display: &self.display,
+            lod: &self.lod,
         }
     }
 }
@@ -68,6 +72,7 @@ pub struct PersistedMut<'w> {
     edges: ResMut<'w, EdgeStyle>,
     atmosphere: ResMut<'w, AtmosphereStyle>,
     display: ResMut<'w, DisplaySettings>,
+    lod: ResMut<'w, TerrainLodSettings>,
 }
 
 impl PersistedMut<'_> {
@@ -77,6 +82,7 @@ impl PersistedMut<'_> {
             edges: &mut self.edges,
             atmosphere: &mut self.atmosphere,
             display: &mut self.display,
+            lod: &mut self.lod,
         }
     }
 }
@@ -88,6 +94,7 @@ struct Targets<'a> {
     edges: &'a mut EdgeStyle,
     atmosphere: &'a mut AtmosphereStyle,
     display: &'a mut DisplaySettings,
+    lod: &'a mut TerrainLodSettings,
 }
 
 #[derive(Resource)]
@@ -140,6 +147,9 @@ fn apply(text: &str, targets: Targets, state: &mut SettingsPersist) {
     }
     if let Some(display) = entry(&file, "display") {
         *targets.display = display;
+    }
+    if let Some(lod) = entry::<TerrainLodSettings>(&file, "lod") {
+        *targets.lod = lod.sanitized();
     }
     state.last_saved = Some(text.to_owned());
 }
@@ -248,6 +258,7 @@ mod tests {
             edges: &EdgeStyle::default(),
             atmosphere: &AtmosphereStyle::default(),
             display: &DisplaySettings::default(),
+            lod: &TerrainLodSettings::default(),
         })
         .unwrap();
         let nodes = &json["dock"]["surfaces"][0]["Main"]["nodes"];
@@ -274,13 +285,20 @@ mod tests {
     }
 
     /// Everything a load produces, compared as one value.
-    type Loaded = (usize, EdgeStyle, AtmosphereStyle, DisplaySettings);
+    type Loaded = (
+        usize,
+        EdgeStyle,
+        AtmosphereStyle,
+        DisplaySettings,
+        TerrainLodSettings,
+    );
 
     fn load(value: &serde_json::Value) -> Loaded {
         let mut layout = DockLayout(DockState::new(vec![EditorTab::Viewport]));
         let mut edges = EdgeStyle::default();
         let mut atmosphere = AtmosphereStyle::default();
         let mut display = DisplaySettings::default();
+        let mut lod = TerrainLodSettings::default();
         apply(
             &value.to_string(),
             Targets {
@@ -288,10 +306,17 @@ mod tests {
                 edges: &mut edges,
                 atmosphere: &mut atmosphere,
                 display: &mut display,
+                lod: &mut lod,
             },
             &mut SettingsPersist::default(),
         );
-        (layout.0.iter_all_tabs().count(), edges, atmosphere, display)
+        (
+            layout.0.iter_all_tabs().count(),
+            edges,
+            atmosphere,
+            display,
+            lod,
+        )
     }
 
     /// Files written before a setting existed hold only the older entries;
@@ -310,11 +335,15 @@ mod tests {
             vsync: true,
             frame_cap: 90,
         };
+        let lod = TerrainLodSettings {
+            distances: [240.0, 480.0, 960.0],
+        };
         let full = serde_json::to_string(&EditorSettingsFile {
             dock: &DockLayout::default().0,
             edges: &edges,
             atmosphere: &air,
             display: &display,
+            lod: &lod,
         })
         .unwrap();
         let mut value: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -338,7 +367,7 @@ mod tests {
         finite(&mut value["dock"]);
         let default_tabs = DockLayout::default().0.iter_all_tabs().count();
 
-        assert_eq!(load(&value), (default_tabs, edges, air, display));
+        assert_eq!(load(&value), (default_tabs, edges, air, display, lod));
 
         // An older file holds only `dock`; the rest fall back to defaults.
         let dock_only = serde_json::json!({ "dock": value["dock"].clone() });
@@ -348,21 +377,25 @@ mod tests {
                 default_tabs,
                 EdgeStyle::default(),
                 AtmosphereStyle::default(),
-                DisplaySettings::default()
+                DisplaySettings::default(),
+                TerrainLodSettings::default()
             )
         );
 
         // Broken dock: the other entries still load, the layout stays put.
         value["dock"] = serde_json::json!("not a layout");
-        assert_eq!(load(&value), (1, edges, air, display));
+        assert_eq!(load(&value), (1, edges, air, display, lod));
 
         // A field added to a style later is simply absent: the rest load.
         let partial = serde_json::json!({
             "edges": { "crease_angle": 12.0 },
             "atmosphere": { "fog_density": 0.042 },
             "display": { "vsync": true, "frame_cap": 90 },
+            // Out of order on disk (a hand edit): loads sanitized.
+            "lod": { "distances": [960.0, 480.0, 240.0] },
         });
-        let (_, e, a, d) = load(&partial);
+        let (_, e, a, d, l) = load(&partial);
         assert_eq!((e, a, d), (edges, air, display));
+        assert_eq!(l.distances, [960.0, 960.0, 960.0]);
     }
 }

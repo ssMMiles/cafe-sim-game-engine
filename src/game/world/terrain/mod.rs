@@ -15,7 +15,7 @@ pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
 
 use crate::game::GameEntity;
 use bootstrap::{TerrainRenderAssets, TerrainSetupMarker, create_terrain};
-use lod::{TerrainLodState, update_terrain_lod};
+use lod::{TerrainLodSettings, TerrainLodState, update_terrain_lod};
 use storage::{TerrainChunkRegistry, TerrainWorld};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -33,6 +33,7 @@ impl Plugin for TerrainPlugin {
         // (`gfx::scene_pass`, docs/SCENE_PASS_PLAN.md).
 
         app.init_resource::<TerrainLodState>();
+        app.init_resource::<TerrainLodSettings>();
         app.init_resource::<storage::WorldConfig>();
         app.init_resource::<save::PendingTerrainSave>();
         app.add_message::<save::SaveTerrainMessage>();

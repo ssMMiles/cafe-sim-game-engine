@@ -198,6 +198,8 @@ pub struct Panels<'w, 's> {
     pub gizmo_store: ResMut<'w, GizmoConfigStore>,
     pub edge_style: ResMut<'w, crate::game::gfx::post_process::EdgeStyle>,
     pub atmosphere: ResMut<'w, crate::game::gfx::atmosphere::AtmosphereStyle>,
+    pub lod: ResMut<'w, crate::game::world::terrain::lod::TerrainLodSettings>,
+    pub streaming: Res<'w, crate::game::world::streaming::ChunkStreamingConfig>,
     pub bench: ResMut<'w, crate::game::gfx::profiling::EffectBench>,
     pub gpu_timing: Res<'w, crate::game::gfx::profiling::GpuTimingSupport>,
     pub display: ResMut<'w, crate::game::gfx::frame_pacing::DisplaySettings>,

@@ -27,6 +27,7 @@ use crate::game::gfx::post_process::EdgeStyle;
 use crate::game::gfx::profiling::{BenchEffect, EffectBench, GpuTimingSupport};
 use crate::game::gfx::system_timing::{SystemTimings, save_snapshot, short_name};
 use crate::game::world::objects::{ColliderMode, PlacedKind, PlacedObject};
+use crate::game::world::terrain::lod::TerrainLodSettings;
 use crate::game::world::terrain::storage::EnvironmentData;
 
 #[derive(Resource)]
@@ -971,6 +972,9 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
 
     edges(ui, &mut panels.edge_style);
     atmosphere(ui, &mut panels.atmosphere);
+    let loaded_reach =
+        (panels.streaming.load_radius as f32 + 0.5) * crate::game::world::objects::CHUNK_WORLD_SIZE;
+    terrain_lod(ui, &mut panels.lod, loaded_reach);
     let display = primary_display(&panels.monitors);
     performance(
         ui,
@@ -1019,6 +1023,50 @@ fn environment(ui: &mut egui::Ui, panels: &mut Panels) {
     if ui.button("Bake (Shift+B)").clicked() {
         panels.actions.write(EditorAction::Bake);
     }
+}
+
+/// Terrain LOD switch distances ([`TerrainLodSettings`]). `loaded_reach` is
+/// how far the streamed ring extends along an axis — a first boundary past
+/// its far corner can never engage, which is worth saying out loud because
+/// the symptom (every chunk always at full detail) is invisible.
+fn terrain_lod(ui: &mut egui::Ui, settings: &mut ResMut<TerrainLodSettings>, loaded_reach: f32) {
+    ui.collapsing_header_default_open("Terrain detail", |ui| {
+        ui.weak(
+            "Where each coarser terrain mesh (2×/4×/8× stride) takes over. \
+             Saved per user in editor_settings.json.",
+        );
+        let mut s = **settings;
+        egui::Grid::new("terrain_lod")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for (k, d) in s.distances.iter_mut().enumerate() {
+                    ui.label(format!("LOD {}", k + 1)).on_hover_text(format!(
+                        "Distance at which a chunk drops to the {}× coarser mesh \
+                     (it steps back up 10% closer in).",
+                        1 << (k + 1)
+                    ));
+                    ui.add(
+                        egui::DragValue::new(d)
+                            .speed(5.0)
+                            .range(10.0..=20_000.0)
+                            .suffix(" m"),
+                    );
+                    ui.end_row();
+                }
+            });
+        s = s.sanitized();
+        // Chebyshev ring: corner chunks sit √2 further out than axis ones.
+        if s.distances[0] >= loaded_reach * std::f32::consts::SQRT_2 {
+            ui.weak(format!(
+                "Loaded terrain only reaches ~{loaded_reach:.0} m (~{:.0} m at the ring's \
+                 corners): at this LOD 1 distance every loaded chunk stays at full detail.",
+                loaded_reach * std::f32::consts::SQRT_2
+            ));
+        }
+        if s != **settings {
+            **settings = s;
+        }
+    });
 }
 
 /// The outline post-process (`EdgeStyle`). Knobs and failure modes:
