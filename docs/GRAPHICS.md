@@ -195,16 +195,26 @@ normal target). Both materials are bind group **1**, not 3.
 
 | Binding | What |
 |---------|------|
-| 100/101 | `stone_texture` (`textures/terrain.png`, repeat) |
+| 100/101 | `layers`: the palette's patterns as one `2d_array` (`paint::build_palette_array`, repeat, trilinear), shared by every chunk |
 | 102/103 | the chunk's `lightmap` |
-| 104 | `TerrainShading { use_lightmap, curve, base_color }` (note: `use_lightmap` = 1 is *lit*, the opposite polarity of `ToonShading::unlit`) |
+| 104 | `TerrainShading { use_lightmap }` (note: `use_lightmap` = 1 is *lit*, the opposite polarity of `ToonShading::unlit`) |
+| 105 | `paint`: the chunk's paint map (`Rgba8Unorm`, texel = tile, `textureLoad` only — no sampler) |
+| 106 | `TerrainPaletteGpu { layer_count, layers: [tint+strength, 1/tiling+no_tile+profile; 32] }` |
 
-- **Base.** `TerrainShading.base_color`, set once in `bootstrap.rs` to sRGB
-  (0.81, 0.62, 0.60). Back faces culled (the mesh pipeline's default), and
-  Bevy's default prepass — terrain is never double-sided.
-- **Stone.** Darkened by a *stochastic no-tile* sample of the stone texture
-  at `world.xz / 3`: four randomly offset lattice cells blended with
-  smoothstep weights, at a fixed mip 1, mixed towards near-black by up to 85%.
+- **Painted layers** (`docs/TERRAIN_PAINTING_PLAN.md`, since 2026-11-10).
+  A tile's paint sample is base id / overlay id / blend / flags. The shader
+  loads the four tiles around the pixel (UV1 × (dims − 1) is the tile-space
+  position); if all four share a layer pair it blends two layer colours by
+  the bilinear blend amount, else it shades each corner's pair and mixes.
+  A layer's colour is its linear tint pulled towards near-black where its
+  greyscale pattern is dark (`smoothstep(0.05, 0.45, 1 − r) × strength`),
+  the pattern sampled at `world.xz / tiling` — through the *stochastic
+  no-tile* blend (four randomly offset lattice cells, smoothstep weights)
+  when the layer asks for it. Every tap is `textureSampleGrad` with the
+  world-xz gradients taken once at the top of `fragment`: the branches are
+  all paint-dependent and therefore non-uniform, which Tint would reject
+  for implicit-LOD sampling (`tools/tint-check.mjs` passes both variants).
+  Back faces culled — terrain is never double-sided.
 - **Lightmap.** Sampled on UV1, which is a planar 0–1 mapping across the chunk.
 - **Toon curve.** Identical to the toon shader's. The block is duplicated
   verbatim and `toon_curve_matches_the_shaders` holds both copies and the

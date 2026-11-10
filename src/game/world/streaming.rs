@@ -49,6 +49,7 @@ use super::{
             compute_chunk_meshes, spawn_chunk_from_result,
         },
         material::TerrainMaterial,
+        paint::PaintmapData,
         storage::{ChunkState, TerrainChunkRegistry, TerrainWorld},
     },
 };
@@ -168,6 +169,7 @@ pub fn update_streaming_ring(
     mut obj_registry: ResMut<PlacedObjectRegistry>,
     placed_query: Query<(Entity, &PlacedObject)>,
     mut heightmap: Option<ResMut<HeightmapData>>,
+    mut paintmap: Option<ResMut<PaintmapData>>,
     history: Option<Res<crate::editor::history::History>>,
     mut probe_store: ResMut<ProbeStore>,
 ) {
@@ -213,6 +215,9 @@ pub fn update_streaming_ring(
         // Evict heightmap tiles to keep memory bounded for infinite terrain.
         if let Some(ref mut hm) = heightmap {
             hm.remove_chunk_tiles(chunk.0, chunk.1);
+        }
+        if let Some(ref mut pm) = paintmap {
+            pm.remove(chunk);
         }
         probe_store.remove(chunk);
         state.loaded.remove(&chunk);
@@ -609,8 +614,11 @@ pub fn finalize_computed_chunks(
     prefabs: Res<PrefabLibrary>,
     asset_server: Res<AssetServer>,
     mut probe_store: ResMut<ProbeStore>,
+    paintmap: Option<ResMut<PaintmapData>>,
 ) {
-    let (Some(mut chunk_registry), Some(render_assets)) = (chunk_registry, render_assets) else {
+    let (Some(mut chunk_registry), Some(render_assets), Some(mut paintmap)) =
+        (chunk_registry, render_assets, paintmap)
+    else {
         return;
     };
 
@@ -650,6 +658,7 @@ pub fn finalize_computed_chunks(
             &render_assets,
             &mut terrain_materials,
             &mut images,
+            &mut paintmap,
             result,
         );
 

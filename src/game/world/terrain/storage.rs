@@ -12,6 +12,8 @@
 
 use bevy::prelude::*;
 use engine_api::toon_curve::{ToonCurve, luminance};
+
+use super::paint::{PaintData, TerrainPalette};
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
@@ -23,20 +25,24 @@ use std::{
 const WORLD_MAGIC: &[u8; 4] = b"TWNM";
 const CHUNK_MAGIC: &[u8; 4] = b"TCNK";
 /// Chunk (`.terrain`) format version. Version 2: chunk_x/chunk_y changed from
-/// u32 to i32 for infinite terrain support. Unchanged by the level-save work —
-/// the chunk payload itself did not change.
-const CHUNK_FORMAT_VERSION: u32 = 2;
+/// u32 to i32 for infinite terrain support. Version 3 replaced the never-used
+/// `MaterialData` stub with the chunk's [`PaintData`] grid (terrain
+/// painting, `docs/TERRAIN_PAINTING_PLAN.md`); v2 files are still read (see
+/// [`legacy::ChunkDataV2`]) and come up as all-default-layer.
+const CHUNK_FORMAT_VERSION: u32 = 3;
 /// `world.meta` format version. Version 3 added [`EnvironmentData`],
 /// `required_plugins`, and `plugin_data`; version 4 added `next_entity_id`;
 /// version 5 switched [`EnvironmentData`] from Bevy's physical light units to
 /// lightmap units (`sun_intensity` / `ambient_intensity`) for the fully baked
 /// lighting pipeline; version 6 added the [`ToonCurve`] — the runtime ramp
 /// the baked radiance is quantised through — so exposure and contrast are
-/// per-world settings instead of constants compiled into the shaders.
-/// Versions 2, 4 and 5 are still readable and are upgraded in memory (see
+/// per-world settings instead of constants compiled into the shaders;
+/// version 7 added the [`TerrainPalette`] — the world's ground-material
+/// layers that painted tiles index.
+/// Versions 2, 4, 5 and 6 are still readable and are upgraded in memory (see
 /// [`legacy`]). Version 3 was never in a release and is **not** readable —
 /// the few v3 test worlds are expected to be deleted.
-const WORLD_FORMAT_VERSION: u32 = 6;
+const WORLD_FORMAT_VERSION: u32 = 7;
 
 // ============================================================================
 // Serializable Data Structures
@@ -74,6 +80,11 @@ pub struct WorldMetadata {
     /// every save from `PlacedObjectRegistry::next_id`; seeded back into the
     /// registry by `seed_placed_ids` on world load.
     pub next_entity_id: u64,
+    /// The ground-material layers this world's paint samples index
+    /// (`docs/TERRAIN_PAINTING_PLAN.md`). Layer 0 is what unpainted ground
+    /// shows. World-wide, like the environment, so it lives here and not in
+    /// the chunks.
+    pub palette: TerrainPalette,
 }
 
 /// Global lighting saved with the level.
@@ -249,8 +260,8 @@ pub struct ChunkData {
     pub height: u32,
     /// Height data storage
     pub height_data: HeightData,
-    /// Material data
-    pub material_data: MaterialData,
+    /// Which palette layers each tile shows (`paint.rs`). v3.
+    pub paint: PaintData,
 }
 
 /// Height data storage modes
@@ -298,24 +309,6 @@ impl HeightModification {
     }
 }
 
-/// Material data storage modes
-#[derive(Archive, Deserialize, Serialize, Clone, Debug, Default)]
-pub enum MaterialData {
-    /// Uniform material across chunk
-    #[default]
-    Uniform,
-    /// Per-vertex material (vertex_index, material_id, weight 0-255)
-    PerVertex(Vec<VertexMaterial>),
-}
-
-/// Per-vertex material assignment
-#[derive(Archive, Deserialize, Serialize, Clone, Copy, Debug)]
-pub struct VertexMaterial {
-    pub vertex_index: u32,
-    pub material_id: u8,
-    pub weight: u8,
-}
-
 // ============================================================================
 // Legacy (v2) world metadata
 // ============================================================================
@@ -325,9 +318,48 @@ pub struct VertexMaterial {
 /// written.
 pub mod legacy {
     use super::{
-        ChunkIndexEntry, EnvironmentData, PluginLevelData, TerrainConfigData, WorldMetadata,
+        ChunkData, ChunkIndexEntry, EnvironmentData, HeightData, PluginLevelData,
+        TerrainConfigData, TerrainPalette, WorldMetadata,
     };
     use rkyv::{Archive, Deserialize, Serialize};
+
+    /// The v2 chunk's material stub. Never written with anything but
+    /// `Uniform`, never read; kept only so the archived layout matches.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub enum MaterialDataV2 {
+        Uniform,
+        PerVertex(Vec<VertexMaterialV2>),
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Copy, Debug)]
+    pub struct VertexMaterialV2 {
+        pub vertex_index: u32,
+        pub material_id: u8,
+        pub weight: u8,
+    }
+
+    /// A `.terrain` file before painting: heights plus the dead stub.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct ChunkDataV2 {
+        pub chunk_x: i32,
+        pub chunk_y: i32,
+        pub width: u32,
+        pub height: u32,
+        pub height_data: HeightData,
+        pub material_data: MaterialDataV2,
+    }
+
+    /// v2 → v3: the heights as they were, every tile on layer 0.
+    pub fn upgrade_chunk_v2(old: ChunkDataV2) -> ChunkData {
+        ChunkData {
+            chunk_x: old.chunk_x,
+            chunk_y: old.chunk_y,
+            width: old.width,
+            height: old.height,
+            height_data: old.height_data,
+            paint: super::PaintData::default(),
+        }
+    }
 
     #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
     pub struct WorldMetadataV2 {
@@ -358,6 +390,7 @@ pub mod legacy {
             // collide with them. Like v3, pre-v4 worlds are dev-era test
             // data expected to be deleted rather than migrated.
             next_entity_id: 0,
+            palette: TerrainPalette::legacy_stone(),
         }
     }
 
@@ -415,6 +448,7 @@ pub mod legacy {
             required_plugins: old.required_plugins,
             plugin_data: old.plugin_data,
             next_entity_id: old.next_entity_id,
+            palette: TerrainPalette::legacy_stone(),
         }
     }
 
@@ -479,6 +513,45 @@ pub mod legacy {
             required_plugins: old.required_plugins,
             plugin_data: old.plugin_data,
             next_entity_id: old.next_entity_id,
+            palette: TerrainPalette::legacy_stone(),
+        }
+    }
+
+    /// The v6 metadata: everything current has except the palette.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct WorldMetadataV6 {
+        pub version: u32,
+        pub world_id: String,
+        pub terrain_config: TerrainConfigData,
+        pub chunks_x: u32,
+        pub chunks_y: u32,
+        pub chunk_index: Vec<ChunkIndexEntry>,
+        pub last_saved: u64,
+        pub environment: EnvironmentData,
+        pub required_plugins: Vec<String>,
+        pub plugin_data: Vec<PluginLevelData>,
+        pub next_entity_id: u64,
+    }
+
+    /// v6 → v7: the world keeps the look it had. Before painting, terrain
+    /// was one hard-coded stone pattern over one tint; that becomes layer 0
+    /// of the upgraded palette ([`TerrainPalette::legacy_stone`]), and every
+    /// chunk's tiles already decode to layer 0, so nothing on screen moves.
+    /// New worlds get the grey-triangle default instead.
+    pub fn upgrade_v6(old: WorldMetadataV6) -> WorldMetadata {
+        WorldMetadata {
+            version: super::WORLD_FORMAT_VERSION,
+            world_id: old.world_id,
+            terrain_config: old.terrain_config,
+            chunks_x: old.chunks_x,
+            chunks_y: old.chunks_y,
+            chunk_index: old.chunk_index,
+            last_saved: old.last_saved,
+            environment: old.environment,
+            required_plugins: old.required_plugins,
+            plugin_data: old.plugin_data,
+            next_entity_id: old.next_entity_id,
+            palette: TerrainPalette::legacy_stone(),
         }
     }
 }
@@ -646,7 +719,7 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != CHUNK_FORMAT_VERSION {
+    if version != 2 && version != CHUNK_FORMAT_VERSION {
         return Err(StorageError::VersionMismatch {
             expected: CHUNK_FORMAT_VERSION,
             found: version,
@@ -671,6 +744,15 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
         return Err(StorageError::ChecksumMismatch);
     }
 
+    if version == 2 {
+        let archived = rkyv::access::<legacy::ArchivedChunkDataV2, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::ChunkDataV2 =
+            rkyv::deserialize::<legacy::ChunkDataV2, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_chunk_v2(old));
+    }
+
     let archived = rkyv::access::<ArchivedChunkData, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let chunk: ChunkData = rkyv::deserialize::<ChunkData, RkyvError>(archived)
@@ -680,7 +762,7 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
 }
 
 /// Parse world metadata from a raw byte slice (same binary format as `load_world`).
-/// Accepts v2 (upgraded in memory) and v4; v3 was never released and is rejected.
+/// Accepts v2, v4, v5 and v6 (upgraded in memory); v3 was never released and is rejected.
 /// Used by the async `WorldMetaLoader` which reads bytes via Bevy's `AssetServer`.
 pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, StorageError> {
     use std::io::Read as StdRead;
@@ -695,7 +777,12 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
     let mut version_bytes = [0u8; 4];
     cursor.read_exact(&mut version_bytes)?;
     let version = u32::from_le_bytes(version_bytes);
-    if version != 2 && version != 4 && version != 5 && version != WORLD_FORMAT_VERSION {
+    if version != 2
+        && version != 4
+        && version != 5
+        && version != 6
+        && version != WORLD_FORMAT_VERSION
+    {
         return Err(StorageError::VersionMismatch {
             expected: WORLD_FORMAT_VERSION,
             found: version,
@@ -741,6 +828,15 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
             rkyv::deserialize::<legacy::WorldMetadataV5, RkyvError>(archived)
                 .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         return Ok(legacy::upgrade_v5(old));
+    }
+
+    if version == 6 {
+        let archived = rkyv::access::<legacy::ArchivedWorldMetadataV6, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::WorldMetadataV6 =
+            rkyv::deserialize::<legacy::WorldMetadataV6, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v6(old));
     }
 
     let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
@@ -796,6 +892,7 @@ pub fn create_world_metadata(
         required_plugins: Vec::new(),
         plugin_data: Vec::new(),
         next_entity_id: 0,
+        palette: TerrainPalette::default(),
     }
 }
 
@@ -1097,20 +1194,128 @@ mod tests {
     }
 
     /// The chunk payload did not change in v3; `.terrain` files stay at
-    /// version 2 so existing chunk files keep loading.
+    /// version 3; a v2 file still parses (next test).
     #[test]
-    fn test_chunk_format_version_unchanged() {
+    fn test_chunk_format_version_is_current() {
         let chunk = ChunkData {
             chunk_x: 0,
             chunk_y: 0,
             width: 4,
             height: 4,
             height_data: HeightData::UseBase,
-            material_data: MaterialData::Uniform,
+            paint: PaintData::default(),
         };
         let bytes = serialize_chunk(&chunk).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 3);
         assert!(parse_chunk_from_bytes(&bytes).is_ok());
+    }
+
+    /// A v2 `.terrain` (heights + the dead material stub) loads with its
+    /// heights intact and every tile on layer 0.
+    #[test]
+    fn test_chunk_v2_upgrades_to_current() {
+        let old = legacy::ChunkDataV2 {
+            chunk_x: -1,
+            chunk_y: 4,
+            width: 256,
+            height: 256,
+            height_data: HeightData::Delta(vec![HeightModification::new(3, 4, 1.5)]),
+            material_data: legacy::MaterialDataV2::Uniform,
+        };
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CHUNK_MAGIC);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&old.chunk_x.to_le_bytes());
+        bytes.extend_from_slice(&old.chunk_y.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+
+        let chunk = parse_chunk_from_bytes(&bytes).unwrap();
+        assert_eq!((chunk.chunk_x, chunk.chunk_y), (-1, 4));
+        assert!(matches!(chunk.height_data, HeightData::Delta(ref m) if m.len() == 1));
+        assert_eq!(chunk.paint, PaintData::default());
+    }
+
+    /// Paint survives the chunk frame, and a chunk with runs stays compact.
+    #[test]
+    fn test_chunk_paint_roundtrip() {
+        use super::super::paint::{PAINT_SIZE, paint_sample};
+        let total = PAINT_SIZE * PAINT_SIZE;
+        let mut samples = vec![paint_sample(1, 0, 0, 0); total];
+        for s in samples.iter_mut().skip(1000).take(2000) {
+            *s = paint_sample(1, 2, 128, 0);
+        }
+        let chunk = ChunkData {
+            chunk_x: 0,
+            chunk_y: 0,
+            width: 256,
+            height: 256,
+            height_data: HeightData::UseBase,
+            paint: PaintData::encode(&samples),
+        };
+        let bytes = serialize_chunk(&chunk).unwrap();
+        assert!(
+            bytes.len() < 256,
+            "three runs should be a few dozen bytes, got {}",
+            bytes.len()
+        );
+        let loaded = parse_chunk_from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.paint.decode(), samples);
+    }
+
+    /// A v6 `world.meta` loads with the stone palette so it looks unchanged;
+    /// a fresh world gets the grey-triangle default.
+    #[test]
+    fn test_world_v6_upgrades_with_the_legacy_palette() {
+        let cur = create_world_metadata("p".to_string(), 128, 128, 64, (1.0, 1.0), 10.0);
+        assert_eq!(cur.palette, TerrainPalette::default());
+        assert_eq!(
+            cur.palette.layers[0].texture,
+            super::super::paint::DEFAULT_LAYER_TEXTURE
+        );
+
+        let old = legacy::WorldMetadataV6 {
+            version: 6,
+            world_id: "six".to_string(),
+            terrain_config: cur.terrain_config.clone(),
+            chunks_x: 2,
+            chunks_y: 2,
+            chunk_index: Vec::new(),
+            last_saved: 0,
+            environment: EnvironmentData::default(),
+            required_plugins: vec!["x".to_string()],
+            plugin_data: Vec::new(),
+            next_entity_id: 9,
+        };
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(WORLD_MAGIC);
+        bytes.extend_from_slice(&6u32.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
+        assert_eq!(loaded.next_entity_id, 9);
+        assert_eq!(loaded.required_plugins, vec!["x".to_string()]);
+        assert_eq!(loaded.palette, TerrainPalette::legacy_stone());
+
+        // And the palette round-trips through the current frame.
+        let mut cur = cur;
+        cur.palette
+            .layers
+            .push(super::super::paint::TerrainLayerData::new(
+                "Grass",
+                "textures/grass.png",
+            ));
+        cur.palette.layers[1].tint = [0.1, 0.5, 0.1];
+        let back = parse_world_meta_from_bytes(&serialize_world(&cur).unwrap()).unwrap();
+        assert_eq!(back.palette, cur.palette);
     }
 
     #[test]
@@ -1127,7 +1332,7 @@ mod tests {
                 HeightModification::new(10, 20, 5.0),
                 HeightModification::new(30, 40, -2.5),
             ]),
-            material_data: MaterialData::Uniform,
+            paint: PaintData::default(),
         };
 
         save_chunk(&chunk, &world_path).unwrap();

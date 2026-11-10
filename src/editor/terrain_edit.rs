@@ -21,6 +21,7 @@ use engine_api::UnlitMaterial;
 
 use crate::editor::history::{Change, History};
 use crate::editor::picking::{EditorRay, ViewportInput};
+pub use crate::game::world::terrain::chunks_touching_tile;
 use crate::game::world::terrain::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE, TerrainChunk,
     bootstrap::heightfield_collider,
@@ -91,7 +92,7 @@ pub struct TerrainBrushHit {
 
 /// Influence of the brush at `dist` from its centre: 1 inside the flat core,
 /// easing (smoothstep) to 0 at the rim. `falloff` is the faded fraction.
-fn brush_weight(dist: f32, radius: f32, falloff: f32) -> f32 {
+pub fn brush_weight(dist: f32, radius: f32, falloff: f32) -> f32 {
     let inner = radius * (1.0 - falloff.clamp(0.0, 1.0));
     if dist <= inner {
         return 1.0;
@@ -363,23 +364,6 @@ pub fn finalize_terrain_stroke(
         format!("{} terrain", brush.mode.label()),
         vec![Change::Terrain { tiles }],
     );
-}
-
-/// Chunks whose meshes include tile `(tx, ty)`: its own, plus the neighbours
-/// that share it when it sits on a chunk edge.
-pub fn chunks_touching_tile(tx: i32, ty: i32) -> impl Iterator<Item = (i32, i32)> {
-    let cs = (CHUNK_SIZE - 1) as i32;
-    let (cx, cy) = (tx.div_euclid(cs), ty.div_euclid(cs));
-    let on_x = tx.rem_euclid(cs) == 0;
-    let on_y = ty.rem_euclid(cs) == 0;
-    [
-        Some((cx, cy)),
-        on_x.then_some((cx - 1, cy)),
-        on_y.then_some((cx, cy - 1)),
-        (on_x && on_y).then_some((cx - 1, cy - 1)),
-    ]
-    .into_iter()
-    .flatten()
 }
 
 /// The loaded terrain, as the brush and the undo stack mutate it: heights in,

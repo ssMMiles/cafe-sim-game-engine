@@ -6,3 +6,4 @@ mesh|tree2|meshes/tree2/nature.gltf#Scene0
 mesh|tree3|meshes/tree3/nature.gltf#Scene0
 mesh|tree4|meshes/tree4/nature.gltf#Scene0
 texture|terrain|textures/terrain.png
+texture|terrain_default|textures/terrain_default.png

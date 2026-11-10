@@ -296,7 +296,8 @@ fn prefab_footer(ui: &mut egui::Ui, panels: &mut Panels) {
     }
 }
 
-/// Inspect-only: nothing in the level consumes a standalone texture yet.
+/// A texture's only consumer is the terrain palette: the footer offers to
+/// add it as a layer (`paint::add_layer`).
 fn texture_footer(ui: &mut egui::Ui, panels: &mut Panels) {
     let Some(path) = panels.assets.inspected.clone() else {
         return;
@@ -326,5 +327,20 @@ fn texture_footer(ui: &mut egui::Ui, panels: &mut Panels) {
             ui.weak("Loading…");
         }
     }
-    ui.weak("Textures aren't placeable yet; this is a preview.");
+    ui.horizontal(|ui| {
+        let full = panels
+            .terrain_world
+            .as_ref()
+            .is_none_or(|tw| tw.metadata.palette.is_full());
+        if ui
+            .add_enabled(!full, egui::Button::new("Add to terrain palette"))
+            .on_hover_text("New layer using this texture as its pattern; the Paint tool edits it")
+            .clicked()
+        {
+            super::paint::add_layer(panels, &path);
+        }
+        if full {
+            ui.weak("palette full");
+        }
+    });
 }

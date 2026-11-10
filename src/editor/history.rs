@@ -48,6 +48,7 @@ use crate::game::world::objects::{
 use crate::game::world::prefabs::{PrefabFile, PrefabInstanceData, PrefabLibrary, store_prefab};
 use crate::game::world::streaming::StreamingState;
 use crate::game::world::terrain::mesh::LOD_LEVELS;
+use crate::game::world::terrain::paint::{PaintData, PaintmapData, TerrainPalette};
 use crate::game::world::terrain::storage::{EnvironmentData, TerrainWorld, WorldConfig};
 
 /// Transactions kept per world; the oldest is evicted past this.
@@ -103,8 +104,16 @@ pub enum Change {
         before: EnvironmentData,
         after: EnvironmentData,
     },
+    /// The terrain palette (layer list and settings) was edited.
+    Palette {
+        before: TerrainPalette,
+        after: TerrainPalette,
+    },
     /// One brush stroke: only the tiles it touched, as `(tx, ty, before, after)`.
     Terrain { tiles: Vec<(i32, i32, f32, f32)> },
+    /// One paint stroke or fill: each touched chunk's grid before and after,
+    /// run-length coded (`docs/TERRAIN_PAINTING_PLAN.md`).
+    Paint { chunks: Vec<PaintChunkChange> },
     /// A prefab definition was rewritten ("Apply to prefab"). Applying swaps
     /// the library + file and re-expands every loaded instance.
     PrefabDefinition {
@@ -121,6 +130,23 @@ pub enum Change {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaintChunkChange {
+    pub chunk: (i32, i32),
+    pub before: PaintData,
+    pub after: PaintData,
+}
+
+impl PaintChunkChange {
+    fn bytes(&self) -> usize {
+        let runs = |d: &PaintData| match d {
+            PaintData::Uniform(_) => 1,
+            PaintData::Rle(r) => r.len(),
+        };
+        (runs(&self.before) + runs(&self.after)) * 8 + 16
+    }
+}
+
 impl Change {
     fn is_noop(&self) -> bool {
         match self {
@@ -131,7 +157,9 @@ impl Change {
             Change::Parent { before, after, .. } => before == after,
             Change::Scripts { before, after, .. } => before == after,
             Change::Environment { before, after } => before == after,
+            Change::Palette { before, after } => before == after,
             Change::Terrain { tiles } => tiles.iter().all(|(_, _, b, a)| b == a),
+            Change::Paint { chunks } => chunks.iter().all(|c| c.before == c.after),
             Change::PrefabDefinition { before, after, .. } => before == after,
             Change::PrefabInstance { before, after, .. } => before == after,
         }
@@ -140,6 +168,7 @@ impl Change {
     fn terrain_bytes(&self) -> usize {
         match self {
             Change::Terrain { tiles } => tiles.len() * std::mem::size_of::<(i32, i32, f32, f32)>(),
+            Change::Paint { chunks } => chunks.iter().map(PaintChunkChange::bytes).sum(),
             _ => 0,
         }
     }
@@ -155,7 +184,9 @@ impl Change {
             | Change::Scripts { id, .. }
             | Change::PrefabInstance { id, .. } => Some(*id),
             Change::Environment { .. }
+            | Change::Palette { .. }
             | Change::Terrain { .. }
+            | Change::Paint { .. }
             | Change::PrefabDefinition { .. } => None,
         }
     }
@@ -168,6 +199,7 @@ impl Change {
                 .iter()
                 .flat_map(|(tx, ty, _, _)| chunks_touching_tile(*tx, *ty))
                 .collect(),
+            Change::Paint { chunks } => chunks.iter().map(|c| c.chunk).collect(),
             _ => HashSet::new(),
         }
     }
@@ -203,6 +235,10 @@ impl Change {
                 *after = nafter.clone();
                 true
             }
+            (Change::Palette { after, .. }, Change::Palette { after: nafter, .. }) => {
+                *after = nafter.clone();
+                true
+            }
             _ => false,
         }
     }
@@ -214,6 +250,7 @@ pub enum MergeKey {
     Transform(u64),
     Kind(u64),
     Environment,
+    Palette,
 }
 
 #[derive(Debug)]
@@ -467,6 +504,8 @@ pub struct LevelOps<'w, 's> {
     script_edits: MessageWriter<'w, ScriptEdit>,
     respawns: MessageWriter<'w, RespawnPlaced>,
     terrain: TerrainChunks<'w, 's>,
+    paintmap: Option<ResMut<'w, PaintmapData>>,
+    images: ResMut<'w, Assets<Image>>,
     prefabs: ResMut<'w, PrefabLibrary>,
 }
 
@@ -503,12 +542,25 @@ impl LevelOps<'_, '_> {
                 }
                 Ok(())
             }
-            Change::Environment { .. } => self
+            Change::Environment { .. } | Change::Palette { .. } => self
                 .terrain_world
                 .as_ref()
                 .map(|_| ())
                 .ok_or_else(|| "world not loaded".to_owned()),
             Change::PrefabDefinition { .. } => Ok(()),
+            Change::Paint { .. } => {
+                let Some(paintmap) = self.paintmap.as_ref() else {
+                    return Err("terrain not loaded".to_owned());
+                };
+                match change
+                    .chunks()
+                    .into_iter()
+                    .find(|c| !paintmap.is_loaded(*c))
+                {
+                    Some(chunk) => Err(format!("terrain chunk {chunk:?} is not loaded")),
+                    None => Ok(()),
+                }
+            }
             Change::Terrain { .. } => {
                 if self.terrain.heightmap.is_none() {
                     return Err("terrain not loaded".to_owned());
@@ -643,6 +695,23 @@ impl LevelOps<'_, '_> {
                     // Through `ResMut`, which is what `apply_environment` listens for.
                     tw.metadata.environment = to.clone();
                     self.lighting.stale = true;
+                }
+            }
+            Change::Palette { before, after } => {
+                let to = if undo { before } else { after };
+                if let Some(tw) = self.terrain_world.as_deref_mut() {
+                    // Through `ResMut`, which is what `sync_palette` listens for.
+                    tw.metadata.palette = to.clone();
+                }
+            }
+            Change::Paint { chunks } => {
+                if let Some(paintmap) = self.paintmap.as_deref_mut() {
+                    for c in chunks {
+                        let to = if undo { &c.before } else { &c.after };
+                        if paintmap.replace_chunk(&mut self.images, c.chunk, to.decode()) {
+                            self.terrain.mark_dirty(c.chunk);
+                        }
+                    }
                 }
             }
             Change::Terrain { tiles } => {
@@ -1141,6 +1210,7 @@ mod tests {
             .init_resource::<GrabbedEntity>()
             .init_resource::<TerrainBrushHit>()
             .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
             .init_resource::<ViewportInput>()
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<engine_api::ScriptRegistry>();
@@ -1400,6 +1470,83 @@ mod tests {
         );
         action(&mut app, EditorAction::Redo);
         assert_eq!(app.world().resource::<HeightmapData>().get_tile(3, 4), 2.0);
+    }
+
+    #[test]
+    fn paint_strokes_round_trip_through_the_paint_grid_and_its_image() {
+        use crate::game::world::terrain::paint::{
+            ChunkPaint, PAINT_SIZE, paint_image, paint_index, paint_sample,
+        };
+        use crate::game::world::terrain::storage::TerrainChunkRegistry;
+        let mut app = test_app();
+        let mut registry = TerrainChunkRegistry::default();
+        registry.loaded_chunks.insert((0, 0), Entity::PLACEHOLDER);
+        app.insert_resource(registry);
+        let blank = vec![0u32; PAINT_SIZE * PAINT_SIZE];
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(paint_image(&blank));
+        let mut paintmap = PaintmapData::default();
+        paintmap.insert(
+            (0, 0),
+            ChunkPaint {
+                samples: blank.clone(),
+                image: image.clone(),
+            },
+        );
+        app.insert_resource(paintmap);
+        app.update();
+
+        // A stroke painted tile (3, 4) to layer 2; the brush wrote the grid
+        // and the image itself, history only sees the before/after grids.
+        let painted = paint_sample(2, 2, 0, 0);
+        let mut after = blank.clone();
+        after[paint_index(3, 4)] = painted;
+        app.world_mut()
+            .resource_scope(|world, mut paintmap: Mut<PaintmapData>| {
+                let mut images = world.resource_mut::<Assets<Image>>();
+                paintmap.write_tile(&mut images, 3, 4, painted).count();
+            });
+        let before_data = PaintData::encode(&blank);
+        let after_data = PaintData::encode(&after);
+        app.world_mut().resource_mut::<History>().push(
+            "Paint terrain",
+            vec![Change::Paint {
+                chunks: vec![PaintChunkChange {
+                    chunk: (0, 0),
+                    before: before_data,
+                    after: after_data,
+                }],
+            }],
+        );
+        app.update();
+
+        let sample_at = |app: &App| app.world().resource::<PaintmapData>().sample_at(3, 4);
+        let texel = |app: &App| {
+            app.world()
+                .resource::<Assets<Image>>()
+                .get(&image)
+                .unwrap()
+                .pixel_bytes(UVec3::new(3, 4, 0))
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(sample_at(&app), Some(painted));
+        assert_eq!(texel(&app), painted.to_le_bytes());
+
+        action(&mut app, EditorAction::Undo);
+        assert_eq!(sample_at(&app), Some(0));
+        assert_eq!(texel(&app), [0, 0, 0, 0]);
+        assert!(
+            app.world()
+                .resource::<TerrainChunkRegistry>()
+                .dirty_chunks
+                .contains(&(0, 0))
+        );
+        action(&mut app, EditorAction::Redo);
+        assert_eq!(sample_at(&app), Some(painted));
+        assert_eq!(texel(&app), painted.to_le_bytes());
     }
 
     #[test]

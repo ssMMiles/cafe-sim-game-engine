@@ -1,15 +1,30 @@
 // Toon fragment shader for terrain chunks.
 //
 // All lighting is baked (see toon_lighting.wesl for the model); this shader
-// only adds the stochastic stone texture blend on top of the base colour.
+// only decides the *base colour*: which painted layers are under this pixel
+// and what their patterns and tints make of it (docs/TERRAIN_PAINTING_PLAN.md).
+//
+// Painting is a material-ID map. Every tile of the chunk's `paint_map` holds
+// a base layer, an overlay layer and a blend amount (R, G, B as bytes); the
+// palette uniform says what each layer looks like; `layer_textures` is one
+// 2d array slice per layer. The common case — the four tiles around a pixel
+// agree on their layer pair — costs two layers' worth of taps; only the
+// one-tile band where neighbouring tiles disagree evaluates all four.
+//
+// WebGPU uniformity: every branch below depends on the paint map, i.e. is
+// non-uniform, and Tint rejects implicit-derivative sampling there. So the
+// screen-space gradients of the world position are taken *once*, at the top
+// of `fragment`, and every pattern tap is `textureSampleGrad` — legal in any
+// control flow. (`dpdx` itself must stay at the top for the same reason.)
 
 import package::shaders::scene::terrain_io::{VertexOutput, FragmentOutput};
 import package::shaders::scene::bindings::scene;
 
+// One slice per palette layer, built by `paint::build_palette_array`.
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
-var stone_texture: texture_2d<f32>;
+var layer_textures: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(101)
-var stone_sampler: sampler;
+var layer_sampler: sampler;
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(102)
 var lightmap_texture: texture_2d<f32>;
@@ -22,11 +37,30 @@ struct TerrainShading {
     // 1 = shade from the baked lightmap, 0 = flat unlit debug view.
     use_lightmap: u32,
     _pad: vec3<f32>,
-    // Ground colour where the stone doesn't darken it, linear RGBA.
-    base_color: vec4<f32>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(104)
 var<uniform> terrain: TerrainShading;
+
+// The chunk's paint map: texel (lx, ly) = tile (lx, ly), `Rgba8Unorm`, read
+// with `textureLoad` so ids come back exact. See `paint::paint_image`.
+@group(constants::MATERIAL_BIND_GROUP) @binding(105)
+var paint_map: texture_2d<f32>;
+
+// Mirrors `TerrainLayerGpu` / `TerrainPaletteGpu` in terrain/material.rs.
+struct TerrainLayer {
+    // Linear RGB tint; w = pattern strength.
+    tint: vec4<f32>,
+    // x = repeats per metre, y = 1 for the no-tile sampler, z = blend
+    // profile (only Soft so far), w unused.
+    params: vec4<f32>,
+};
+struct TerrainPaletteUniform {
+    layer_count: u32,
+    _pad: vec3<f32>,
+    layers: array<TerrainLayer, 32>,
+};
+@group(constants::MATERIAL_BIND_GROUP) @binding(106)
+var<uniform> palette: TerrainPaletteUniform;
 
 // ─── TOON CURVE ──────────────────────────────────────────────────────────
 // Everything between this marker and END TOON CURVE is byte-identical
@@ -136,15 +170,9 @@ fn toon_shade(radiance: vec3<f32>, curve: vec4<f32>) -> vec3<f32> {
 }
 // ─── END TOON CURVE ──────────────────────────────────────────────────────
 
-// Scale controlling how many world units span one texture repeat.
-// Larger = stones appear larger / more spread out.
-const STONE_UV_SCALE: f32 = 3.0;
-
-// How much to shift the terrain base color toward stone gray at outlines.
-const STONE_BLEND_STRENGTH: f32 = 0.85;
-
-// Stone color (dark gray)
-const STONE_COLOR: vec3<f32> = vec3<f32>(0.02, 0.02, 0.02);
+// Where a pattern is dark the layer's tint is pulled towards this. A
+// constant rather than per layer until something needs it to differ.
+const PATTERN_DARK: vec3<f32> = vec3<f32>(0.02, 0.02, 0.02);
 
 // Cheap 2D hash — maps an integer-lattice vec2 to a random [0,1]^2 offset
 fn hash2(p: vec2<f32>) -> vec2<f32> {
@@ -155,32 +183,101 @@ fn hash2(p: vec2<f32>) -> vec2<f32> {
     return fract(sin(q) * 43758.5453);
 }
 
-// Stochastic (no-tile) texture sample.
-// Blends four neighboring lattice cells, each with a unique random UV offset,
-// so the repeating grid of the texture becomes invisible.
-// Uses a fixed mip level to avoid automatic mip selection blurring sparse textures to white.
-fn sample_no_tile(uv: vec2<f32>) -> vec4<f32> {
+// One pattern tap with explicit gradients (see the header).
+fn pattern_tap(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f32 {
+    return textureSampleGrad(layer_textures, layer_sampler, uv, layer, gx, gy).r;
+}
+
+// Stochastic (no-tile) pattern sample: blends four neighbouring lattice
+// cells, each with its own random UV offset, so the texture's repeat grid
+// becomes invisible. The offsets are integer-free noise added to the UV, so
+// the gradients are unchanged.
+fn pattern_no_tile(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f32 {
     let p = floor(uv);
     let f = fract(uv);
-    // Smoothstep blend weights
     let w = f * f * (3.0 - 2.0 * f);
 
-    let va = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p),                        1.0);
-    let vb = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p + vec2<f32>(1.0, 0.0)), 1.0);
-    let vc = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p + vec2<f32>(0.0, 1.0)), 1.0);
-    let vd = textureSampleLevel(stone_texture, stone_sampler, uv + hash2(p + vec2<f32>(1.0, 1.0)), 1.0);
+    let va = pattern_tap(layer, uv + hash2(p), gx, gy);
+    let vb = pattern_tap(layer, uv + hash2(p + vec2<f32>(1.0, 0.0)), gx, gy);
+    let vc = pattern_tap(layer, uv + hash2(p + vec2<f32>(0.0, 1.0)), gx, gy);
+    let vd = pattern_tap(layer, uv + hash2(p + vec2<f32>(1.0, 1.0)), gx, gy);
 
     return mix(mix(va, vb, w.x), mix(vc, vd, w.x), w.y);
 }
 
+// The colour one layer gives a point: its tint, darkened where its pattern
+// is dark. `gx`/`gy` are the world-xz gradients per screen pixel.
+fn layer_color(layer: u32, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+    let l = palette.layers[layer];
+    let scale = l.params.x;
+    let uv = xz * scale;
+    var pattern = 1.0;
+    if (l.params.y > 0.5) {
+        pattern = pattern_no_tile(layer, uv, gx * scale, gy * scale);
+    } else {
+        pattern = pattern_tap(layer, uv, gx * scale, gy * scale);
+    }
+    let factor = smoothstep(0.05, 0.45, 1.0 - pattern) * l.tint.w;
+    return mix(l.tint.rgb, PATTERN_DARK, factor);
+}
+
+// A paint sample's id byte as a layer index, clamped into the palette.
+fn layer_id(channel: f32) -> u32 {
+    return min(u32(round(channel * 255.0)), palette.layer_count - 1u);
+}
+
+// The colour of one paint sample: base, with the overlay faded in by the
+// blend byte. Blend profiles other than Soft are not implemented yet.
+fn sample_color(sample: vec4<f32>, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+    let base = layer_id(sample.r);
+    let overlay = layer_id(sample.g);
+    var color = layer_color(base, xz, gx, gy);
+    if (sample.b > 0.0 && overlay != base) {
+        color = mix(color, layer_color(overlay, xz, gx, gy), sample.b);
+    }
+    return color;
+}
+
+// Base colour at this pixel from the four surrounding paint tiles.
+fn painted_color(in: VertexOutput, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+    let xz = in.world_position.xz;
+    let dims = vec2<i32>(textureDimensions(paint_map));
+    // UV1 runs 0..1 over the chunk's (dims - 1) tiles, so this is the
+    // tile-space position; the four corners are the tiles around it.
+    let local = in.uv_b * vec2<f32>(dims - vec2<i32>(1));
+    let p0 = clamp(vec2<i32>(floor(local)), vec2<i32>(0), dims - vec2<i32>(2));
+    let f = clamp(local - vec2<f32>(p0), vec2<f32>(0.0), vec2<f32>(1.0));
+
+    let c00 = textureLoad(paint_map, p0, 0);
+    let c10 = textureLoad(paint_map, p0 + vec2<i32>(1, 0), 0);
+    let c01 = textureLoad(paint_map, p0 + vec2<i32>(0, 1), 0);
+    let c11 = textureLoad(paint_map, p0 + vec2<i32>(1, 1), 0);
+
+    let same_pair = all(c00.rg == c10.rg) && all(c00.rg == c01.rg) && all(c00.rg == c11.rg);
+    if (same_pair) {
+        // Nearly every pixel: one layer pair, blend interpolated across the tile.
+        let blend = mix(mix(c00.b, c10.b, f.x), mix(c01.b, c11.b, f.x), f.y);
+        return sample_color(vec4<f32>(c00.rg, blend, 0.0), xz, gx, gy);
+    }
+    // A layer boundary runs through this tile: shade each corner's own pair
+    // and mix the colours bilinearly.
+    let w00 = (1.0 - f.x) * (1.0 - f.y);
+    let w10 = f.x * (1.0 - f.y);
+    let w01 = (1.0 - f.x) * f.y;
+    let w11 = f.x * f.y;
+    return sample_color(c00, xz, gx, gy) * w00
+        + sample_color(c10, xz, gx, gy) * w10
+        + sample_color(c01, xz, gx, gy) * w01
+        + sample_color(c11, xz, gx, gy) * w11;
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
-    // Sample with stochastic UV offset to break up visible tiling.
-    // Fixed mip level avoids automatic selection blurring sparse textures to white at distance.
-    let stone_uv = in.world_position.xz / STONE_UV_SCALE;
-    let stone_sample = sample_no_tile(stone_uv);
-    let stone_factor = smoothstep(0.05, 0.45, 1.0 - stone_sample.r) * STONE_BLEND_STRENGTH;
-    let base_color = mix(terrain.base_color.rgb, STONE_COLOR, stone_factor);
+    // Taken first, in uniform control flow (see the header).
+    let gx = dpdx(in.world_position.xz);
+    let gy = dpdy(in.world_position.xz);
+
+    let base_color = painted_color(in, gx, gy);
 
     // White = fully lit (unlit debug view / unbaked chunk). The branch tests
     // the uniform directly, so the sample stays in uniform control flow.
@@ -190,7 +287,7 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     }
 
     var out: FragmentOutput;
-    out.color = vec4<f32>(base_color * toon_shade(radiance, scene.curve), terrain.base_color.a);
+    out.color = vec4<f32>(base_color * toon_shade(radiance, scene.curve), 1.0);
     // The edge detector's normal target. Terrain is never double-sided, so
     // there is no front/back flip; the skirt normal was fixed up in the
     // vertex stage, where the mesh generator's zero normals come from.

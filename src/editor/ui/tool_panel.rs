@@ -2,11 +2,11 @@
 //!
 //! One tab instead of one per tool, so the dock never shows settings for a
 //! tool that isn't live. Each tool's body stays in its own module
-//! (`place`, `terrain`); this is just the dispatch.
+//! (`place`, `terrain`, `paint`); this is just the dispatch.
 
 use bevy_egui::egui;
 
-use super::{Panels, place, terrain};
+use super::{Panels, paint, place, terrain};
 use crate::editor::tool::EditorTool;
 
 pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
@@ -16,5 +16,6 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         }
         EditorTool::Place => place::draw(ui, panels),
         EditorTool::Terrain => terrain::draw(ui, panels),
+        EditorTool::Paint => paint::draw(ui, panels),
     }
 }

@@ -1,14 +1,14 @@
 use avian3d::prelude::*;
-use bevy::{
-    camera::primitives::Aabb,
-    image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
-    prelude::*,
-};
+use bevy::{camera::primitives::Aabb, prelude::*};
 
 use super::{
     CHUNK_SIZE, HEIGHT_SCALE, HeightmapData, TILE_SIZE,
-    material::{TerrainMaterial, TerrainShading},
+    material::{TerrainMaterial, TerrainPaletteGpu, TerrainShading},
     mesh::{LOD_LEVELS, generate_lod_mesh},
+    paint::{
+        ChunkPaint, PAINT_DEFAULT, PAINT_SIZE, PaintSample, PaintmapData, paint_image,
+        placeholder_palette_array,
+    },
     storage::{self, ChunkData, HeightData, TerrainChunkRegistry, dequantize_heights},
 };
 
@@ -59,6 +59,9 @@ pub struct ChunkComputeResult {
     pub lightmap: Option<Image>,
     /// The chunk's saved irradiance probes, likewise decoded in the task.
     pub probes: Option<crate::game::world::baking::probes::ChunkProbes>,
+    /// The chunk's paint grid, decoded from the `.terrain` file in the task
+    /// (all layer 0 when the file predates painting or doesn't exist).
+    pub paint: Vec<PaintSample>,
 }
 
 /// Reconstruct a flat height array for a chunk directly from its saved `ChunkData`,
@@ -136,6 +139,10 @@ pub fn compute_chunk_meshes(
         .and_then(crate::game::world::baking::probes::try_load_probes);
 
     let heights = heights_from_chunk_data(chunk_data.as_ref());
+    let paint = chunk_data
+        .as_ref()
+        .map(|d| d.paint.decode())
+        .unwrap_or_else(|| vec![PAINT_DEFAULT; PAINT_SIZE * PAINT_SIZE]);
     let cs = (CHUNK_SIZE - 1) as i32;
     let start_x = chunk_x * cs;
     let start_y = chunk_y * cs;
@@ -173,6 +180,7 @@ pub fn compute_chunk_meshes(
         collider_offset,
         lightmap,
         probes,
+        paint,
     }
 }
 
@@ -215,8 +223,9 @@ pub fn heightfield_collider(
 /// Inserts the meshes into `Assets<Mesh>`, builds the avian heightfield collider,
 /// and registers the entity in `TerrainChunkRegistry`.
 ///
-/// Each chunk gets its own cloned material so lightmaps can differ per-chunk;
-/// the lightmap itself was already decoded by the compute task.
+/// Each chunk gets its own cloned material so lightmaps and paint maps can
+/// differ per-chunk; the lightmap itself was already decoded by the compute
+/// task, and the paint grid goes into [`PaintmapData`] here.
 pub fn spawn_chunk_from_result(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -224,6 +233,7 @@ pub fn spawn_chunk_from_result(
     render_assets: &TerrainRenderAssets,
     terrain_materials: &mut Assets<TerrainMaterial>,
     images: &mut Assets<Image>,
+    paintmap: &mut PaintmapData,
     mut result: ChunkComputeResult,
 ) -> Entity {
     let cs = (CHUNK_SIZE - 1) as i32;
@@ -241,11 +251,21 @@ pub fn spawn_chunk_from_result(
     // Clone the shared base material to give this chunk its own instance.
     // This allows each chunk to hold a different lightmap texture without
     // affecting other chunks.
+    let paint_handle = images.add(paint_image(&result.paint));
+    paintmap.insert(
+        (result.chunk_x, result.chunk_y),
+        ChunkPaint {
+            samples: std::mem::take(&mut result.paint),
+            image: paint_handle.clone(),
+        },
+    );
+
     let chunk_material = if let Some(base) = terrain_materials.get(&render_assets.material) {
         let mut mat = base.clone();
         if let Some(image) = result.lightmap.take() {
             mat.lightmap = images.add(image);
         }
+        mat.paint = paint_handle;
         terrain_materials.add(mat)
     } else {
         render_assets.material.clone()
@@ -471,45 +491,41 @@ fn finalize_terrain_setup(
     world_config: &storage::WorldConfig,
     commands: &mut Commands,
     terrain_materials: &mut Assets<TerrainMaterial>,
-    asset_server: &AssetServer,
+    _asset_server: &AssetServer,
     images: &mut Assets<Image>,
 ) {
     let width = world_config.grid_width as usize;
     let height = world_config.grid_height as usize;
 
+    let palette_gpu = TerrainPaletteGpu::from_palette(&metadata.palette);
     commands.insert_resource(storage::TerrainWorld {
         chunk_state_map: storage::build_chunk_state_map(&metadata),
         metadata,
         world_path,
     });
     commands.insert_resource(TerrainChunkRegistry::default());
+    commands.insert_resource(PaintmapData::default());
 
     // Sparse heightmap — starts empty (all tiles implicitly 0.0).
     commands.insert_resource(HeightmapData::new(TILE_SIZE));
 
-    // Shared terrain material — created once, reused by every chunk.
-    // 0.19 collapsed the `load_*` variants into one builder.
-    let stone_texture: Handle<Image> = asset_server
-        .load_builder()
-        .with_settings(|s: &mut ImageLoaderSettings| {
-            s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
-                ..ImageSamplerDescriptor::default()
-            });
-        })
-        .load("textures/terrain.png");
+    // Shared terrain material — created once, cloned per chunk. The palette
+    // array starts as a 1×1 placeholder; `palette_sync::sync_palette` builds
+    // the real one once the layer textures load and writes it into every
+    // chunk material. The paint map here is the all-default grid a chunk
+    // without one would show.
+    let palette_array = images.add(placeholder_palette_array());
+    let default_paint = images.add(paint_image(&vec![PAINT_DEFAULT; PAINT_SIZE * PAINT_SIZE]));
 
     // Unbaked chunks bind the shared 1×1 white lightmap, i.e. fully lit.
     let default_lightmap = create_default_toon_lightmap(images);
 
     let material = terrain_materials.add(TerrainMaterial {
-        stone_texture,
+        layers: palette_array,
         lightmap: default_lightmap,
-        shading: TerrainShading {
-            base_color: LinearRgba::from(Color::srgb(0.81, 0.62, 0.60)).to_vec4(),
-            ..default()
-        },
+        shading: TerrainShading::default(),
+        paint: default_paint,
+        palette: palette_gpu,
     });
 
     commands.insert_resource(TerrainRenderAssets { material });

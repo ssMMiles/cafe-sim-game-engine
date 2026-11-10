@@ -25,6 +25,10 @@ pub enum EditorTool {
     Place,
     /// Sculpt the heightmap (LMB raise, Ctrl+LMB lower).
     Terrain,
+    /// Paint ground materials from the world's palette
+    /// (`docs/TERRAIN_PAINTING_PLAN.md`). Phase 0: palette editing and the
+    /// brush disc; strokes land in Phase 1.
+    Paint,
 }
 
 impl EditorTool {
@@ -33,6 +37,7 @@ impl EditorTool {
             EditorTool::Select => "Select",
             EditorTool::Place => "Place",
             EditorTool::Terrain => "Terrain",
+            EditorTool::Paint => "Paint",
         }
     }
 }
@@ -54,7 +59,7 @@ impl Plugin for ToolPlugin {
     }
 }
 
-/// `1` / `2` / `3` pick a tool directly while the viewport is hovered.
+/// `1` / `2` / `3` / `4` pick a tool directly while the viewport is hovered.
 /// `Shift+E` and `Shift+G` keep their old meaning as toggles (Place and
 /// Terrain respectively, back to Select when pressed again).
 fn tool_hotkeys(
@@ -83,6 +88,8 @@ fn tool_hotkeys(
             Some(EditorTool::Place)
         } else if input.just_pressed(KeyCode::Digit3) {
             Some(EditorTool::Terrain)
+        } else if input.just_pressed(KeyCode::Digit4) {
+            Some(EditorTool::Paint)
         } else {
             None
         }

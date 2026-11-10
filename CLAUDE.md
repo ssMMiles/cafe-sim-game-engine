@@ -95,7 +95,7 @@ src/
 │   └── main.rs         # Start Game / Settings buttons
 ├── editor/             # EditorPlugin — docked editor (F1 toggles Editor/Gameplay). See docs/EDITOR_UI_DESIGN.md
 │   ├── mod.rs              # EditorMode state, EditorSet {Prepare, InGame, Active}, wiring
-│   ├── tool.rs             # EditorTool state (Select/Place/Terrain): 1/2/3, Shift+E, Shift+G, Esc cancels
+│   ├── tool.rs             # EditorTool state (Select/Place/Terrain/Paint): 1/2/3/4, Shift+E, Shift+G, Esc cancels
 │   ├── ui/                 # egui chrome (EguiPrimaryContextPass, runs in PostUpdate)
 │   │   ├── mod.rs          #   EguiPlugin bootstrap, DockLayout, `Panels` SystemParam, status bar
 │   │   ├── persist.rs      #   User-level editor_settings.json (dock, EdgeStyle, AtmosphereStyle, DisplaySettings; cwd native /
@@ -135,6 +135,9 @@ src/
 │   ├── grab.rs             # R: lift a placed entity into the preview, drop it with its own id
 │   ├── input.rs            # keyboard_free (egui text focus), scroll modifier + notches
 │   ├── object_placement.rs # Placement preview/config, place at cursor ray (Place tool)
+│   ├── paint_tool.rs       # Paint tool: PaintToolState {selected layer, Paint|Fill, flow}, paint_step (blend rules),
+│   │                       #   stroke → Change::Paint (per-chunk RLE before/after), Alt+LMB eyedropper, fill loaded
+│   │                       #   chunks, disc dressed in the layer. Shares hit/disc/[ ] with Terrain. docs/TERRAIN_PAINTING_PLAN.md
 │   ├── terrain_edit.rs     # Terrain brush: BrushSettings {mode sculpt/flatten/smooth, radius, strength,
 │   │                       #   falloff}; flatten targets the stroke-start height, smooth averages a snapshot
 │   ├── terrain_save.rs     # Shift+S save trigger
@@ -185,7 +188,13 @@ src/
         ├── terrain/
         │   ├── types.rs      # TerrainChunk, HeightmapData (sparse HashMap)
         │   ├── constants.rs  # CHUNK_SIZE=256 vertices, TILE_SIZE=0.25 → 63.75 m chunks (CHUNK_WORLD_SIZE in objects.rs)
-        │   ├── storage.rs    # rkyv WorldMetadata (v6: environment in lightmap units + toon curve,
+        │   ├── paint.rs      # Terrain painting data: PaintSample (base id | overlay id | blend | flags per
+        │   │                 #   tile), PaintData (RLE, in the .terrain file), TerrainPalette/TerrainLayerData
+        │   │                 #   (world.meta), PaintmapData (runtime grid per loaded chunk), paint-map Image +
+        │   │                 #   palette 2d_array builders. docs/TERRAIN_PAINTING_PLAN.md
+        │   ├── palette_sync.rs # Loads the palette's textures, rebuilds the 2d_array when they change, writes the
+        │   │                 #   per-layer uniform into every chunk material on a palette edit
+        │   ├── storage.rs    # rkyv WorldMetadata (v7: environment in lightmap units + toon curve, palette,
         │   │                 #   required_plugins, plugin_data, next_entity_id) / ChunkData,
         │   │                 #   quantized heights, legacy v2 + v4 + v5 readers
         │   ├── bootstrap.rs  # Two-stage async terrain init
@@ -229,10 +238,11 @@ src/
 
 ```
 worlds/{id}/
-  world.meta                   # v6 (WORLD_FORMAT_VERSION): terrain config + chunk index
+  world.meta                   # v7 (WORLD_FORMAT_VERSION): terrain config + chunk index + TerrainPalette
                                #   + EnvironmentData (sun/ambient in lightmap units + ToonCurve) + required_plugins + plugin_data
                                #   + next_entity_id (placed-entity id counter, seeds the registry on load)
-  chunks/chunk_X_Y.terrain     # v2 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc
+  chunks/chunk_X_Y.terrain     # v3 (CHUNK_FORMAT_VERSION), rkyv frame: magic + version + crc; heights + the
+                               #   RLE paint grid (v2 files read as all-layer-0)
   chunks/chunk_X_Y.objects     # v7: Vec<PlacedEntityRecord> — kind (Mesh/PointLight/SpotLight/Empty/Group;
                                #   light intensity is in lightmap units, not lumens; lights carry a falloff exponent)
                                #   + Vec<ScriptBinding> with typed PropValue props + parent: Option<u64> (group id)
@@ -246,7 +256,7 @@ assets/prefabs/{name}.prefab   # prefab definitions (v2, global): records with l
                                #   root-relative transforms; OPFS `prefabs/` on web
 ```
 
-All rkyv; v2, v4 and v5 `world.meta`, v2–v6 `.objects` files and v1 prefabs are read via `legacy` modules, upgraded in memory and rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). **A field added inside a `PlacedKind` variant changes the archived enum**, which invalidates every record type holding a kind — chunk objects of every version *and* prefab files — so all of those readers funnel through `objects::legacy::PlacedKindV6` (that happened for `falloff`: `.objects` v7, prefabs v2). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
+All rkyv; v2, v4, v5 and v6 `world.meta`, v2 `.terrain`, v2–v6 `.objects` files and v1 prefabs are read via `legacy` modules, upgraded in memory and rewritten as current on next save (v3 `world.meta`, never released, is rejected and starts fresh — pre-v4 test worlds are meant to be deleted, not migrated). **A field added inside a `PlacedKind` variant changes the archived enum**, which invalidates every record type holding a kind — chunk objects of every version *and* prefab files — so all of those readers funnel through `objects::legacy::PlacedKindV6` (that happened for `falloff`: `.objects` v7, prefabs v2). Shift+S saves dirty chunks, placed entities, environment, and plugin level data (`world.meta` is always rewritten, even with no dirty chunks). `required_plugins` is a warn-only union — missing plugins are never auto-added to the project manifest, and unhydrated bindings survive save round-trips.
 
 ## Shaders (`assets/shaders/`)
 
@@ -261,7 +271,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | `scene/mesh_io.wesl` | Scene-pass varyings (UV0/UV1 behind `VERTEX_UVS_A/B`, flat instance index) + fragment outputs (colour + the normal target under `SCENE_NORMAL_TARGET`); toon, sky, unlit |
 | `scene/mesh_vertex.wesl` | The general scene vertex stage: instance transform or `SKINNED` joint blend from our joint buffer |
 | `toon_lighting.wesl` | Object fragment: baked lightmap or probe volume, hue-preserving toon bands; winding flag from our instance buffer; writes the facing normal (flipped on double-sided back faces) to the edge detector's target |
-| `terrain_toon.wesl` | Terrain fragment: stochastic stone texture × the same baked toon shading; world normal to the edge detector's target |
+| `terrain_toon.wesl` | Terrain fragment: painted layers (paint map ids → palette `2d_array` patterns × tints, Soft blend) × the same baked toon shading; world normal to the edge detector's target. Every pattern tap is `textureSampleGrad` with gradients taken once at the top — the paint-map branches are non-uniform |
 | `unlit.wesl` | `UnlitMaterial` fragment: base colour × optional texture, alpha-blended. Scene pass, `SceneLayer::Transparent` |
 | `gizmos/lines.wesl` | bevy's line-gizmo shader, copied verbatim (MIT/Apache); `scene_pass::gizmos` binds it against our bind group 0 |
 | `lightmap_bake.wgsl` | GPU compute terrain bake (sun + lights + AO + bounce; stack BVH traversal → packed f16 RGB) |
@@ -276,7 +286,8 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 - **Pointer authority is `ViewportInput`**, filled from the viewport tab's egui `Response` each pass (hovered, cursor in texture pixels, look-drag, click, scroll, size). bevy_egui's "wants pointer" helpers are useless with a whole-window dock. `compute_editor_ray` (first in `EditorSet::Prepare`) turns it into one `EditorRay` per frame; the picker, placement preview and terrain brush all read that ray. Mouse/wheel consumers gate on `viewport_pointer_free`; key bindings gate on `keyboard_free` (egui text focus). One frame of latency (egui pass is in PostUpdate) is by design.
 - **One camera, two drivers.** In `EditorMode::Editor` `editor_fly_camera` owns the transform (RMB drag look, WASD/QE while looking, scroll = fly speed while looking / dolly idle); `camera_follow`, free-cam, `character_physics`, `check_interactions` and the sprite sizing are gated to `EditorMode::Gameplay`. `WorldFocus` (game/mod.rs) is the camera in the editor and the player in gameplay; streaming and the bake read it instead of `Player`.
 - **Cursor**: free in the editor; `CursorGrabMode::Locked` + hidden only while looking, restored to where the drag began. `simulation::setup` only locks in Gameplay mode.
-- **`EditorTool` state** (Select / Place / Terrain) replaced `UserSettings.edit_mode` / `terrain_edit_mode` (ABI 5). `OnExit(Place)` releases a grab, tears down the preview and closes the catalog; `OnExit(Terrain)` removes the brush disc.
+- **`EditorTool` state** (Select / Place / Terrain / Paint) replaced `UserSettings.edit_mode` / `terrain_edit_mode` (ABI 5). `OnExit(Place)` releases a grab, tears down the preview and closes the catalog; `OnExit(Terrain)` and `OnExit(Paint)` remove the brush disc.
+- **Terrain painting is a material-ID map** (`docs/TERRAIN_PAINTING_PLAN.md`; Phase 0 landed 2026-11-10). Each 0.25 m tile stores base layer + overlay layer + blend + flags (`PaintSample`, 4 bytes, little-endian = the `Rgba8Unorm` texel) inside the `.terrain` file (v3, RLE); the world's `TerrainPalette` (`world.meta` v7) is the layer list — a layer is a greyscale *pattern* texture + linear tint + pattern strength + tiling + no-tile + blend profile; layer 0 is what unpainted ground shows. Pre-v7 worlds upgrade to a one-layer palette reproducing the old stone look (`TerrainPalette::legacy_stone`), new worlds get `textures/terrain_default.png` (grey triangles). GPU side: one `2d_array` of all patterns (`palette_sync`, rebuilt only when textures/size change, after they load) + one paint-map `Image` per chunk on its material + a 32-entry palette uniform per material. The shader reads the four tiles around a pixel with `textureLoad`; when they agree on the layer pair (almost always) it blends two layers, otherwise it shades each corner. **Editor:** Paint tool (`4`), palette in the Tool tab, "Add to terrain palette" on a texture in the Assets tab; palette edits are `Change::Palette` (`MergeKey::Palette`). **Brush (Phase 1):** `paint_step` is the one rule — painting the overlay raises the blend (saturating into the base), painting the base or Ctrl-erasing lowers it, a third layer snaps the dominant one to base and starts from 0 — so a transition always shares one layer pair (keeps the shader on its cheap path). Tiles are written through `PaintmapData::write_tile` (grid + `Image` texel, every chunk sharing an edge tile); a stroke records `Change::Paint { chunks: [chunk, before, after] }` as RLE `PaintData` (compact for strokes and fills alike; undo = `replace_chunk`). The default layer samples plainly: the no-tile sampler scrambles a regular geometric pattern into overlapping shards.
 - **`Selection { primary, hovered }`** is what the inspector, Delete, F and the outliner act on. Viewport click (Select tool) or an outliner row sets it; `validate_selection` drops dead entities each frame; placement/drop/duplicate select the new entity. A **transform gizmo** (`gizmo.rs`) draws XYZ arrows (Ctrl: rotation arcs) at the selection origin; dragging a handle writes `Transform` + `PlacedEdited` per frame (so group deltas stay correct) and suppresses click-select via `gizmo_pointer_free`. Drag state is a resource (`GizmoInteraction`), never `ViewportInput` (rebuilt every egui pass).
 - **New entities are named after their catalog entry** (mesh folder, preset title, "Point Light"), and `PlacedObject::unique_name` counts past any *loaded* entity displaying the same name (`rock`, `rock 1`, `rock 2`; lowest free; Duplicate counts on from the source's stem). Prefab instances take the definition's name.
 - **Every level-data mutation goes through `edits.rs`.** Panels write components directly and send `PlacedEdited { entity, what }`; `commit_placed_edits` re-derives `PlacedObject.chunk` from the transform (dirtying both chunks on a boundary crossing), syncs `Interactable.name` to the mesh children, and sets `LightingState.stale`. Script props are *drafted* in the inspector and committed as one `ScriptEdit::SetProps` when the user lets go, because applying = `detach_binding` + `NeedsHydration` (the host skips already-hydrated pairs), which rebuilds the plugin's components. Mesh asset / collider changes go through `RespawnPlaced::InPlace` (same id).
@@ -297,11 +308,11 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | RMB drag (viewport) | Look; WASD/QE fly while held, Shift ×4, scroll = fly speed |
 | "Fly" button (viewport corner) | Lock the cursor and fly without holding RMB (clicks suppressed); Esc exits |
 | Scroll (viewport, idle) | Dolly |
-| 1 / 2 / 3 | Select / Place / Terrain tool (viewport hovered); Shift+E / Shift+G toggle Place / Terrain |
-| LMB | Select tool: select (or drag a gizmo handle) · Place tool: place / drop grabbed · Terrain: apply brush |
-| Alt+LMB | Select the outermost group of the entity under the cursor |
+| 1 / 2 / 3 / 4 | Select / Place / Terrain / Paint tool (viewport hovered); Shift+E / Shift+G toggle Place / Terrain |
+| LMB | Select tool: select (or drag a gizmo handle) · Place tool: place / drop grabbed · Terrain: apply brush · Paint: paint / fill the selected layer |
+| Alt+LMB | Select the outermost group of the entity under the cursor · Paint tool: pick the layer under the cursor |
 | Ctrl (Select tool) | Gizmo shows rotation arcs instead of translation arrows |
-| Ctrl+LMB | Lower terrain (Terrain tool, Sculpt mode) |
+| Ctrl+LMB | Lower terrain (Terrain tool, Sculpt mode) · erase paint back to the base layer (Paint tool) |
 | Esc | Exit fly lock → cancel a gizmo drag (restores the start transform) → put a carried entity back → back to Select tool → deselect |
 | Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y | Undo / redo (Cmd works too; refused mid-drag or mid-stroke, puts a carried entity back first) |
 | F | Focus camera on the selection (also outliner double-click) |
@@ -309,7 +320,7 @@ Shaders are **WESL** (`.wesl`): `import bevy_pbr::render::forward_io::VertexOutp
 | R | Grab the entity under the cursor (else the selection); again to cancel. Switches to Place while carrying |
 | Shift+Scroll | Adjust placement scale |
 | Alt+Scroll | Rotate placement (yaw, 15° steps) |
-| `[` / `]` | Adjust brush size (Terrain tool) |
+| `[` / `]` | Adjust brush size (Terrain and Paint tools) |
 | Shift+S | Save terrain |
 | Shift+B | Bake lightmaps (3×3 chunks around the player by default; `BakeConfig::bake_radius`) |
 | Shift+L | Toggle baked lighting / flat unlit debug view |

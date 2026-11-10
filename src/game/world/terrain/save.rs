@@ -2,9 +2,10 @@
 
 use bevy::prelude::*;
 
+use super::paint::PaintmapData;
 use super::storage::{
-    ChunkData, ChunkIndexEntry, ChunkState, HeightData, MaterialData, TerrainChunkRegistry,
-    TerrainWorld, quantize_heights,
+    ChunkData, ChunkIndexEntry, ChunkState, HeightData, TerrainChunkRegistry, TerrainWorld,
+    quantize_heights,
 };
 use super::{CHUNK_SIZE, HeightmapData};
 
@@ -47,6 +48,7 @@ pub fn save_terrain(
     terrain_world: Option<Res<TerrainWorld>>,
     registry: Option<ResMut<TerrainChunkRegistry>>,
     heightmap: Option<Res<HeightmapData>>,
+    paintmap: Option<Res<PaintmapData>>,
     placed_registry: Option<Res<crate::game::world::objects::PlacedObjectRegistry>>,
     mut pending: ResMut<PendingTerrainSave>,
     #[cfg(all(target_arch = "wasm32", feature = "opfs"))] _storage: Res<crate::storage::Storage>,
@@ -79,7 +81,7 @@ pub fn save_terrain(
 
     let chunks: Vec<ChunkData> = dirty
         .iter()
-        .map(|&(cx, cy)| extract_chunk_data(&heightmap, cx, cy))
+        .map(|&(cx, cy)| extract_chunk_data(&heightmap, paintmap.as_deref(), cx, cy))
         .collect();
     let mut metadata_snapshot = terrain_world.metadata.clone();
 
@@ -302,6 +304,7 @@ fn apply_save_result(result: SaveResult, terrain_world: Option<ResMut<TerrainWor
 
 pub(super) fn extract_chunk_data(
     heightmap: &HeightmapData,
+    paintmap: Option<&PaintmapData>,
     chunk_x: i32,
     chunk_y: i32,
 ) -> ChunkData {
@@ -331,6 +334,8 @@ pub(super) fn extract_chunk_data(
             height_min,
             height_max,
         },
-        material_data: MaterialData::Uniform,
+        paint: paintmap
+            .map(|p| p.encode((chunk_x, chunk_y)))
+            .unwrap_or_default(),
     }
 }

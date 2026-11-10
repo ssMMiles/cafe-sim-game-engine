@@ -11,7 +11,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::{grab::GrabbedEntity, terrain_edit::BrushMode, tool::EditorTool};
+use super::{
+    grab::GrabbedEntity, paint_tool::PaintSubTool, terrain_edit::BrushMode, tool::EditorTool,
+};
 
 /// Which context a control belongs to. `Base` rows are always shown.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -25,6 +27,10 @@ enum Ctx {
     TerrainSculpt,
     TerrainFlatten,
     TerrainSmooth,
+    /// Paint tool, any sub-tool.
+    Paint,
+    PaintPaint,
+    PaintFill,
     /// Fly lock engaged: the cursor is captured, clicks are suppressed.
     Flying,
 }
@@ -42,7 +48,11 @@ const fn row(ctx: Ctx, keys: &'static str, action: &'static str) -> ControlRow {
 /// Every editor control, tagged with the context that makes it live.
 static CONTROLS: &[ControlRow] = &[
     row(Ctx::Base, "F1", "Gameplay"),
-    row(Ctx::Base, "1 / 2 / 3", "Select / Place / Terrain"),
+    row(
+        Ctx::Base,
+        "1 / 2 / 3 / 4",
+        "Select / Place / Terrain / Paint",
+    ),
     row(Ctx::Base, "Esc", "Cancel / deselect"),
     row(Ctx::Base, "Ctrl+Z / Ctrl+Shift+Z", "Undo / Redo"),
     row(Ctx::Base, "Shift+S", "Save"),
@@ -76,6 +86,12 @@ static CONTROLS: &[ControlRow] = &[
     row(Ctx::TerrainFlatten, "LMB", "Flatten"),
     row(Ctx::TerrainSmooth, "LMB", "Smooth"),
     row(Ctx::Terrain, "[ / ]", "Brush size"),
+    // Paint tool, per sub-tool.
+    row(Ctx::PaintPaint, "LMB", "Paint layer"),
+    row(Ctx::PaintPaint, "Ctrl+LMB", "Erase"),
+    row(Ctx::PaintFill, "LMB", "Fill"),
+    row(Ctx::Paint, "Alt+LMB", "Pick layer"),
+    row(Ctx::Paint, "[ / ]", "Brush size"),
     // Fly lock (cursor captured, no clicks).
     row(Ctx::Flying, "Esc", "Exit fly mode"),
     row(Ctx::Flying, "WASD / QE", "Fly (Shift ×4)"),
@@ -94,10 +110,11 @@ impl ActiveControls<'_> {
     /// resources ([`super::camera::FlyLock`], `BrushSettings`): `editor_ui`
     /// already holds both mutably through `Panels`, and a second `Res` access
     /// would be a B0002 parameter conflict.
-    fn includes(&self, ctx: Ctx, flying: bool, brush: BrushMode) -> bool {
+    fn includes(&self, ctx: Ctx, flying: bool, brush: BrushMode, paint: PaintSubTool) -> bool {
         let tool = *self.tool.get();
         let carrying = self.grabbed.0.is_some();
         let terrain = tool == EditorTool::Terrain && !flying;
+        let painting = tool == EditorTool::Paint && !flying;
         match ctx {
             Ctx::Base => true,
             // While carrying, the normal click/grab bindings are replaced by
@@ -111,6 +128,9 @@ impl ActiveControls<'_> {
             Ctx::TerrainSculpt => terrain && brush == BrushMode::Sculpt,
             Ctx::TerrainFlatten => terrain && brush == BrushMode::Flatten,
             Ctx::TerrainSmooth => terrain && brush == BrushMode::Smooth,
+            Ctx::Paint => painting,
+            Ctx::PaintPaint => painting && paint == PaintSubTool::Paint,
+            Ctx::PaintFill => painting && paint == PaintSubTool::Fill,
             Ctx::Flying => flying,
         }
     }
@@ -120,10 +140,11 @@ impl ActiveControls<'_> {
         &self,
         flying: bool,
         brush: BrushMode,
+        paint: PaintSubTool,
     ) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
         CONTROLS
             .iter()
-            .filter(move |c| self.includes(c.ctx, flying, brush))
+            .filter(move |c| self.includes(c.ctx, flying, brush, paint))
             .map(|c| (c.keys, c.action))
     }
 }

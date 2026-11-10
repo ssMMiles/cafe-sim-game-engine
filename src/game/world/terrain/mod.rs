@@ -3,6 +3,8 @@ pub mod constants;
 pub mod lod;
 pub mod material;
 pub mod mesh;
+pub mod paint;
+pub mod palette_sync;
 pub mod reconcile;
 pub mod save;
 pub mod storage;
@@ -12,6 +14,24 @@ use bevy::prelude::*;
 pub use types::{HeightmapData, TerrainChunk};
 
 pub use constants::{CHUNK_SIZE, HEIGHT_SCALE, TILE_SIZE};
+
+/// Chunks whose grids include global tile `(tx, ty)`: its own, plus the
+/// neighbours that share it when it sits on a chunk edge (chunks overlap by
+/// one tile row). Heights and paint both follow this.
+pub fn chunks_touching_tile(tx: i32, ty: i32) -> impl Iterator<Item = (i32, i32)> {
+    let cs = (CHUNK_SIZE - 1) as i32;
+    let (cx, cy) = (tx.div_euclid(cs), ty.div_euclid(cs));
+    let on_x = tx.rem_euclid(cs) == 0;
+    let on_y = ty.rem_euclid(cs) == 0;
+    [
+        Some((cx, cy)),
+        on_x.then_some((cx - 1, cy)),
+        on_y.then_some((cx, cy - 1)),
+        (on_x && on_y).then_some((cx - 1, cy - 1)),
+    ]
+    .into_iter()
+    .flatten()
+}
 
 use crate::game::GameEntity;
 use bootstrap::{TerrainRenderAssets, TerrainSetupMarker, create_terrain};
@@ -38,9 +58,15 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<save::PendingTerrainSave>();
         app.add_message::<save::SaveTerrainMessage>();
 
+        app.init_resource::<palette_sync::PaletteTextures>();
         app.add_systems(
             Update,
-            (create_terrain, update_terrain_lod).in_set(TerrainSet::Update),
+            (
+                create_terrain,
+                update_terrain_lod,
+                palette_sync::sync_palette,
+            )
+                .in_set(TerrainSet::Update),
         );
         app.add_systems(
             Update,
@@ -64,5 +90,6 @@ pub fn destroy(commands: &mut Commands) {
     commands.remove_resource::<TerrainWorld>();
     commands.remove_resource::<TerrainChunkRegistry>();
     commands.remove_resource::<HeightmapData>();
+    commands.remove_resource::<paint::PaintmapData>();
     commands.remove_resource::<TerrainRenderAssets>();
 }

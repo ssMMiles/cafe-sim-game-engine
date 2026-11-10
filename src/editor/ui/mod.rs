@@ -55,6 +55,7 @@ mod history_panel;
 mod inspector;
 mod menu;
 mod outliner;
+mod paint;
 mod persist;
 mod place;
 mod terrain;
@@ -218,6 +219,7 @@ pub struct Panels<'w, 's> {
     /// timings for the inspector's readout.
     pub diagnostics: Res<'w, DiagnosticsStore>,
     pub brush: ResMut<'w, BrushSettings>,
+    pub paint: ResMut<'w, super::paint_tool::PaintToolState>,
     pub lighting: ResMut<'w, LightingState>,
     pub history: ResMut<'w, History>,
     pub export: Res<'w, super::world_export::WorldExport>,
@@ -387,7 +389,9 @@ pub(super) fn editor_ui(
     // save/bake state live in the viewport tab's title instead.
     egui::Panel::bottom("editor_status").show(&mut root, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for (keys, action) in controls.rows(panels.fly_lock.0, panels.brush.mode) {
+            for (keys, action) in
+                controls.rows(panels.fly_lock.0, panels.brush.mode, panels.paint.sub_tool)
+            {
                 ui.strong(keys);
                 ui.label(action);
                 ui.add_space(8.0);

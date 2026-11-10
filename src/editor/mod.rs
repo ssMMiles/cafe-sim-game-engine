@@ -31,6 +31,7 @@ pub mod history;
 mod input;
 mod lightmap_toggle;
 mod object_placement;
+mod paint_tool;
 mod physics_debug;
 mod picking;
 mod prefab_edit;
@@ -129,6 +130,7 @@ impl Plugin for EditorPlugin {
 
         let place = in_state(EditorTool::Place);
         let terrain = in_state(EditorTool::Terrain);
+        let paint = in_state(EditorTool::Paint);
         let select = in_state(EditorTool::Select);
 
         // ── Per-frame preparation ────────────────────────────────────────────
@@ -302,6 +304,31 @@ impl Plugin for EditorPlugin {
                 .run_if(terrain.clone()),
         );
         app.add_systems(OnExit(EditorTool::Terrain), teardown_terrain_brush_preview);
+
+        // ── Paint tool ───────────────────────────────────────────────────────
+        // Shares the brush machinery (hit, disc, `[`/`]`) with Terrain
+        // (docs/TERRAIN_PAINTING_PLAN.md §4.4).
+        app.init_resource::<paint_tool::PaintToolState>();
+        app.add_systems(
+            Update,
+            (
+                adjust_brush_size.run_if(keyboard_free),
+                raycast_terrain_hit,
+                paint_tool::pick_layer,
+                paint_tool::apply_paint_brush,
+                paint_tool::finalize_paint_stroke,
+                paint_tool::fill_loaded_chunks,
+                update_brush_preview,
+                paint_tool::style_paint_disc,
+            )
+                .chain()
+                .in_set(EditorSet::Active)
+                .run_if(paint.clone()),
+        );
+        app.add_systems(
+            OnExit(EditorTool::Paint),
+            (teardown_terrain_brush_preview, paint_tool::reset_paint_tool),
+        );
 
         // ── Save / bake / debug toggles ──────────────────────────────────────
         app.add_systems(
