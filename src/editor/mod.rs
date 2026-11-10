@@ -317,7 +317,7 @@ impl Plugin for EditorPlugin {
                 paint_tool::pick_layer,
                 paint_tool::apply_paint_brush,
                 paint_tool::finalize_paint_stroke,
-                paint_tool::fill_loaded_chunks,
+                paint_tool::apply_paint_requests,
                 update_brush_preview,
                 paint_tool::style_paint_disc,
             )

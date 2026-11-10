@@ -38,11 +38,12 @@ const CHUNK_FORMAT_VERSION: u32 = 3;
 /// the baked radiance is quantised through — so exposure and contrast are
 /// per-world settings instead of constants compiled into the shaders;
 /// version 7 added the [`TerrainPalette`] — the world's ground-material
-/// layers that painted tiles index.
-/// Versions 2, 4, 5 and 6 are still readable and are upgraded in memory (see
-/// [`legacy`]). Version 3 was never in a release and is **not** readable —
-/// the few v3 test worlds are expected to be deleted.
-const WORLD_FORMAT_VERSION: u32 = 7;
+/// layers that painted tiles index; version 8 gave each layer its blend
+/// parameter, lock and removed/fallback slot state.
+/// Versions 2, 4, 5, 6 and 7 are still readable and are upgraded in memory
+/// (see [`legacy`]). Version 3 was never in a release and is **not**
+/// readable — the few v3 test worlds are expected to be deleted.
+const WORLD_FORMAT_VERSION: u32 = 8;
 
 // ============================================================================
 // Serializable Data Structures
@@ -533,6 +534,78 @@ pub mod legacy {
         pub next_entity_id: u64,
     }
 
+    /// The v7 palette: no blend parameter, lock or removed-slot state.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct TerrainLayerDataV7 {
+        pub name: String,
+        pub texture: String,
+        pub tint: [f32; 3],
+        pub pattern_strength: f32,
+        pub tiling: f32,
+        pub no_tile: bool,
+        pub blend_profile: u8,
+        pub bake_albedo: [f32; 3],
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct TerrainPaletteV7 {
+        pub layers: Vec<TerrainLayerDataV7>,
+        pub texture_size: u32,
+    }
+
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct WorldMetadataV7 {
+        pub version: u32,
+        pub world_id: String,
+        pub terrain_config: TerrainConfigData,
+        pub chunks_x: u32,
+        pub chunks_y: u32,
+        pub chunk_index: Vec<ChunkIndexEntry>,
+        pub last_saved: u64,
+        pub environment: EnvironmentData,
+        pub required_plugins: Vec<String>,
+        pub plugin_data: Vec<PluginLevelData>,
+        pub next_entity_id: u64,
+        pub palette: TerrainPaletteV7,
+    }
+
+    /// v7 → v8: the layers as they were, with the new knobs at their
+    /// defaults (nothing removed, nothing locked).
+    pub fn upgrade_v7(old: WorldMetadataV7) -> WorldMetadata {
+        let layers = old
+            .palette
+            .layers
+            .into_iter()
+            .map(|l| {
+                let mut n = super::super::paint::TerrainLayerData::new(l.name, l.texture);
+                n.tint = l.tint;
+                n.pattern_strength = l.pattern_strength;
+                n.tiling = l.tiling;
+                n.no_tile = l.no_tile;
+                n.blend_profile = l.blend_profile;
+                n.bake_albedo = l.bake_albedo;
+                n
+            })
+            .collect();
+        WorldMetadata {
+            version: super::WORLD_FORMAT_VERSION,
+            world_id: old.world_id,
+            terrain_config: old.terrain_config,
+            chunks_x: old.chunks_x,
+            chunks_y: old.chunks_y,
+            chunk_index: old.chunk_index,
+            last_saved: old.last_saved,
+            environment: old.environment,
+            required_plugins: old.required_plugins,
+            plugin_data: old.plugin_data,
+            next_entity_id: old.next_entity_id,
+            palette: TerrainPalette {
+                layers,
+                texture_size: old.palette.texture_size,
+            },
+        }
+    }
+
     /// v6 → v7: the world keeps the look it had. Before painting, terrain
     /// was one hard-coded stone pattern over one tint; that becomes layer 0
     /// of the upgraded palette ([`TerrainPalette::legacy_stone`]), and every
@@ -762,7 +835,7 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
 }
 
 /// Parse world metadata from a raw byte slice (same binary format as `load_world`).
-/// Accepts v2, v4, v5 and v6 (upgraded in memory); v3 was never released and is rejected.
+/// Accepts v2, v4, v5, v6 and v7 (upgraded in memory); v3 was never released and is rejected.
 /// Used by the async `WorldMetaLoader` which reads bytes via Bevy's `AssetServer`.
 pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, StorageError> {
     use std::io::Read as StdRead;
@@ -781,6 +854,7 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
         && version != 4
         && version != 5
         && version != 6
+        && version != 7
         && version != WORLD_FORMAT_VERSION
     {
         return Err(StorageError::VersionMismatch {
@@ -837,6 +911,15 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
             rkyv::deserialize::<legacy::WorldMetadataV6, RkyvError>(archived)
                 .map_err(|e| StorageError::SerializationError(e.to_string()))?;
         return Ok(legacy::upgrade_v6(old));
+    }
+
+    if version == 7 {
+        let archived = rkyv::access::<legacy::ArchivedWorldMetadataV7, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::WorldMetadataV7 =
+            rkyv::deserialize::<legacy::WorldMetadataV7, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v7(old));
     }
 
     let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
@@ -1264,6 +1347,68 @@ mod tests {
         );
         let loaded = parse_chunk_from_bytes(&bytes).unwrap();
         assert_eq!(loaded.paint.decode(), samples);
+    }
+
+    /// A v7 `world.meta` (first palette shape) keeps its layers, with the
+    /// v8 knobs defaulted.
+    #[test]
+    fn test_world_v7_upgrades_keeping_layers() {
+        let cur = create_world_metadata("p".to_string(), 128, 128, 64, (1.0, 1.0), 10.0);
+        let old = legacy::WorldMetadataV7 {
+            version: 7,
+            world_id: "seven".to_string(),
+            terrain_config: cur.terrain_config.clone(),
+            chunks_x: 2,
+            chunks_y: 2,
+            chunk_index: Vec::new(),
+            last_saved: 0,
+            environment: EnvironmentData::default(),
+            required_plugins: Vec::new(),
+            plugin_data: Vec::new(),
+            next_entity_id: 3,
+            palette: legacy::TerrainPaletteV7 {
+                layers: vec![
+                    legacy::TerrainLayerDataV7 {
+                        name: "Default".into(),
+                        texture: "textures/terrain_default.png".into(),
+                        tint: [0.6, 0.6, 0.6],
+                        pattern_strength: 0.85,
+                        tiling: 2.0,
+                        no_tile: false,
+                        blend_profile: 0,
+                        bake_albedo: [0.5, 0.5, 0.5],
+                    },
+                    legacy::TerrainLayerDataV7 {
+                        name: "Grass".into(),
+                        texture: "textures/grass.png".into(),
+                        tint: [0.1, 0.5, 0.1],
+                        pattern_strength: 0.5,
+                        tiling: 3.0,
+                        no_tile: true,
+                        blend_profile: 1,
+                        bake_albedo: [0.1, 0.5, 0.1],
+                    },
+                ],
+                texture_size: 512,
+            },
+        };
+        let rkyv_bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap();
+        let checksum = crc32fast::hash(&rkyv_bytes);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(WORLD_MAGIC);
+        bytes.extend_from_slice(&7u32.to_le_bytes());
+        bytes.extend_from_slice(&(rkyv_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&rkyv_bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+
+        let loaded = parse_world_meta_from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.version, WORLD_FORMAT_VERSION);
+        assert_eq!(loaded.palette.texture_size, 512);
+        assert_eq!(loaded.palette.layers.len(), 2);
+        assert_eq!(loaded.palette.layers[1].name, "Grass");
+        assert_eq!(loaded.palette.layers[1].blend_profile, 1);
+        assert!(!loaded.palette.layers[1].removed);
+        assert!(!loaded.palette.layers[1].locked);
     }
 
     /// A v6 `world.meta` loads with the stone palette so it looks unchanged;

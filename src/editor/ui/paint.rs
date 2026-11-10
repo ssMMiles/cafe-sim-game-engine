@@ -1,51 +1,38 @@
 //! Paint settings (shown in the Tool panel while the Paint tool is active):
 //! the world's palette — pick a layer, edit it, add one from the Assets
-//! textures — plus the shared brush size and falloff.
+//! textures, lock, remove, replace everywhere — plus the sub-tool row and
+//! the shared brush size and falloff.
 //!
-//! Every edit goes through `TerrainWorld.metadata.palette` (which
+//! Every palette edit goes through `TerrainWorld.metadata.palette` (which
 //! `palette_sync` watches) and is recorded as `Change::Palette`; slider
-//! drags fold into one transaction via `MergeKey::Palette`.
+//! drags fold into one transaction via `MergeKey::Palette`. Whole-world
+//! paint edits (fill, replace everywhere, remove) are queued as a
+//! `PaintRequest` for `paint_tool::apply_paint_requests`, which has the
+//! paint-map access this panel doesn't.
 
 use bevy_egui::egui;
 
 use super::Panels;
 use crate::editor::catalog::AssetKind;
 use crate::editor::history::{Change, MergeKey};
-use crate::editor::paint_tool::{PAINT_FLOW_RANGE, PaintSubTool};
+use crate::editor::paint_tool::{PAINT_FLOW_RANGE, PaintRequest, PaintSubTool};
 use crate::editor::terrain_edit::BRUSH_RADIUS_RANGE;
-use crate::game::world::terrain::paint::{
-    BlendProfile, MAX_LAYERS, TerrainLayerData, TerrainPalette,
-};
+use crate::game::world::terrain::paint::{BlendProfile, TerrainLayerData, TerrainPalette};
 
 const CELL: f32 = 44.0;
 
 pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     let hint = match panels.paint.sub_tool {
-        PaintSubTool::Paint => {
-            "LMB paints the selected layer · Ctrl+LMB erases · Alt+LMB picks · [ / ] resize"
-        }
-        PaintSubTool::Fill => {
-            "LMB fills the disc with the selected layer · Alt+LMB picks · [ / ] resize"
+        PaintSubTool::Paint => "LMB paints the selected layer · Ctrl+LMB erases · Alt+LMB picks",
+        PaintSubTool::Fill => "LMB fills the disc with the selected layer · Alt+LMB picks",
+        PaintSubTool::Smooth => "LMB smooths blends towards their neighbours · Alt+LMB picks",
+        PaintSubTool::Jitter => "LMB roughens blends along a transition · Alt+LMB picks",
+        PaintSubTool::Replace => {
+            "LMB swaps the From layer for the selected one · Alt+LMB picks From"
         }
     };
-    ui.weak(hint);
+    ui.weak(format!("{hint} · [ / ] resize"));
     ui.separator();
-
-    ui.horizontal(|ui| {
-        ui.label("Mode");
-        for sub in [PaintSubTool::Paint, PaintSubTool::Fill] {
-            ui.selectable_value(&mut panels.paint.sub_tool, sub, sub.label());
-        }
-        ui.add_space(8.0);
-        if ui
-            .button("Fill loaded chunks")
-            .on_hover_text("Every loaded chunk becomes the selected layer (undoable)")
-            .clicked()
-        {
-            panels.paint.fill_all_requested = true;
-        }
-    });
-    ui.add_space(4.0);
 
     let Some(palette) = panels
         .terrain_world
@@ -58,10 +45,18 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     let before = palette.clone();
     let mut palette = palette;
 
-    if panels.paint.selected >= palette.layers.len() {
-        panels.paint.selected = 0;
-    }
+    let live_or_zero = |i: usize| {
+        if palette.layers.get(i).is_some_and(|l| !l.removed) {
+            i
+        } else {
+            0
+        }
+    };
+    panels.paint.selected = live_or_zero(panels.paint.selected);
+    panels.paint.replace_from = live_or_zero(panels.paint.replace_from);
 
+    sub_tool_row(ui, panels, &palette);
+    ui.add_space(4.0);
     palette_strip(ui, panels, &palette);
     ui.add_space(4.0);
 
@@ -69,6 +64,7 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
     if let Some(layer) = palette.layers.get_mut(selected) {
         layer_settings(ui, panels, layer, selected == 0);
     }
+    layer_actions(ui, panels, &palette);
 
     ui.separator();
     egui::Grid::new("palette_settings")
@@ -89,27 +85,68 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
             ui.add(egui::Slider::new(&mut panels.brush.radius, BRUSH_RADIUS_RANGE).suffix(" m"));
             ui.end_row();
 
-            if panels.paint.sub_tool == PaintSubTool::Paint {
-                ui.label("Flow")
-                    .on_hover_text("How fast the blend moves towards the layer, per second");
-                ui.add(egui::Slider::new(&mut panels.paint.flow, PAINT_FLOW_RANGE).suffix(" /s"));
-                ui.end_row();
-            }
-
             ui.label("Falloff");
             ui.add(egui::Slider::new(&mut panels.brush.falloff, 0.0..=1.0))
                 .on_hover_text("Fraction of the radius that fades out (0 = hard edge)");
             ui.end_row();
+
+            if panels.paint.sub_tool.uses_flow() {
+                ui.label("Flow")
+                    .on_hover_text("How fast blends move, per second at full brush weight");
+                ui.add(egui::Slider::new(&mut panels.paint.flow, PAINT_FLOW_RANGE).suffix(" /s"));
+                ui.end_row();
+            }
         });
 
     commit(panels, before, palette, "Edit palette");
 }
 
-/// One cell per layer: the pattern tinted with the layer colour, name
+fn sub_tool_row(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalette) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Mode");
+        for sub in PaintSubTool::ALL {
+            ui.selectable_value(&mut panels.paint.sub_tool, sub, sub.label());
+        }
+    });
+    if panels.paint.sub_tool == PaintSubTool::Fill
+        && ui
+            .button("Fill loaded chunks")
+            .on_hover_text("Every loaded chunk becomes the selected layer (undoable)")
+            .clicked()
+    {
+        panels.paint.request = Some(PaintRequest::FillAll);
+    }
+    if panels.paint.sub_tool == PaintSubTool::Replace {
+        ui.horizontal(|ui| {
+            ui.label("From");
+            layer_combo(ui, "replace_from", palette, &mut panels.paint.replace_from);
+            ui.label("→ the selected layer");
+            let from = panels.paint.replace_from as u8;
+            let to = panels.paint.selected as u8;
+            let locked = palette.is_locked(from);
+            if ui
+                .add_enabled(
+                    from != to && !locked,
+                    egui::Button::new("Replace everywhere"),
+                )
+                .on_hover_text("Swap From for the selected layer in every loaded chunk (undoable)")
+                .clicked()
+            {
+                panels.paint.request = Some(PaintRequest::ReplaceAll { from, to });
+            }
+            if locked {
+                ui.weak("From is locked");
+            }
+        });
+    }
+}
+
+/// One cell per live layer: the pattern tinted with the layer colour, name
 /// underneath, click to select. Then the "+" that adds one.
 fn palette_strip(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalette) {
     ui.horizontal_wrapped(|ui| {
-        for (i, layer) in palette.layers.iter().enumerate() {
+        for (id, layer) in palette.live() {
+            let i = id as usize;
             let selected = panels.paint.selected == i;
             let handle = panels
                 .previews
@@ -120,18 +157,14 @@ fn palette_strip(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalett
             let image_rect = egui::Rect::from_min_size(rect.min, egui::vec2(CELL, CELL));
             let painter = ui.painter();
             match panels.previews.egui_id(&handle) {
-                Some(id) => {
-                    painter.image(
-                        id,
-                        image_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        tint,
-                    );
-                }
-                None => {
-                    painter.rect_filled(image_rect, 2.0, tint);
-                }
-            }
+                Some(tex) => painter.image(
+                    tex,
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    tint,
+                ),
+                None => painter.rect_filled(image_rect, 2.0, tint),
+            };
             let stroke = if selected {
                 egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
             } else if response.hovered() {
@@ -140,6 +173,15 @@ fn palette_strip(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalett
                 egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)
             };
             painter.rect_stroke(image_rect, 2.0, stroke, egui::StrokeKind::Inside);
+            if layer.locked {
+                painter.text(
+                    image_rect.right_top() + egui::vec2(-3.0, 2.0),
+                    egui::Align2::RIGHT_TOP,
+                    "🔒",
+                    egui::FontId::proportional(11.0),
+                    ui.visuals().strong_text_color(),
+                );
+            }
             painter.text(
                 egui::pos2(rect.center().x, rect.max.y - 1.0),
                 egui::Align2::CENTER_BOTTOM,
@@ -147,15 +189,19 @@ fn palette_strip(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalett
                 egui::FontId::proportional(10.0),
                 ui.visuals().text_color(),
             );
-            let response =
-                response.on_hover_text(format!("{} · layer {i}\n{}", layer.name, layer.texture));
+            let response = response.on_hover_text(format!(
+                "{} · layer {i}{}\n{}",
+                layer.name,
+                if layer.locked { " · locked" } else { "" },
+                layer.texture
+            ));
             if response.clicked() {
                 panels.paint.selected = i;
             }
         }
 
         // Add a layer from any catalog texture.
-        let full = palette.layers.len() >= MAX_LAYERS;
+        let full = palette.is_full();
         let textures: Vec<String> = panels
             .catalog
             .of_kind(AssetKind::Texture)
@@ -172,7 +218,7 @@ fn palette_strip(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalett
             })
             .response
             .on_hover_text(if full {
-                format!("Palette full ({MAX_LAYERS} layers)")
+                "Palette full".to_owned()
             } else {
                 "Add a layer from a texture in assets/textures/".to_owned()
             });
@@ -238,32 +284,83 @@ fn layer_settings(
 
             ui.label("No-tile");
             ui.checkbox(&mut layer.no_tile, "").on_hover_text(
-                "Stochastic sampling that hides the repeat grid (4 taps instead of 1)",
+                "Stochastic sampling that hides the repeat grid (4 taps instead of 1). \
+                 Scrambles regular geometric patterns — leave off for those",
             );
             ui.end_row();
 
-            ui.label("Blend");
+            ui.label("Blend")
+                .on_hover_text("How this layer fades in when painted over another");
             let current = BlendProfile::from_u8(layer.blend_profile);
             egui::ComboBox::from_id_salt("layer_blend")
                 .selected_text(current.label())
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut layer.blend_profile, BlendProfile::Soft as u8, "Soft");
-                    for p in [
-                        BlendProfile::Hard,
-                        BlendProfile::Height,
-                        BlendProfile::Scatter,
-                    ] {
-                        ui.add_enabled(
-                            false,
-                            egui::Button::new(format!("{} (Phase 2)", p.label())),
-                        );
+                    for p in BlendProfile::ALL {
+                        ui.selectable_value(&mut layer.blend_profile, p as u8, p.label());
                     }
                 });
+            ui.end_row();
+
+            if let Some(label) = current.param_label() {
+                ui.label(label).on_hover_text(current.param_hint());
+                ui.add(egui::Slider::new(&mut layer.blend_param, 0.0..=1.0));
+                ui.end_row();
+            }
+
+            ui.label("Locked")
+                .on_hover_text("Brushes won't paint over ground this layer dominates");
+            ui.checkbox(&mut layer.locked, "");
             ui.end_row();
         });
     if is_default {
         ui.weak("Layer 0 is what unpainted ground shows; it can be edited but not removed.");
     }
+}
+
+/// Remove the selected layer (with a fallback), below its settings.
+fn layer_actions(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalette) {
+    let selected = panels.paint.selected;
+    if selected == 0 || palette.live().count() < 2 {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.menu_button("Remove layer…", |ui| {
+            ui.label("Ground painted with it becomes:");
+            for (id, layer) in palette.live() {
+                if id as usize == selected {
+                    continue;
+                }
+                if ui.button(&layer.name).clicked() {
+                    panels.paint.request = Some(PaintRequest::RemoveLayer {
+                        layer: selected as u8,
+                        fallback: id,
+                    });
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Loaded chunks are repainted to the fallback now; chunks not loaded yet show the \
+             fallback until they're painted or saved. The slot may be reused by a new layer.",
+        );
+    });
+}
+
+/// `ComboBox` over the live layers writing a palette index.
+fn layer_combo(ui: &mut egui::Ui, id: &str, palette: &TerrainPalette, value: &mut usize) {
+    let current = palette
+        .layers
+        .get(*value)
+        .map(|l| l.name.as_str())
+        .unwrap_or("?");
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            for (lid, layer) in palette.live() {
+                ui.selectable_value(value, lid as usize, &layer.name);
+            }
+        });
 }
 
 /// Push a new layer using `texture` as its pattern and select it. Shared
@@ -287,8 +384,10 @@ pub fn add_layer(panels: &mut Panels, texture: &str) {
     if let Some(first) = after.layers.first() {
         layer.tiling = first.tiling;
     }
-    after.layers.push(layer);
-    panels.paint.selected = after.layers.len() - 1;
+    let Some(id) = after.add(layer) else {
+        return;
+    };
+    panels.paint.selected = id as usize;
     if let Some(tw) = panels.terrain_world.as_deref_mut() {
         tw.metadata.palette = after.clone();
     }
@@ -329,12 +428,12 @@ fn short_name(path: &str) -> String {
 }
 
 fn unique_name(palette: &TerrainPalette, base: &str) -> String {
-    if !palette.layers.iter().any(|l| l.name == base) {
+    if !palette.live().any(|(_, l)| l.name == base) {
         return base.to_owned();
     }
     (2..)
         .map(|n| format!("{base} {n}"))
-        .find(|c| !palette.layers.iter().any(|l| &l.name == c))
+        .find(|c| !palette.live().any(|(_, l)| &l.name == c))
         .expect("unbounded")
 }
 

@@ -37,15 +37,19 @@ pub struct TerrainLayerGpu {
     /// Linear RGB tint; `w` = pattern strength.
     pub tint: Vec4,
     /// `x` = repeats per metre (1 / tiling), `y` = 1 for the stochastic
-    /// no-tile sampler, `z` = blend profile, `w` unused.
+    /// no-tile sampler, `z` = blend profile, `w` = the profile's parameter.
     pub params: Vec4,
+    /// `x` = the layer id this slot displays as (itself, or a removed
+    /// slot's fallback — `TerrainPalette::resolve`); `yzw` unused.
+    pub misc: Vec4,
 }
 
 impl Default for TerrainLayerGpu {
     fn default() -> Self {
         Self {
             tint: Vec4::new(0.6, 0.6, 0.6, 0.0),
-            params: Vec4::new(1.0 / 3.0, 1.0, 0.0, 0.0),
+            params: Vec4::new(1.0 / 3.0, 1.0, 0.0, 0.5),
+            misc: Vec4::ZERO,
         }
     }
 }
@@ -81,7 +85,7 @@ impl TerrainPaletteGpu {
             layer_count: palette.layers.len().clamp(1, MAX_LAYERS) as u32,
             ..Default::default()
         };
-        for (slot, layer) in out.layers.iter_mut().zip(&palette.layers) {
+        for (i, (slot, layer)) in out.layers.iter_mut().zip(&palette.layers).enumerate() {
             *slot = TerrainLayerGpu {
                 tint: Vec4::new(
                     layer.tint[0],
@@ -93,8 +97,9 @@ impl TerrainPaletteGpu {
                     1.0 / layer.tiling.max(0.01),
                     if layer.no_tile { 1.0 } else { 0.0 },
                     layer.blend_profile as f32,
-                    0.0,
+                    layer.blend_param.clamp(0.0, 1.0),
                 ),
+                misc: Vec4::new(palette.resolve(i as u8) as f32, 0.0, 0.0, 0.0),
             };
         }
         out
@@ -168,6 +173,14 @@ mod tests {
         assert_eq!(gpu.layers[1].tint, Vec4::new(0.1, 0.5, 0.2, 0.3));
         assert_eq!(gpu.layers[1].params.x, 0.5);
         assert_eq!(gpu.layers[1].params.y, 0.0);
+        assert_eq!(gpu.layers[1].misc.x, 1.0);
+
+        // A removed slot redirects to its fallback.
+        palette.add(TerrainLayerData::new("Rock", "textures/rock.png"));
+        assert!(palette.remove(1, 2));
+        let gpu = TerrainPaletteGpu::from_palette(&palette);
+        assert_eq!(gpu.layers[1].misc.x, 2.0);
+        assert_eq!(gpu.layers[2].misc.x, 2.0);
 
         // An empty palette (never saved, but never crash) still reports one.
         palette.layers.clear();

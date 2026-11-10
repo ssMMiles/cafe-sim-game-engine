@@ -51,8 +51,10 @@ struct TerrainLayer {
     // Linear RGB tint; w = pattern strength.
     tint: vec4<f32>,
     // x = repeats per metre, y = 1 for the no-tile sampler, z = blend
-    // profile (only Soft so far), w unused.
+    // profile (see `blend_amount`), w = that profile's parameter.
     params: vec4<f32>,
+    // x = the layer id this slot displays as (a removed slot's fallback).
+    misc: vec4<f32>,
 };
 struct TerrainPaletteUniform {
     layer_count: u32,
@@ -205,9 +207,10 @@ fn pattern_no_tile(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f
     return mix(mix(va, vb, w.x), mix(vc, vd, w.x), w.y);
 }
 
-// The colour one layer gives a point: its tint, darkened where its pattern
-// is dark. `gx`/`gy` are the world-xz gradients per screen pixel.
-fn layer_color(layer: u32, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+// One layer at a point: rgb = its tint darkened where its pattern is dark,
+// a = the pattern value itself (what the Height profile compares).
+// `gx`/`gy` are the world-xz gradients per screen pixel.
+fn layer_eval(layer: u32, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
     let l = palette.layers[layer];
     let scale = l.params.x;
     let uv = xz * scale;
@@ -218,66 +221,153 @@ fn layer_color(layer: u32, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<
         pattern = pattern_tap(layer, uv, gx * scale, gy * scale);
     }
     let factor = smoothstep(0.05, 0.45, 1.0 - pattern) * l.tint.w;
-    return mix(l.tint.rgb, PATTERN_DARK, factor);
+    return vec4<f32>(mix(l.tint.rgb, PATTERN_DARK, factor), pattern);
 }
 
-// A paint sample's id byte as a layer index, clamped into the palette.
+// A paint sample's id byte as the layer it displays: clamped into the
+// palette, then through the slot's redirect (removed layers show their
+// fallback).
 fn layer_id(channel: f32) -> u32 {
-    return min(u32(round(channel * 255.0)), palette.layer_count - 1u);
+    let slot = min(u32(round(channel * 255.0)), palette.layer_count - 1u);
+    return min(u32(palette.layers[slot].misc.x), palette.layer_count - 1u);
 }
 
-// The colour of one paint sample: base, with the overlay faded in by the
-// blend byte. Blend profiles other than Soft are not implemented yet.
-fn sample_color(sample: vec4<f32>, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+// Smooth value noise on a lattice, for the Scatter profile.
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let w = f * f * (3.0 - 2.0 * f);
+    let a = hash2(i).x;
+    let b = hash2(i + vec2<f32>(1.0, 0.0)).x;
+    let c = hash2(i + vec2<f32>(0.0, 1.0)).x;
+    let d = hash2(i + vec2<f32>(1.0, 1.0)).x;
+    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+// How much of the overlay shows, from the painted blend `b` (0..1) under
+// the overlay layer's profile. `bw` is `fwidth` of the interpolated blend,
+// taken in uniform flow by the caller, so every edge here can be resolved
+// over ~one screen pixel without a derivative of its own. `h_base` /
+// `h_over` are the two patterns' values at this point.
+//   0 Soft     linear.
+//   1 Hard     step at ½, width from one pixel (param 1) to ½ (param 0).
+//   2 Height   the overlay appears first where its pattern is lighter than
+//              the base's; param is how strongly the patterns decide.
+//   3 Scatter  dithered patches: overlay where b exceeds a noise field;
+//              param is the patch size (25 cm – 4 m).
+//   4 Stepped  quantised into 2–8 bands, each boundary ~one pixel.
+fn blend_amount(
+    profile: f32, param: f32, b: f32, bw: f32,
+    h_base: f32, h_over: f32, xz: vec2<f32>,
+) -> f32 {
+    let p = u32(round(profile));
+    if (p == 1u) {
+        let w = max(bw, 0.5 * (1.0 - param));
+        return smoothstep(0.5 - w, 0.5 + w, b);
+    }
+    if (p == 2u) {
+        let v = b + (h_over - h_base) * param;
+        let w = max(bw, 0.5 - 0.45 * param);
+        return smoothstep(0.5 - w, 0.5 + w, v);
+    }
+    if (p == 3u) {
+        let patch_size = mix(0.25, 4.0, param);
+        let n = value_noise(xz / patch_size + vec2<f32>(37.0, 11.0));
+        let w = max(bw, 0.02);
+        return smoothstep(n - w, n + w, b);
+    }
+    if (p == 4u) {
+        let steps = 2.0 + round(param * 6.0);
+        let x = b * steps;
+        let f = floor(x);
+        let w = clamp(bw * steps, 1e-5, 1.0);
+        return clamp((f + smoothstep(1.0 - w, 1.0, x - f)) / steps, 0.0, 1.0);
+    }
+    return b;
+}
+
+// The colour of one paint sample: base, with the overlay brought in by its
+// blend profile. `b` is the (possibly interpolated) blend to use.
+fn sample_color(
+    sample: vec4<f32>, b: f32, bw: f32,
+    xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>,
+) -> vec3<f32> {
     let base = layer_id(sample.r);
     let overlay = layer_id(sample.g);
-    var color = layer_color(base, xz, gx, gy);
-    if (sample.b > 0.0 && overlay != base) {
-        color = mix(color, layer_color(overlay, xz, gx, gy), sample.b);
+    let base_eval = layer_eval(base, xz, gx, gy);
+    if (b <= 0.0 || overlay == base) {
+        return base_eval.rgb;
     }
-    return color;
+    let over_eval = layer_eval(overlay, xz, gx, gy);
+    let l = palette.layers[overlay];
+    let t = blend_amount(l.params.z, l.params.w, b, bw, base_eval.a, over_eval.a, xz);
+    return mix(base_eval.rgb, over_eval.rgb, t);
 }
 
-// Base colour at this pixel from the four surrounding paint tiles.
-fn painted_color(in: VertexOutput, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
-    let xz = in.world_position.xz;
+// The four paint tiles around this pixel and where it sits between them.
+struct PaintCorners {
+    c00: vec4<f32>,
+    c10: vec4<f32>,
+    c01: vec4<f32>,
+    c11: vec4<f32>,
+    f: vec2<f32>,
+}
+
+fn paint_corners(uv_b: vec2<f32>) -> PaintCorners {
     let dims = vec2<i32>(textureDimensions(paint_map));
     // UV1 runs 0..1 over the chunk's (dims - 1) tiles, so this is the
     // tile-space position; the four corners are the tiles around it.
-    let local = in.uv_b * vec2<f32>(dims - vec2<i32>(1));
+    let local = uv_b * vec2<f32>(dims - vec2<i32>(1));
     let p0 = clamp(vec2<i32>(floor(local)), vec2<i32>(0), dims - vec2<i32>(2));
-    let f = clamp(local - vec2<f32>(p0), vec2<f32>(0.0), vec2<f32>(1.0));
+    var out: PaintCorners;
+    out.f = clamp(local - vec2<f32>(p0), vec2<f32>(0.0), vec2<f32>(1.0));
+    out.c00 = textureLoad(paint_map, p0, 0);
+    out.c10 = textureLoad(paint_map, p0 + vec2<i32>(1, 0), 0);
+    out.c01 = textureLoad(paint_map, p0 + vec2<i32>(0, 1), 0);
+    out.c11 = textureLoad(paint_map, p0 + vec2<i32>(1, 1), 0);
+    return out;
+}
 
-    let c00 = textureLoad(paint_map, p0, 0);
-    let c10 = textureLoad(paint_map, p0 + vec2<i32>(1, 0), 0);
-    let c01 = textureLoad(paint_map, p0 + vec2<i32>(0, 1), 0);
-    let c11 = textureLoad(paint_map, p0 + vec2<i32>(1, 1), 0);
+fn bilinear_blend(c: PaintCorners) -> f32 {
+    return mix(mix(c.c00.b, c.c10.b, c.f.x), mix(c.c01.b, c.c11.b, c.f.x), c.f.y);
+}
 
-    let same_pair = all(c00.rg == c10.rg) && all(c00.rg == c01.rg) && all(c00.rg == c11.rg);
+// Base colour at this pixel from the four surrounding paint tiles.
+fn painted_color(
+    c: PaintCorners, blend: f32, bw: f32,
+    xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>,
+) -> vec3<f32> {
+    let same_pair = all(c.c00.rg == c.c10.rg) && all(c.c00.rg == c.c01.rg) && all(c.c00.rg == c.c11.rg);
     if (same_pair) {
         // Nearly every pixel: one layer pair, blend interpolated across the tile.
-        let blend = mix(mix(c00.b, c10.b, f.x), mix(c01.b, c11.b, f.x), f.y);
-        return sample_color(vec4<f32>(c00.rg, blend, 0.0), xz, gx, gy);
+        return sample_color(c.c00, blend, bw, xz, gx, gy);
     }
     // A layer boundary runs through this tile: shade each corner's own pair
     // and mix the colours bilinearly.
+    let f = c.f;
     let w00 = (1.0 - f.x) * (1.0 - f.y);
     let w10 = f.x * (1.0 - f.y);
     let w01 = (1.0 - f.x) * f.y;
     let w11 = f.x * f.y;
-    return sample_color(c00, xz, gx, gy) * w00
-        + sample_color(c10, xz, gx, gy) * w10
-        + sample_color(c01, xz, gx, gy) * w01
-        + sample_color(c11, xz, gx, gy) * w11;
+    return sample_color(c.c00, c.c00.b, bw, xz, gx, gy) * w00
+        + sample_color(c.c10, c.c10.b, bw, xz, gx, gy) * w10
+        + sample_color(c.c01, c.c01.b, bw, xz, gx, gy) * w01
+        + sample_color(c.c11, c.c11.b, bw, xz, gx, gy) * w11;
 }
 
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
-    // Taken first, in uniform control flow (see the header).
+    // Every derivative is taken here, in uniform control flow (see the
+    // header): the world-xz gradients for the pattern taps, and the blend's
+    // screen-space rate for the profiles' one-pixel edges. The corner loads
+    // have no derivative of their own, so they can come first.
+    let corners = paint_corners(in.uv_b);
+    let blend = bilinear_blend(corners);
     let gx = dpdx(in.world_position.xz);
     let gy = dpdy(in.world_position.xz);
+    let bw = fwidth(blend);
 
-    let base_color = painted_color(in, gx, gy);
+    let base_color = painted_color(corners, blend, bw, in.world_position.xz, gx, gy);
 
     // White = fully lit (unlit debug view / unbaked chunk). The branch tests
     // the uniform directly, so the sample stays in uniform control flow.

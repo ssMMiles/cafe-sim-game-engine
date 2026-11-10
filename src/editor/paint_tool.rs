@@ -5,14 +5,21 @@
 //! radius and falloff — is shared with the Terrain tool (`terrain_edit`);
 //! this module owns what happens to the *paint* under it.
 //!
-//! Two sub-tools. **Paint** raises the blend towards the selected layer at
+//! Sub-tools. **Paint** raises the blend towards the selected layer at
 //! `flow` per second (Ctrl erases: lowers it back towards the base); a tile
 //! whose layer pair doesn't include the selected layer snaps its base to
 //! whichever of its two layers was dominant and starts blending the new one
 //! in, so a transition zone always shares one pair end to end (§4.7). When
 //! the blend saturates the overlay *becomes* the base. **Fill** sets every
-//! tile in the disc to exactly the selected layer, no falloff. Alt+LMB picks
-//! the dominant layer under the cursor.
+//! tile in the disc to exactly the selected layer, no falloff. **Smooth**
+//! pulls each tile's blend towards its neighbours' (same pair only).
+//! **Jitter** pushes blends apart by a per-tile hash for a ragged edge.
+//! **Replace** swaps `replace_from` for the selected layer under the disc.
+//! Alt+LMB picks the dominant layer under the cursor (the *from* layer in
+//! Replace). Tiles dominated by a **locked** layer are never written.
+//!
+//! Whole-world operations the panel can't do itself (it has no paint-map
+//! access) arrive as a [`PaintRequest`] and run in `apply_paint_requests`.
 //!
 //! A stroke is one undo transaction: `Change::Paint` holds each touched
 //! chunk's grid before and after, run-length coded, which is small for a
@@ -30,6 +37,7 @@ use crate::game::world::terrain::{
     TILE_SIZE,
     paint::{
         PaintData, PaintSample, PaintmapData, paint_base, paint_blend, paint_overlay, paint_sample,
+        remap_sample,
     },
     storage::{TerrainChunkRegistry, TerrainWorld},
 };
@@ -42,15 +50,49 @@ pub enum PaintSubTool {
     #[default]
     Paint,
     Fill,
+    Smooth,
+    Jitter,
+    Replace,
 }
 
 impl PaintSubTool {
+    pub const ALL: [PaintSubTool; 5] = [
+        PaintSubTool::Paint,
+        PaintSubTool::Fill,
+        PaintSubTool::Smooth,
+        PaintSubTool::Jitter,
+        PaintSubTool::Replace,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             PaintSubTool::Paint => "Paint",
             PaintSubTool::Fill => "Fill",
+            PaintSubTool::Smooth => "Smooth",
+            PaintSubTool::Jitter => "Jitter",
+            PaintSubTool::Replace => "Replace",
         }
     }
+
+    /// Whether the flow slider means anything here.
+    pub fn uses_flow(self) -> bool {
+        matches!(
+            self,
+            PaintSubTool::Paint | PaintSubTool::Smooth | PaintSubTool::Jitter
+        )
+    }
+}
+
+/// A whole-world edit queued by the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaintRequest {
+    /// Every loaded chunk becomes the selected layer.
+    FillAll,
+    /// `from` → `to` in every loaded chunk.
+    ReplaceAll { from: u8, to: u8 },
+    /// Retire `layer`: loaded chunks are rewritten to `fallback`, the slot
+    /// redirects there for chunks not loaded yet.
+    RemoveLayer { layer: u8, fallback: u8 },
 }
 
 #[derive(Resource)]
@@ -58,10 +100,12 @@ pub struct PaintToolState {
     /// Palette index of the layer the brush paints with.
     pub selected: usize,
     pub sub_tool: PaintSubTool,
-    /// Blend change per second at full weight (Paint sub-tool).
+    /// Blend change per second at full weight (Paint / Smooth / Jitter).
     pub flow: f32,
-    /// Set by the panel: fill every loaded chunk with the selected layer.
-    pub fill_all_requested: bool,
+    /// Replace sub-tool: the layer being replaced (by `selected`).
+    pub replace_from: usize,
+    /// Set by the panel; run by `apply_paint_requests`.
+    pub request: Option<PaintRequest>,
     /// Grids as they were when the current stroke first touched each chunk.
     stroke_before: HashMap<(i32, i32), PaintData>,
     was_painting: bool,
@@ -76,7 +120,8 @@ impl Default for PaintToolState {
             selected: 0,
             sub_tool: PaintSubTool::default(),
             flow: 2.0,
-            fill_all_requested: false,
+            replace_from: 0,
+            request: None,
             stroke_before: HashMap::new(),
             was_painting: false,
             disc_layer: None,
@@ -150,7 +195,38 @@ pub fn paint_step(sample: PaintSample, layer: u8, delta: f32) -> PaintSample {
     paint_sample(new_base, layer, clamp(step), flags)
 }
 
-/// LMB over the terrain: Paint or Fill under the disc. Alt is the
+fn same_pair(a: PaintSample, b: PaintSample) -> bool {
+    paint_base(a) == paint_base(b) && paint_overlay(a) == paint_overlay(b)
+}
+
+/// Move a sample's blend towards `target` (0..1) by at most `budget`,
+/// collapsing to one layer at either end like `paint_step` does.
+pub fn step_blend(sample: PaintSample, target: f32, budget: f32) -> PaintSample {
+    let base = paint_base(sample);
+    let overlay = paint_overlay(sample);
+    if base == overlay {
+        return sample;
+    }
+    let b = paint_blend(sample) as f32 / 255.0;
+    let nb = (b + (target - b).clamp(-budget, budget)).clamp(0.0, 1.0);
+    let byte = (nb * 255.0).round() as u8;
+    match byte {
+        0 => paint_sample(base, base, 0, 0),
+        255 => paint_sample(overlay, overlay, 0, 0),
+        _ => paint_sample(base, overlay, byte, 0),
+    }
+}
+
+/// A fixed 0..1 value per tile.
+fn tile_hash(tx: i32, ty: i32) -> f32 {
+    let mut h = (tx as u32).wrapping_mul(0x9E37_79B9) ^ (ty as u32).wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    (h & 0xFFFF) as f32 / 65535.0
+}
+
+/// LMB over the terrain: the sub-tool under the disc. Alt is the
 /// eyedropper (`pick_layer`), so it never paints.
 pub fn apply_paint_brush(
     mouse: Res<ButtonInput<MouseButton>>,
@@ -180,7 +256,9 @@ pub fn apply_paint_brush(
     if layer_count == 0 {
         return;
     }
+    let palette = &terrain_world.metadata.palette;
     let layer = state.selected.min(layer_count - 1) as u8;
+    let from = state.replace_from.min(layer_count - 1) as u8;
 
     let radius = brush.radius;
     let center_tx = (hit.x / TILE_SIZE.0).round() as i32;
@@ -188,7 +266,27 @@ pub fn apply_paint_brush(
     let extent = (radius / TILE_SIZE.0.min(TILE_SIZE.1)) as i32 + 1;
     let frame_flow = state.flow * time.delta_secs();
     let erase = ctrl(&keys);
-    let fill = state.sub_tool == PaintSubTool::Fill;
+    let sub_tool = state.sub_tool;
+
+    // Smooth reads its neighbours from a snapshot taken before any write
+    // this frame (one tile of margin so rim tiles have a full 3×3).
+    let snap_extent = extent + 1;
+    let snap_w = (2 * snap_extent + 1) as usize;
+    let snapshot: Option<Vec<Option<PaintSample>>> =
+        (sub_tool == PaintSubTool::Smooth).then(|| {
+            let mut v = Vec::with_capacity(snap_w * snap_w);
+            for dy in -snap_extent..=snap_extent {
+                for dx in -snap_extent..=snap_extent {
+                    v.push(paintmap.sample_at(center_tx + dx, center_ty + dy));
+                }
+            }
+            v
+        });
+    let snap = |v: &[Option<PaintSample>], tx: i32, ty: i32| -> Option<PaintSample> {
+        let lx = (tx - (center_tx - snap_extent)) as usize;
+        let ly = (ty - (center_ty - snap_extent)) as usize;
+        v[ly * snap_w + lx]
+    };
 
     let mut touched: HashSet<(i32, i32)> = HashSet::new();
     for dx in -extent..=extent {
@@ -205,12 +303,51 @@ pub fn apply_paint_brush(
             let Some(current) = paintmap.sample_at(tx, ty) else {
                 continue;
             };
-            let next = if fill {
-                paint_sample(layer, layer, 0, 0)
-            } else {
-                let weight = brush_weight(dist, radius, brush.falloff);
-                let delta = frame_flow * weight * if erase { -1.0 } else { 1.0 };
-                paint_step(current, layer, delta)
+            if palette.is_locked(dominant_layer(current)) {
+                continue;
+            }
+            let weight = brush_weight(dist, radius, brush.falloff);
+            let next = match sub_tool {
+                PaintSubTool::Fill => paint_sample(layer, layer, 0, 0),
+                PaintSubTool::Paint => {
+                    let delta = frame_flow * weight * if erase { -1.0 } else { 1.0 };
+                    paint_step(current, layer, delta)
+                }
+                PaintSubTool::Smooth => {
+                    let v = snapshot.as_deref().expect("snapshot built for Smooth");
+                    let mut sum = 0.0;
+                    let mut n = 0.0;
+                    for ny in -1..=1 {
+                        for nx in -1..=1 {
+                            if let Some(s) = snap(v, tx + nx, ty + ny)
+                                && same_pair(s, current)
+                            {
+                                sum += paint_blend(s) as f32;
+                                n += 1.0;
+                            }
+                        }
+                    }
+                    if n == 0.0 {
+                        continue;
+                    }
+                    let avg = sum / n / 255.0;
+                    step_blend(current, avg, frame_flow * weight)
+                }
+                PaintSubTool::Jitter => {
+                    if paint_base(current) == paint_overlay(current) {
+                        continue;
+                    }
+                    // Deterministic per tile so holding the button converges
+                    // on a fixed ragged edge instead of boiling.
+                    let target = tile_hash(tx, ty);
+                    step_blend(current, target, frame_flow * weight)
+                }
+                PaintSubTool::Replace => {
+                    if from == layer || weight <= 0.0 {
+                        continue;
+                    }
+                    remap_sample(current, from, layer)
+                }
             };
             if next == current {
                 continue;
@@ -279,39 +416,96 @@ pub fn pick_layer(
     let tx = (hit.x / TILE_SIZE.0).round() as i32;
     let ty = (hit.z / TILE_SIZE.1).round() as i32;
     if let Some(sample) = paintmap.sample_at(tx, ty) {
-        state.selected = dominant_layer(sample) as usize;
+        let picked = dominant_layer(sample) as usize;
+        if state.sub_tool == PaintSubTool::Replace {
+            state.replace_from = picked;
+        } else {
+            state.selected = picked;
+        }
     }
 }
 
-/// The panel's "Fill loaded chunks": every loaded chunk becomes the
-/// selected layer, as one transaction.
-pub fn fill_loaded_chunks(
+/// Run a queued [`PaintRequest`] over every loaded chunk, as one
+/// transaction (plus the palette change, for a removal).
+pub fn apply_paint_requests(
     mut state: ResMut<PaintToolState>,
-    terrain_world: Option<Res<TerrainWorld>>,
+    terrain_world: Option<ResMut<TerrainWorld>>,
     paintmap: Option<ResMut<PaintmapData>>,
     mut images: ResMut<Assets<Image>>,
     registry: Option<ResMut<TerrainChunkRegistry>>,
     mut history: ResMut<History>,
 ) {
-    if !state.fill_all_requested {
+    let Some(request) = state.request.take() else {
         return;
-    }
-    state.fill_all_requested = false;
-    let (Some(terrain_world), Some(mut paintmap), Some(mut registry)) =
+    };
+    let (Some(mut terrain_world), Some(mut paintmap), Some(mut registry)) =
         (terrain_world, paintmap, registry)
     else {
         return;
     };
-    let layer_count = terrain_world.metadata.palette.layers.len();
+    let palette = &terrain_world.metadata.palette;
+    let layer_count = palette.layers.len();
     if layer_count == 0 {
         return;
     }
-    let layer = state.selected.min(layer_count - 1) as u8;
-    let after = PaintData::Uniform(paint_sample(layer, layer, 0, 0));
-    let loaded: Vec<(i32, i32)> = registry.loaded_chunks.keys().copied().collect();
+    let selected = state.selected.min(layer_count - 1) as u8;
+
+    // What each loaded chunk should become, and the label.
+    let (label, rewrite): (
+        String,
+        Box<dyn Fn(&PaintmapData, (i32, i32)) -> Option<PaintData>>,
+    ) = match request {
+        PaintRequest::FillAll => {
+            let after = PaintData::Uniform(paint_sample(selected, selected, 0, 0));
+            let name = palette.layers[selected as usize].name.clone();
+            (
+                format!("Fill terrain with '{name}'"),
+                Box::new(move |_, _| Some(after.clone())),
+            )
+        }
+        PaintRequest::ReplaceAll { from, to } => {
+            if from == to || palette.is_locked(from) {
+                return;
+            }
+            let (fname, tname) = (
+                palette
+                    .layer(from)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default(),
+                palette
+                    .layer(to)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default(),
+            );
+            (
+                format!("Replace '{fname}' with '{tname}'"),
+                Box::new(move |pm, chunk| {
+                    pm.remapped(chunk, from, to).map(|g| PaintData::encode(&g))
+                }),
+            )
+        }
+        PaintRequest::RemoveLayer { layer, fallback } => {
+            let name = palette
+                .layer(layer)
+                .map(|l| l.name.clone())
+                .unwrap_or_default();
+            (
+                format!("Remove layer '{name}'"),
+                Box::new(move |pm, chunk| {
+                    pm.remapped(chunk, layer, fallback)
+                        .map(|g| PaintData::encode(&g))
+                }),
+            )
+        }
+    };
+
+    let loaded: Vec<(i32, i32)> = paintmap.loaded().collect();
     let mut changes = Vec::new();
     for chunk in loaded {
         let before = paintmap.encode(chunk);
+        let Some(after) = rewrite(&paintmap, chunk) else {
+            continue;
+        };
         if before == after {
             continue;
         }
@@ -320,16 +514,28 @@ pub fn fill_loaded_chunks(
             changes.push(PaintChunkChange {
                 chunk,
                 before,
-                after: after.clone(),
+                after,
             });
         }
     }
+
+    let mut transaction = Vec::new();
     if !changes.is_empty() {
-        let name = &terrain_world.metadata.palette.layers[layer as usize].name;
-        history.push(
-            format!("Fill terrain with '{name}'"),
-            vec![Change::Paint { chunks: changes }],
-        );
+        transaction.push(Change::Paint { chunks: changes });
+    }
+    if let PaintRequest::RemoveLayer { layer, fallback } = request {
+        let before = terrain_world.metadata.palette.clone();
+        let mut after = before.clone();
+        if after.remove(layer, fallback) {
+            terrain_world.metadata.palette = after.clone();
+            transaction.push(Change::Palette { before, after });
+            if state.selected == layer as usize {
+                state.selected = fallback as usize;
+            }
+        }
+    }
+    if !transaction.is_empty() {
+        history.push(label, transaction);
     }
 }
 
@@ -400,6 +606,18 @@ mod tests {
         );
         let mostly_base = paint_sample(0, 2, 50, 0);
         assert_eq!(paint_step(mostly_base, 7, 0.1), paint_sample(0, 7, 26, 0));
+    }
+
+    #[test]
+    fn step_blend_moves_by_at_most_the_budget_and_collapses_at_the_ends() {
+        let s = paint_sample(0, 2, 100, 0);
+        assert_eq!(step_blend(s, 1.0, 0.1), paint_sample(0, 2, 126, 0));
+        assert_eq!(step_blend(s, 0.0, 1.0), paint_sample(0, 0, 0, 0));
+        assert_eq!(step_blend(s, 1.0, 1.0), paint_sample(2, 2, 0, 0));
+        assert_eq!(
+            step_blend(paint_sample(3, 3, 0, 0), 1.0, 1.0),
+            paint_sample(3, 3, 0, 0)
+        );
     }
 
     #[test]

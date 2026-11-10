@@ -72,7 +72,6 @@ pub const fn paint_blend(s: PaintSample) -> u8 {
     ((s >> 16) & 0xFF) as u8
 }
 
-#[allow(dead_code)] // read by the rules pass (Phase 3)
 pub const fn paint_flags(s: PaintSample) -> u8 {
     (s >> 24) as u8
 }
@@ -177,6 +176,8 @@ pub enum BlendProfile {
     Height = 2,
     /// Dithered patches.
     Scatter = 3,
+    /// Quantised into a few bands, like the lighting.
+    Stepped = 4,
 }
 
 impl BlendProfile {
@@ -185,6 +186,7 @@ impl BlendProfile {
             1 => BlendProfile::Hard,
             2 => BlendProfile::Height,
             3 => BlendProfile::Scatter,
+            4 => BlendProfile::Stepped,
             _ => BlendProfile::Soft,
         }
     }
@@ -195,6 +197,39 @@ impl BlendProfile {
             BlendProfile::Hard => "Hard",
             BlendProfile::Height => "Height",
             BlendProfile::Scatter => "Scatter",
+            BlendProfile::Stepped => "Stepped",
+        }
+    }
+
+    pub const ALL: [BlendProfile; 5] = [
+        BlendProfile::Soft,
+        BlendProfile::Hard,
+        BlendProfile::Height,
+        BlendProfile::Scatter,
+        BlendProfile::Stepped,
+    ];
+
+    /// What the layer's `blend_param` means under this profile (`None`:
+    /// unused). Mirrors `blend_amount` in `terrain_toon.wesl`.
+    pub fn param_label(self) -> Option<&'static str> {
+        match self {
+            BlendProfile::Soft => None,
+            BlendProfile::Hard => Some("Hardness"),
+            BlendProfile::Height => Some("Contrast"),
+            BlendProfile::Scatter => Some("Patch size"),
+            BlendProfile::Stepped => Some("Steps"),
+        }
+    }
+
+    pub fn param_hint(self) -> &'static str {
+        match self {
+            BlendProfile::Soft => "",
+            BlendProfile::Hard => "1 = a one-pixel cel edge, 0 = as soft as Soft",
+            BlendProfile::Height => {
+                "How much the patterns' light/dark decides where the overlay appears first"
+            }
+            BlendProfile::Scatter => "Size of the dithered patches (0 = 25 cm, 1 = 4 m)",
+            BlendProfile::Stepped => "Number of bands across the transition (2–8)",
         }
     }
 }
@@ -219,8 +254,22 @@ pub struct TerrainLayerData {
     pub no_tile: bool,
     /// [`BlendProfile`] as a byte.
     pub blend_profile: u8,
+    /// The profile's one knob, 0..1 ([`BlendProfile::param_label`]).
+    pub blend_param: f32,
     /// Linear RGB the bakers use as this layer's albedo (Phase 4).
     pub bake_albedo: [f32; 3],
+    /// Brushes refuse to paint over tiles this layer dominates.
+    pub locked: bool,
+    /// A removed layer. The slot stays, because chunk files not loaded at
+    /// removal time still carry its id: the shader shows `fallback` for it
+    /// (`TerrainPalette::resolve`), loaded chunks are rewritten to the
+    /// fallback at removal (`PaintmapData::remap_layer`), and the rest
+    /// migrate as they are painted. Hidden from the palette UI; a new layer
+    /// may reuse the slot, in which case an unmigrated chunk shows the new
+    /// layer where the old one was.
+    pub removed: bool,
+    /// Layer a removed slot displays as.
+    pub fallback: u8,
 }
 
 impl TerrainLayerData {
@@ -233,7 +282,11 @@ impl TerrainLayerData {
             tiling: 3.0,
             no_tile: true,
             blend_profile: BlendProfile::Soft as u8,
+            blend_param: 0.5,
             bake_albedo: [0.5, 0.5, 0.5],
+            locked: false,
+            removed: false,
+            fallback: 0,
         }
     }
 }
@@ -288,8 +341,66 @@ impl TerrainPalette {
         self.layers.get(id as usize)
     }
 
+    /// No room for another layer: every slot is live.
     pub fn is_full(&self) -> bool {
-        self.layers.len() >= MAX_LAYERS
+        self.layers.len() >= MAX_LAYERS && self.layers.iter().all(|l| !l.removed)
+    }
+
+    /// `(id, layer)` for every live (not removed) layer.
+    pub fn live(&self) -> impl Iterator<Item = (u8, &TerrainLayerData)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.removed)
+            .map(|(i, l)| (i as u8, l))
+    }
+
+    /// What id `id` displays as: itself, or a removed slot's fallback
+    /// (followed once; a fallback that is itself removed falls to 0).
+    pub fn resolve(&self, id: u8) -> u8 {
+        match self.layers.get(id as usize) {
+            Some(l) if l.removed => match self.layers.get(l.fallback as usize) {
+                Some(f) if !f.removed => l.fallback,
+                _ => 0,
+            },
+            Some(_) => id,
+            None => 0,
+        }
+    }
+
+    pub fn is_locked(&self, id: u8) -> bool {
+        self.layers
+            .get(id as usize)
+            .is_some_and(|l| l.locked && !l.removed)
+    }
+
+    /// Add a layer: into the first removed slot if any, else appended.
+    /// Returns its id, or `None` when full.
+    pub fn add(&mut self, layer: TerrainLayerData) -> Option<u8> {
+        if let Some(i) = self.layers.iter().position(|l| l.removed) {
+            self.layers[i] = layer;
+            return Some(i as u8);
+        }
+        if self.layers.len() >= MAX_LAYERS {
+            return None;
+        }
+        self.layers.push(layer);
+        Some((self.layers.len() - 1) as u8)
+    }
+
+    /// Retire `id`, displaying as `fallback` from now on. Layer 0 and the
+    /// fallback itself are refused.
+    pub fn remove(&mut self, id: u8, fallback: u8) -> bool {
+        if id == 0 || id == fallback || self.resolve(fallback) != fallback {
+            return false;
+        }
+        let Some(l) = self.layers.get_mut(id as usize) else {
+            return false;
+        };
+        l.removed = true;
+        l.locked = false;
+        l.fallback = fallback;
+        true
     }
 }
 
@@ -371,6 +482,29 @@ impl PaintmapData {
         touched.into_iter()
     }
 
+    /// Every loaded chunk id, for whole-world operations.
+    pub fn loaded(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.chunks.keys().copied()
+    }
+
+    /// `from` → `to` in every sample of a loaded chunk's grid (base and
+    /// overlay; a pair that collapses to one layer drops its blend). Returns
+    /// the new grid if anything changed.
+    pub fn remapped(&self, chunk: (i32, i32), from: u8, to: u8) -> Option<Vec<PaintSample>> {
+        let c = self.chunks.get(&chunk)?;
+        let mut changed = false;
+        let out: Vec<PaintSample> = c
+            .samples
+            .iter()
+            .map(|&s| {
+                let n = remap_sample(s, from, to);
+                changed |= n != s;
+                n
+            })
+            .collect();
+        changed.then_some(out)
+    }
+
     /// Replace a loaded chunk's whole grid (undo/redo, fills). Rebuilds its
     /// image in one go.
     pub fn replace_chunk(
@@ -388,6 +522,23 @@ impl PaintmapData {
         }
         c.samples = samples;
         true
+    }
+}
+
+/// One sample with layer `from` replaced by `to`. A pair that becomes one
+/// layer is normalised to `(to, to, 0)`; flags are kept.
+pub fn remap_sample(s: PaintSample, from: u8, to: u8) -> PaintSample {
+    let base = paint_base(s);
+    let overlay = paint_overlay(s);
+    if base != from && overlay != from {
+        return s;
+    }
+    let nb = if base == from { to } else { base };
+    let no = if overlay == from { to } else { overlay };
+    if nb == no {
+        paint_sample(nb, no, 0, paint_flags(s))
+    } else {
+        paint_sample(nb, no, paint_blend(s), paint_flags(s))
     }
 }
 
@@ -748,6 +899,39 @@ mod tests {
         let mut neg: Vec<_> = chunks_touching_tile(-1, 0).collect();
         neg.sort();
         assert_eq!(neg, vec![(-1, -1), (-1, 0)]);
+    }
+
+    #[test]
+    fn remap_collapses_pairs_and_keeps_flags() {
+        assert_eq!(
+            remap_sample(paint_sample(1, 2, 100, 1), 2, 1),
+            paint_sample(1, 1, 0, 1)
+        );
+        assert_eq!(
+            remap_sample(paint_sample(1, 2, 100, 0), 1, 3),
+            paint_sample(3, 2, 100, 0)
+        );
+        assert_eq!(
+            remap_sample(paint_sample(1, 2, 100, 0), 5, 3),
+            paint_sample(1, 2, 100, 0)
+        );
+    }
+
+    #[test]
+    fn removed_layers_resolve_to_their_fallback_and_free_their_slot() {
+        let mut p = TerrainPalette::default();
+        let a = p.add(TerrainLayerData::new("a", "x")).unwrap();
+        let b = p.add(TerrainLayerData::new("b", "y")).unwrap();
+        assert_eq!((a, b), (1, 2));
+        assert!(!p.remove(0, 1), "layer 0 is permanent");
+        assert!(!p.remove(a, a), "a layer can't fall back to itself");
+        assert!(p.remove(a, b));
+        assert_eq!(p.resolve(a), b);
+        assert_eq!(p.live().map(|(i, _)| i).collect::<Vec<_>>(), vec![0, 2]);
+        assert!(!p.remove(b, a), "can't fall back to a removed layer");
+        // The slot is reused.
+        assert_eq!(p.add(TerrainLayerData::new("c", "z")), Some(1));
+        assert_eq!(p.resolve(1), 1);
     }
 
     #[test]

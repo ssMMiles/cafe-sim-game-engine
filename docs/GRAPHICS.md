@@ -199,13 +199,20 @@ normal target). Both materials are bind group **1**, not 3.
 | 102/103 | the chunk's `lightmap` |
 | 104 | `TerrainShading { use_lightmap }` (note: `use_lightmap` = 1 is *lit*, the opposite polarity of `ToonShading::unlit`) |
 | 105 | `paint`: the chunk's paint map (`Rgba8Unorm`, texel = tile, `textureLoad` only — no sampler) |
-| 106 | `TerrainPaletteGpu { layer_count, layers: [tint+strength, 1/tiling+no_tile+profile; 32] }` |
+| 106 | `TerrainPaletteGpu { layer_count, layers: [tint+strength, 1/tiling+no_tile+profile+param, redirect; 32] }` |
 
 - **Painted layers** (`docs/TERRAIN_PAINTING_PLAN.md`, since 2026-11-10).
   A tile's paint sample is base id / overlay id / blend / flags. The shader
   loads the four tiles around the pixel (UV1 × (dims − 1) is the tile-space
   position); if all four share a layer pair it blends two layer colours by
   the bilinear blend amount, else it shades each corner's pair and mixes.
+  The overlay's share of the pixel comes from its layer's **blend profile**
+  (`blend_amount`: Soft linear; Hard step at ½ with a one-pixel edge;
+  Height, the overlay first where its pattern is lighter than the base's;
+  Scatter, overlay where the blend exceeds a value-noise field; Stepped,
+  2–8 bands), each resolved over ~one pixel from `fwidth` of the
+  interpolated blend taken at the top of `fragment`. Ids pass through the
+  slot's `redirect` so a removed layer shows its fallback.
   A layer's colour is its linear tint pulled towards near-black where its
   greyscale pattern is dark (`smoothstep(0.05, 0.45, 1 − r) × strength`),
   the pattern sampled at `world.xz / tiling` — through the *stochastic

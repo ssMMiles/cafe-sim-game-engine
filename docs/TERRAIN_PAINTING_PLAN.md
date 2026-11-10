@@ -1,6 +1,6 @@
 # Terrain Painting — plan
 
-Status: **Phases 0 and 1 built 2026-11-10** (§5, §8); direction agreed the
+Status: **Phases 0–2 built 2026-11-10** (§5, §8–§10); direction agreed the
 same day (§6). The technical sections are deliberately thin and are expanded
 phase by phase. §4.7 is the performance / WebGPU review.
 
@@ -441,7 +441,7 @@ would each need the attribute and the 4× downsampled LODs would smear it).
 |---|---|---|
 | **0 — Foundation** ✅ | Palette data in `world.meta` + Paint tool skeleton with the palette strip in the Tool tab; default grey-triangle texture; texture array upload; paint grid in `.terrain` v3 + legacy v2 reader (all default); shader samples ids + blend with the Soft profile via `textureSampleGrad`; current stone look migrated to a layer. A/B measurement: see §8. | Worlds look the same as today, but the palette exists and a hand-edited file can show two textures. |
 | **1 — Brush** ✅ | Paint mode with Paint / Fill / Erase, disc shows texture, eyedropper, stroke undo, save, web. | You can paint a world. |
-| **2 — Blends & layers** | Blend profiles (Hard, Height, Scatter, Stepped), per-layer tint / tiling / no-tile, Smooth / Jitter / Replace sub-tools, replace-everywhere, lock, delete-with-fallback. | Transitions look intentional; palette is a real workflow. |
+| **2 — Blends & layers** ✅ | Blend profiles (Hard, Height, Scatter, Stepped), per-layer tint / tiling / no-tile, Smooth / Jitter / Replace sub-tools, replace-everywhere, lock, delete-with-fallback. | Transitions look intentional; palette is a real workflow. |
 | **3 — Rules** | Rule stack UI with preview, Apply-rules command, auto flag + re-evaluation after sculpt, brush masks (slope / height / layer / noise), Auto sub-tool. | Sculpt a mountain and it textures itself; hand-paint on top. |
 | **4 — Lighting & polish** | Paint-aware bounce albedo in all bakers, debug views, export, `surface_at` for plugins, docs (`GRAPHICS.md`, `LIGHTING.md`, `CLAUDE.md`). | The whole thing is coherent with the rest of the engine. |
 | **Later** | Imported masks as rules; per-sample UV rotation / scale variation; triplanar on cliffs; material-boundary outlines; decals / splines (roads); holes (caves). | |
@@ -617,3 +617,43 @@ notes.
 - **Not yet**: Smooth / Jitter / Replace sub-tools, brush masks, layer
   removal, blend profiles beyond Soft (Phase 2); rules and the auto flag
   (Phase 3); paint-aware bake albedo (Phase 4).
+
+## 10. Phase 2 as built (2026-11-10)
+
+- **Blend profiles** live on the *overlay* layer (`blend_profile` +
+  `blend_param` 0..1, `world.meta` v8 with a v7 reader). In the shader
+  (`blend_amount`): Soft = linear; Hard = step at ½, width from one pixel
+  (param 1) to ½ (param 0); Height = `b + (h_over − h_base) × param`, so the
+  overlay lands first where its pattern is lighter than the base's (the
+  pattern value doubles as the height channel — no extra texture); Scatter =
+  overlay where `b` exceeds smooth value noise with a 25 cm–4 m patch size;
+  Stepped = 2–8 bands. Every edge is resolved over ~one pixel from a single
+  `fwidth(blend)` taken at the top of `fragment`, in uniform flow, and passed
+  down — the profile code itself never takes a derivative, which is what
+  keeps Tint happy. Both WGSL variants pass `tint-check.mjs`.
+- **Sub-tools**: Smooth (blend → 3×3 neighbourhood average over tiles with
+  the same layer pair, from a pre-write snapshot), Jitter (blend → a fixed
+  per-tile hash, so holding the button converges on one ragged edge rather
+  than boiling), Replace (`replace_from` → selected under the disc;
+  Alt+LMB picks *from* in this mode). All through `step_blend`, which
+  collapses to one layer at either end like `paint_step`.
+- **Lock**: a locked layer's tiles (dominant layer locked) are skipped by
+  every sub-tool and by Replace-everywhere.
+- **Remove with fallback** is a tombstone (`removed` + `fallback` on the
+  slot), because chunk files not loaded at removal time still carry the id.
+  `TerrainPalette::resolve` → `TerrainLayerGpu.misc.x` redirects it in the
+  shader; `apply_paint_requests` rewrites loaded chunks to the fallback
+  (`Change::Paint`) and retires the slot (`Change::Palette`) in one
+  transaction. `TerrainPalette::add` reuses the first removed slot, so an
+  unmigrated chunk would show the new layer there — stated in the Remove
+  hover text. Layer 0 can't be removed; a fallback can't be a removed layer
+  or the layer itself.
+- **Replace everywhere** and **Fill loaded chunks** are `PaintRequest`s the
+  panel queues and `apply_paint_requests` runs (the panel has no paint-map
+  access); loaded chunks only.
+- **Panel**: five-mode row (Fill shows "Fill loaded chunks", Replace shows
+  From + "Replace everywhere"), live-layer strip with a 🔒 badge, per-layer
+  Blend + its param slider (label per profile), Locked, "Remove layer…"
+  menu listing fallbacks; Flow shown for Paint/Smooth/Jitter.
+- **Not yet**: brush masks and rules (Phase 3), paint-aware bake albedo
+  (Phase 4), per-layer pattern dark colour (constant `PATTERN_DARK`).

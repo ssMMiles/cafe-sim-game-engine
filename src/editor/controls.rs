@@ -31,6 +31,9 @@ enum Ctx {
     Paint,
     PaintPaint,
     PaintFill,
+    PaintSmooth,
+    PaintJitter,
+    PaintReplace,
     /// Fly lock engaged: the cursor is captured, clicks are suppressed.
     Flying,
 }
@@ -90,7 +93,14 @@ static CONTROLS: &[ControlRow] = &[
     row(Ctx::PaintPaint, "LMB", "Paint layer"),
     row(Ctx::PaintPaint, "Ctrl+LMB", "Erase"),
     row(Ctx::PaintFill, "LMB", "Fill"),
-    row(Ctx::Paint, "Alt+LMB", "Pick layer"),
+    row(Ctx::PaintSmooth, "LMB", "Smooth blend"),
+    row(Ctx::PaintJitter, "LMB", "Jitter blend"),
+    row(Ctx::PaintReplace, "LMB", "Replace layer"),
+    row(Ctx::PaintReplace, "Alt+LMB", "Pick layer to replace"),
+    row(Ctx::PaintPaint, "Alt+LMB", "Pick layer"),
+    row(Ctx::PaintFill, "Alt+LMB", "Pick layer"),
+    row(Ctx::PaintSmooth, "Alt+LMB", "Pick layer"),
+    row(Ctx::PaintJitter, "Alt+LMB", "Pick layer"),
     row(Ctx::Paint, "[ / ]", "Brush size"),
     // Fly lock (cursor captured, no clicks).
     row(Ctx::Flying, "Esc", "Exit fly mode"),
@@ -131,6 +141,9 @@ impl ActiveControls<'_> {
             Ctx::Paint => painting,
             Ctx::PaintPaint => painting && paint == PaintSubTool::Paint,
             Ctx::PaintFill => painting && paint == PaintSubTool::Fill,
+            Ctx::PaintSmooth => painting && paint == PaintSubTool::Smooth,
+            Ctx::PaintJitter => painting && paint == PaintSubTool::Jitter,
+            Ctx::PaintReplace => painting && paint == PaintSubTool::Replace,
             Ctx::Flying => flying,
         }
     }
