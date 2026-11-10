@@ -6,6 +6,7 @@ pub mod mesh;
 pub mod paint;
 pub mod palette_sync;
 pub mod reconcile;
+pub mod rules;
 pub mod save;
 pub mod storage;
 pub mod types;

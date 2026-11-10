@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use engine_api::toon_curve::{ToonCurve, luminance};
 
 use super::paint::{PaintData, TerrainPalette};
+use super::rules::PaintRule;
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::{
     collections::{HashMap, HashSet},
@@ -39,11 +40,12 @@ const CHUNK_FORMAT_VERSION: u32 = 3;
 /// per-world settings instead of constants compiled into the shaders;
 /// version 7 added the [`TerrainPalette`] — the world's ground-material
 /// layers that painted tiles index; version 8 gave each layer its blend
-/// parameter, lock and removed/fallback slot state.
-/// Versions 2, 4, 5, 6 and 7 are still readable and are upgraded in memory
-/// (see [`legacy`]). Version 3 was never in a release and is **not**
+/// parameter, lock and removed/fallback slot state; version 9 added the
+/// paint `rules` stack.
+/// Versions 2, 4, 5, 6, 7 and 8 are still readable and are upgraded in
+/// memory (see [`legacy`]). Version 3 was never in a release and is **not**
 /// readable — the few v3 test worlds are expected to be deleted.
-const WORLD_FORMAT_VERSION: u32 = 8;
+const WORLD_FORMAT_VERSION: u32 = 9;
 
 // ============================================================================
 // Serializable Data Structures
@@ -86,6 +88,9 @@ pub struct WorldMetadata {
     /// shows. World-wide, like the environment, so it lives here and not in
     /// the chunks.
     pub palette: TerrainPalette,
+    /// Auto-paint rules (`rules.rs`), applied on demand and to tiles
+    /// flagged auto when the heights under them change.
+    pub rules: Vec<PaintRule>,
 }
 
 /// Global lighting saved with the level.
@@ -392,6 +397,7 @@ pub mod legacy {
             // data expected to be deleted rather than migrated.
             next_entity_id: 0,
             palette: TerrainPalette::legacy_stone(),
+            rules: Vec::new(),
         }
     }
 
@@ -450,6 +456,7 @@ pub mod legacy {
             plugin_data: old.plugin_data,
             next_entity_id: old.next_entity_id,
             palette: TerrainPalette::legacy_stone(),
+            rules: Vec::new(),
         }
     }
 
@@ -515,6 +522,7 @@ pub mod legacy {
             plugin_data: old.plugin_data,
             next_entity_id: old.next_entity_id,
             palette: TerrainPalette::legacy_stone(),
+            rules: Vec::new(),
         }
     }
 
@@ -603,6 +611,43 @@ pub mod legacy {
                 layers,
                 texture_size: old.palette.texture_size,
             },
+            rules: Vec::new(),
+        }
+    }
+
+    /// The v8 metadata: everything current has except the rules stack.
+    #[derive(Archive, Deserialize, Serialize, Clone, Debug)]
+    pub struct WorldMetadataV8 {
+        pub version: u32,
+        pub world_id: String,
+        pub terrain_config: TerrainConfigData,
+        pub chunks_x: u32,
+        pub chunks_y: u32,
+        pub chunk_index: Vec<ChunkIndexEntry>,
+        pub last_saved: u64,
+        pub environment: EnvironmentData,
+        pub required_plugins: Vec<String>,
+        pub plugin_data: Vec<PluginLevelData>,
+        pub next_entity_id: u64,
+        pub palette: TerrainPalette,
+    }
+
+    /// v8 → v9: an empty rule stack.
+    pub fn upgrade_v8(old: WorldMetadataV8) -> WorldMetadata {
+        WorldMetadata {
+            version: super::WORLD_FORMAT_VERSION,
+            world_id: old.world_id,
+            terrain_config: old.terrain_config,
+            chunks_x: old.chunks_x,
+            chunks_y: old.chunks_y,
+            chunk_index: old.chunk_index,
+            last_saved: old.last_saved,
+            environment: old.environment,
+            required_plugins: old.required_plugins,
+            plugin_data: old.plugin_data,
+            next_entity_id: old.next_entity_id,
+            palette: old.palette,
+            rules: Vec::new(),
         }
     }
 
@@ -625,6 +670,7 @@ pub mod legacy {
             plugin_data: old.plugin_data,
             next_entity_id: old.next_entity_id,
             palette: TerrainPalette::legacy_stone(),
+            rules: Vec::new(),
         }
     }
 }
@@ -835,7 +881,7 @@ pub fn parse_chunk_from_bytes(bytes: &[u8]) -> Result<ChunkData, StorageError> {
 }
 
 /// Parse world metadata from a raw byte slice (same binary format as `load_world`).
-/// Accepts v2, v4, v5, v6 and v7 (upgraded in memory); v3 was never released and is rejected.
+/// Accepts v2 and v4–v8 (upgraded in memory); v3 was never released and is rejected.
 /// Used by the async `WorldMetaLoader` which reads bytes via Bevy's `AssetServer`.
 pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, StorageError> {
     use std::io::Read as StdRead;
@@ -855,6 +901,7 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
         && version != 5
         && version != 6
         && version != 7
+        && version != 8
         && version != WORLD_FORMAT_VERSION
     {
         return Err(StorageError::VersionMismatch {
@@ -922,6 +969,15 @@ pub fn parse_world_meta_from_bytes(bytes: &[u8]) -> Result<WorldMetadata, Storag
         return Ok(legacy::upgrade_v7(old));
     }
 
+    if version == 8 {
+        let archived = rkyv::access::<legacy::ArchivedWorldMetadataV8, RkyvError>(&data)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let old: legacy::WorldMetadataV8 =
+            rkyv::deserialize::<legacy::WorldMetadataV8, RkyvError>(archived)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        return Ok(legacy::upgrade_v8(old));
+    }
+
     let archived = rkyv::access::<ArchivedWorldMetadata, RkyvError>(&data)
         .map_err(|e| StorageError::SerializationError(e.to_string()))?;
     let metadata: WorldMetadata = rkyv::deserialize::<WorldMetadata, RkyvError>(archived)
@@ -976,6 +1032,7 @@ pub fn create_world_metadata(
         plugin_data: Vec::new(),
         next_entity_id: 0,
         palette: TerrainPalette::default(),
+        rules: Vec::new(),
     }
 }
 
@@ -1459,8 +1516,14 @@ mod tests {
                 "textures/grass.png",
             ));
         cur.palette.layers[1].tint = [0.1, 0.5, 0.1];
+        cur.rules.push(super::super::rules::PaintRule {
+            height: Some(super::super::rules::Band::new(50.0, 500.0, 4.0)),
+            noise: Some(super::super::rules::NoiseMask::default()),
+            ..super::super::rules::PaintRule::new("Snow", 1)
+        });
         let back = parse_world_meta_from_bytes(&serialize_world(&cur).unwrap()).unwrap();
         assert_eq!(back.palette, cur.palette);
+        assert_eq!(back.rules, cur.rules);
     }
 
     #[test]

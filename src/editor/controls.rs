@@ -34,6 +34,7 @@ enum Ctx {
     PaintSmooth,
     PaintJitter,
     PaintReplace,
+    PaintAuto,
     /// Fly lock engaged: the cursor is captured, clicks are suppressed.
     Flying,
 }
@@ -96,6 +97,8 @@ static CONTROLS: &[ControlRow] = &[
     row(Ctx::PaintSmooth, "LMB", "Smooth blend"),
     row(Ctx::PaintJitter, "LMB", "Jitter blend"),
     row(Ctx::PaintReplace, "LMB", "Replace layer"),
+    row(Ctx::PaintAuto, "LMB", "Apply rules"),
+    row(Ctx::PaintAuto, "Ctrl+LMB", "Release from rules"),
     row(Ctx::PaintReplace, "Alt+LMB", "Pick layer to replace"),
     row(Ctx::PaintPaint, "Alt+LMB", "Pick layer"),
     row(Ctx::PaintFill, "Alt+LMB", "Pick layer"),
@@ -144,6 +147,7 @@ impl ActiveControls<'_> {
             Ctx::PaintSmooth => painting && paint == PaintSubTool::Smooth,
             Ctx::PaintJitter => painting && paint == PaintSubTool::Jitter,
             Ctx::PaintReplace => painting && paint == PaintSubTool::Replace,
+            Ctx::PaintAuto => painting && paint == PaintSubTool::Auto,
             Ctx::Flying => flying,
         }
     }

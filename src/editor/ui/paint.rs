@@ -18,6 +18,7 @@ use crate::editor::history::{Change, MergeKey};
 use crate::editor::paint_tool::{PAINT_FLOW_RANGE, PaintRequest, PaintSubTool};
 use crate::editor::terrain_edit::BRUSH_RADIUS_RANGE;
 use crate::game::world::terrain::paint::{BlendProfile, TerrainLayerData, TerrainPalette};
+use crate::game::world::terrain::rules::{Band, NoiseMask, PaintRule, rules_sample};
 
 const CELL: f32 = 44.0;
 
@@ -29,6 +30,9 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         PaintSubTool::Jitter => "LMB roughens blends along a transition · Alt+LMB picks",
         PaintSubTool::Replace => {
             "LMB swaps the From layer for the selected one · Alt+LMB picks From"
+        }
+        PaintSubTool::Auto => {
+            "LMB paints what the rules say (stays auto) · Ctrl+LMB releases tiles from the rules"
         }
     };
     ui.weak(format!("{hint} · [ / ] resize"));
@@ -99,6 +103,283 @@ pub fn draw(ui: &mut egui::Ui, panels: &mut Panels) {
         });
 
     commit(panels, before, palette, "Edit palette");
+
+    ui.separator();
+    masks_section(ui, panels);
+    ui.separator();
+    rules_section(ui, panels);
+}
+
+// ── Brush masks ──────────────────────────────────────────────────────────────
+
+fn masks_section(ui: &mut egui::Ui, panels: &mut Panels) {
+    let palette = panels
+        .terrain_world
+        .as_ref()
+        .map(|tw| tw.metadata.palette.clone())
+        .unwrap_or_default();
+    let any = panels.paint.masks.is_any();
+    egui::CollapsingHeader::new(if any {
+        "Brush masks ●"
+    } else {
+        "Brush masks"
+    })
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.weak("Restrict where any brush mode may paint.");
+        let masks = &mut panels.paint.masks;
+        band_ui(
+            ui,
+            "mask_height",
+            "Height",
+            &mut masks.height,
+            Band::new(0.0, 50.0, 2.0),
+            " m",
+            0.5,
+        );
+        band_ui(
+            ui,
+            "mask_slope",
+            "Slope",
+            &mut masks.slope,
+            Band::new(30.0, 90.0, 5.0),
+            "°",
+            0.5,
+        );
+        noise_ui(ui, "mask_noise", &mut masks.noise);
+        ui.horizontal(|ui| {
+            let mut on = masks.only_over.is_some();
+            if ui.checkbox(&mut on, "Only over").changed() {
+                masks.only_over = on.then_some(0);
+            }
+            if let Some(id) = masks.only_over.as_mut() {
+                let mut v = *id as usize;
+                layer_combo(ui, "mask_only_over", &palette, &mut v);
+                *id = v as u8;
+            }
+        });
+    });
+}
+
+/// Enable checkbox + min / max / soft for an optional [`Band`].
+fn band_ui(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    band: &mut Option<Band>,
+    default: Band,
+    unit: &str,
+    speed: f64,
+) {
+    ui.horizontal(|ui| {
+        let mut on = band.is_some();
+        if ui.checkbox(&mut on, label).changed() {
+            *band = on.then_some(default);
+        }
+        if let Some(b) = band.as_mut() {
+            ui.push_id(id, |ui| {
+                ui.add(egui::DragValue::new(&mut b.min).speed(speed).suffix(unit))
+                    .on_hover_text("From");
+                ui.label("–");
+                ui.add(egui::DragValue::new(&mut b.max).speed(speed).suffix(unit))
+                    .on_hover_text("To");
+                ui.label("±");
+                ui.add(
+                    egui::DragValue::new(&mut b.soft)
+                        .speed(speed * 0.5)
+                        .range(0.01..=1000.0)
+                        .suffix(unit),
+                )
+                .on_hover_text("Fade width outside the range");
+            });
+            if b.max < b.min {
+                b.max = b.min;
+            }
+        }
+    });
+}
+
+fn noise_ui(ui: &mut egui::Ui, id: &str, noise: &mut Option<NoiseMask>) {
+    ui.horizontal(|ui| {
+        let mut on = noise.is_some();
+        if ui.checkbox(&mut on, "Noise").changed() {
+            *noise = on.then_some(NoiseMask::default());
+        }
+        if let Some(n) = noise.as_mut() {
+            ui.push_id(id, |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut n.scale)
+                        .speed(0.1)
+                        .range(0.25..=500.0)
+                        .suffix(" m"),
+                )
+                .on_hover_text("Feature size");
+                ui.add(
+                    egui::DragValue::new(&mut n.threshold)
+                        .speed(0.005)
+                        .range(0.0..=1.0),
+                )
+                .on_hover_text("Coverage: 0 = everywhere, 1 = nowhere");
+                ui.add(
+                    egui::DragValue::new(&mut n.soft)
+                        .speed(0.005)
+                        .range(0.01..=1.0),
+                )
+                .on_hover_text("Edge softness");
+            });
+        }
+    });
+}
+
+// ── Rules ────────────────────────────────────────────────────────────────────
+
+fn rules_section(ui: &mut egui::Ui, panels: &mut Panels) {
+    let Some((palette, rules)) = panels
+        .terrain_world
+        .as_ref()
+        .map(|tw| (tw.metadata.palette.clone(), tw.metadata.rules.clone()))
+    else {
+        return;
+    };
+    let before = rules.clone();
+    let mut rules = rules;
+
+    egui::CollapsingHeader::new(format!("Rules ({})", rules.len()))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.weak(
+                "Applied top to bottom like paint strokes; a later rule covers an earlier one.                  Tiles painted by rules stay 'auto' and follow sculpting until hand-painted.",
+            );
+
+            let mut remove: Option<usize> = None;
+            let mut swap: Option<(usize, usize)> = None;
+            let n = rules.len();
+            for (i, rule) in rules.iter_mut().enumerate() {
+                ui.push_id(i, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut rule.enabled, "");
+                        ui.add(egui::TextEdit::singleline(&mut rule.name).desired_width(90.0));
+                        let mut layer = rule.layer as usize;
+                        layer_combo(ui, "rule_layer", &palette, &mut layer);
+                        rule.layer = layer as u8;
+                        if ui.add_enabled(i > 0, egui::Button::new("▲").small()).clicked() {
+                            swap = Some((i, i - 1));
+                        }
+                        if ui.add_enabled(i + 1 < n, egui::Button::new("▼").small()).clicked() {
+                            swap = Some((i, i + 1));
+                        }
+                        if ui.small_button("×").on_hover_text("Remove rule").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    ui.indent("conds", |ui| {
+                        band_ui(ui, "rule_height", "Height", &mut rule.height, Band::new(0.0, 50.0, 2.0), " m", 0.5);
+                        band_ui(ui, "rule_slope", "Slope", &mut rule.slope, Band::new(30.0, 90.0, 5.0), "°", 0.5);
+                        noise_ui(ui, "rule_noise", &mut rule.noise);
+                    });
+                });
+            }
+            if let Some((a, b)) = swap {
+                rules.swap(a, b);
+            }
+            if let Some(i) = remove {
+                rules.remove(i);
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("+ Rule").clicked() {
+                    let layer = panels.paint.selected as u8;
+                    let name = palette
+                        .layer(layer)
+                        .map(|l| l.name.clone())
+                        .unwrap_or_else(|| "Rule".to_owned());
+                    rules.push(PaintRule::new(name, layer));
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(!rules.is_empty(), egui::Button::new("Apply to chunk under cursor"))
+                    .on_hover_text("Repaint the hovered chunk from the rules (all tiles become auto)")
+                    .clicked()
+                {
+                    panels.paint.request = Some(PaintRequest::ApplyRules { all_loaded: false });
+                }
+                if ui
+                    .add_enabled(!rules.is_empty(), egui::Button::new("Apply to loaded chunks"))
+                    .on_hover_text("Repaint every loaded chunk from the rules (undoable)")
+                    .clicked()
+                {
+                    panels.paint.request = Some(PaintRequest::ApplyRules { all_loaded: true });
+                }
+            });
+
+            if !rules.is_empty() {
+                rules_swatch(ui, &palette, &rules);
+            }
+        });
+
+    if rules != before {
+        if let Some(tw) = panels.terrain_world.as_deref_mut() {
+            tw.metadata.rules = rules.clone();
+        }
+        panels.history.merge_or_push(
+            MergeKey::Rules,
+            "Edit paint rules",
+            Change::Rules {
+                before,
+                after: rules,
+            },
+        );
+    }
+}
+
+/// Height (→) by slope (↑) preview of what the stack paints, in layer
+/// tints; noise is left out so the picture is readable.
+fn rules_swatch(ui: &mut egui::Ui, palette: &TerrainPalette, rules: &[PaintRule]) {
+    // Height axis: up to the highest band in play, at least 20 m.
+    let max_h = rules
+        .iter()
+        .filter_map(|r| r.height.map(|b| b.max + b.soft))
+        .fold(20.0_f32, f32::max)
+        .min(1000.0);
+    let without_noise: Vec<PaintRule> = rules
+        .iter()
+        .map(|r| PaintRule {
+            noise: None,
+            ..r.clone()
+        })
+        .collect();
+    let (cols, rows) = (32usize, 12usize);
+    let cell = egui::vec2(5.0, 5.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(cell.x * cols as f32, cell.y * rows as f32),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    for cy in 0..rows {
+        // Row 0 is the steepest, so "up" on screen is steeper.
+        let slope = (1.0 - (cy as f32 + 0.5) / rows as f32) * 90.0;
+        for cx in 0..cols {
+            let h = (cx as f32 + 0.5) / cols as f32 * max_h;
+            let s = rules_sample(&without_noise, h, slope, bevy::prelude::Vec2::ZERO);
+            let base = palette.resolve(crate::game::world::terrain::paint::paint_base(s));
+            let over = palette.resolve(crate::game::world::terrain::paint::paint_overlay(s));
+            let t = crate::game::world::terrain::paint::paint_blend(s) as f32 / 255.0;
+            let a = palette.layer(base).map(|l| l.tint).unwrap_or([0.5; 3]);
+            let b = palette.layer(over).map(|l| l.tint).unwrap_or(a);
+            let mixed = [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ];
+            let min = rect.min + egui::vec2(cx as f32 * cell.x, cy as f32 * cell.y);
+            painter.rect_filled(
+                egui::Rect::from_min_size(min, cell),
+                0.0,
+                tint_color32(mixed),
+            );
+        }
+    }
+    ui.weak(format!("← 0 m … {max_h:.0} m →   ↑ steep, ↓ flat"));
 }
 
 fn sub_tool_row(ui: &mut egui::Ui, panels: &mut Panels, palette: &TerrainPalette) {

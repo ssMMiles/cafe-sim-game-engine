@@ -49,6 +49,7 @@ use crate::game::world::prefabs::{PrefabFile, PrefabInstanceData, PrefabLibrary,
 use crate::game::world::streaming::StreamingState;
 use crate::game::world::terrain::mesh::LOD_LEVELS;
 use crate::game::world::terrain::paint::{PaintData, PaintmapData, TerrainPalette};
+use crate::game::world::terrain::rules::{PaintRule, reevaluate_auto};
 use crate::game::world::terrain::storage::{EnvironmentData, TerrainWorld, WorldConfig};
 
 /// Transactions kept per world; the oldest is evicted past this.
@@ -109,6 +110,11 @@ pub enum Change {
         before: TerrainPalette,
         after: TerrainPalette,
     },
+    /// The auto-paint rule stack was edited.
+    Rules {
+        before: Vec<PaintRule>,
+        after: Vec<PaintRule>,
+    },
     /// One brush stroke: only the tiles it touched, as `(tx, ty, before, after)`.
     Terrain { tiles: Vec<(i32, i32, f32, f32)> },
     /// One paint stroke or fill: each touched chunk's grid before and after,
@@ -158,6 +164,7 @@ impl Change {
             Change::Scripts { before, after, .. } => before == after,
             Change::Environment { before, after } => before == after,
             Change::Palette { before, after } => before == after,
+            Change::Rules { before, after } => before == after,
             Change::Terrain { tiles } => tiles.iter().all(|(_, _, b, a)| b == a),
             Change::Paint { chunks } => chunks.iter().all(|c| c.before == c.after),
             Change::PrefabDefinition { before, after, .. } => before == after,
@@ -185,6 +192,7 @@ impl Change {
             | Change::PrefabInstance { id, .. } => Some(*id),
             Change::Environment { .. }
             | Change::Palette { .. }
+            | Change::Rules { .. }
             | Change::Terrain { .. }
             | Change::Paint { .. }
             | Change::PrefabDefinition { .. } => None,
@@ -239,6 +247,10 @@ impl Change {
                 *after = nafter.clone();
                 true
             }
+            (Change::Rules { after, .. }, Change::Rules { after: nafter, .. }) => {
+                *after = nafter.clone();
+                true
+            }
             _ => false,
         }
     }
@@ -251,6 +263,7 @@ pub enum MergeKey {
     Kind(u64),
     Environment,
     Palette,
+    Rules,
 }
 
 #[derive(Debug)]
@@ -542,7 +555,7 @@ impl LevelOps<'_, '_> {
                 }
                 Ok(())
             }
-            Change::Environment { .. } | Change::Palette { .. } => self
+            Change::Environment { .. } | Change::Palette { .. } | Change::Rules { .. } => self
                 .terrain_world
                 .as_ref()
                 .map(|_| ())
@@ -704,6 +717,13 @@ impl LevelOps<'_, '_> {
                     tw.metadata.palette = to.clone();
                 }
             }
+            Change::Rules { before, after } => {
+                let to = if undo { before } else { after };
+                if let Some(tw) = self.terrain_world.as_deref_mut() {
+                    // `reevaluate_auto_on_rules_change` picks the edit up.
+                    tw.metadata.rules = to.clone();
+                }
+            }
             Change::Paint { chunks } => {
                 if let Some(paintmap) = self.paintmap.as_deref_mut() {
                     for c in chunks {
@@ -723,6 +743,14 @@ impl LevelOps<'_, '_> {
                     self.terrain.rebuild_meshes(chunk, 0..LOD_LEVELS);
                     self.terrain.rebuild_collider(chunk);
                     self.terrain.mark_dirty(chunk);
+                    // Auto-painted tiles follow the heights under them.
+                    if let (Some(tw), Some(hm), Some(pm)) = (
+                        self.terrain_world.as_deref(),
+                        self.terrain.heightmap.as_deref(),
+                        self.paintmap.as_deref_mut(),
+                    ) {
+                        reevaluate_auto(&tw.metadata.rules, hm, pm, &mut self.images, chunk);
+                    }
                 }
                 self.lighting.stale = true;
             }

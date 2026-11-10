@@ -88,6 +88,9 @@ pub struct TerrainBrushHit {
     /// Height of every tile the current stroke has touched, as it was before
     /// the stroke's first write to it. Becomes the stroke's undo record.
     pub stroke_before: HashMap<(i32, i32), f32>,
+    /// Chunks whose heights a stroke just finished changing; drained by
+    /// `paint_tool::reevaluate_auto_after_sculpt`.
+    pub just_finalized: Vec<(i32, i32)>,
 }
 
 /// Influence of the brush at `dist` from its centre: 1 inside the flat core,
@@ -347,10 +350,11 @@ pub fn finalize_terrain_stroke(
     brush_hit.was_painting = false;
 
     let pending: Vec<(i32, i32)> = brush_hit.pending_full_lod.drain().collect();
-    for chunk in pending {
+    for &chunk in &pending {
         terrain.rebuild_meshes(chunk, 1..LOD_LEVELS);
         terrain.rebuild_collider(chunk);
     }
+    brush_hit.just_finalized.extend(pending);
 
     let tiles: Vec<(i32, i32, f32, f32)> = match terrain.heightmap.as_deref() {
         Some(heightmap) => brush_hit

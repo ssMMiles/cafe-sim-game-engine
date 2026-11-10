@@ -329,6 +329,16 @@ impl Plugin for EditorPlugin {
             OnExit(EditorTool::Paint),
             (teardown_terrain_brush_preview, paint_tool::reset_paint_tool),
         );
+        // Auto-painted tiles follow the heights and the rules, whatever tool
+        // is active: after a sculpt stroke, and once a rule edit settles.
+        app.add_systems(
+            Update,
+            (
+                paint_tool::reevaluate_auto_after_sculpt.after(finalize_terrain_stroke),
+                paint_tool::reevaluate_auto_on_rules_change,
+            )
+                .in_set(EditorSet::InGame),
+        );
 
         // ── Save / bake / debug toggles ──────────────────────────────────────
         app.add_systems(

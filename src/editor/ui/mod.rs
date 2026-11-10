@@ -497,7 +497,7 @@ mod tests {
 
         // Markers used across the panels (outliner, assets, inspector,
         // history, status), plus the punctuation the labels lean on.
-        let used = "▸▾◆▤▦○▣◉♪▶⤴🔗🔒·×—…°";
+        let used = "▸▾▲▼●◆▤▦○▣◉♪▶⤴🔗🔒·×—…°";
         let missing: String = used.chars().filter(|c| !owned.contains_key(c)).collect();
         assert!(missing.is_empty(), "no proportional face has: {missing}");
 

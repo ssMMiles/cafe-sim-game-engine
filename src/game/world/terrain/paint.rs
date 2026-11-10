@@ -482,6 +482,11 @@ impl PaintmapData {
         touched.into_iter()
     }
 
+    /// A loaded chunk's grid.
+    pub fn chunk_samples(&self, chunk: (i32, i32)) -> Option<&[PaintSample]> {
+        self.chunks.get(&chunk).map(|c| c.samples.as_slice())
+    }
+
     /// Every loaded chunk id, for whole-world operations.
     pub fn loaded(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
         self.chunks.keys().copied()

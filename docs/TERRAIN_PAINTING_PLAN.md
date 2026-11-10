@@ -1,6 +1,6 @@
 # Terrain Painting — plan
 
-Status: **Phases 0–2 built 2026-11-10** (§5, §8–§10); direction agreed the
+Status: **Phases 0–3 built 2026-11-10** (§5, §8–§11); direction agreed the
 same day (§6). The technical sections are deliberately thin and are expanded
 phase by phase. §4.7 is the performance / WebGPU review.
 
@@ -442,7 +442,7 @@ would each need the attribute and the 4× downsampled LODs would smear it).
 | **0 — Foundation** ✅ | Palette data in `world.meta` + Paint tool skeleton with the palette strip in the Tool tab; default grey-triangle texture; texture array upload; paint grid in `.terrain` v3 + legacy v2 reader (all default); shader samples ids + blend with the Soft profile via `textureSampleGrad`; current stone look migrated to a layer. A/B measurement: see §8. | Worlds look the same as today, but the palette exists and a hand-edited file can show two textures. |
 | **1 — Brush** ✅ | Paint mode with Paint / Fill / Erase, disc shows texture, eyedropper, stroke undo, save, web. | You can paint a world. |
 | **2 — Blends & layers** ✅ | Blend profiles (Hard, Height, Scatter, Stepped), per-layer tint / tiling / no-tile, Smooth / Jitter / Replace sub-tools, replace-everywhere, lock, delete-with-fallback. | Transitions look intentional; palette is a real workflow. |
-| **3 — Rules** | Rule stack UI with preview, Apply-rules command, auto flag + re-evaluation after sculpt, brush masks (slope / height / layer / noise), Auto sub-tool. | Sculpt a mountain and it textures itself; hand-paint on top. |
+| **3 — Rules** ✅ | Rule stack UI with preview, Apply-rules command, auto flag + re-evaluation after sculpt, brush masks (slope / height / layer / noise), Auto sub-tool. | Sculpt a mountain and it textures itself; hand-paint on top. |
 | **4 — Lighting & polish** | Paint-aware bounce albedo in all bakers, debug views, export, `surface_at` for plugins, docs (`GRAPHICS.md`, `LIGHTING.md`, `CLAUDE.md`). | The whole thing is coherent with the rest of the engine. |
 | **Later** | Imported masks as rules; per-sample UV rotation / scale variation; triplanar on cliffs; material-boundary outlines; decals / splines (roads); holes (caves). | |
 
@@ -657,3 +657,40 @@ notes.
   menu listing fallbacks; Flow shown for Paint/Smooth/Jitter.
 - **Not yet**: brush masks and rules (Phase 3), paint-aware bake albedo
   (Phase 4), per-layer pattern dark colour (constant `PATTERN_DARK`).
+
+## 11. Phase 3 as built (2026-11-10)
+
+- **Rules** (`terrain/rules.rs`, `WorldMetadata.rules`, `world.meta` v9
+  with a v8 reader): an ordered `Vec<PaintRule { name, layer, enabled,
+  height: Option<Band>, slope: Option<Band>, noise: Option<NoiseMask> }>`.
+  `Band { min, max, soft }` is 1 inside and smoothsteps to 0 over `soft`
+  outside each end; `NoiseMask { scale, threshold, soft }` is bilinear value
+  noise over world xz. A rule's strength is the product of its conditions
+  (a rule with none is a base coat). `rules_sample` applies the stack top
+  to bottom like strokes — each rule covers the current dominant layer by
+  its strength — and flags the result `PAINT_FLAG_AUTO`. Evaluation is
+  Rust-side only (the shader never sees rules); slope comes from
+  `HeightmapData::sample_normal`.
+- **Auto flag lifecycle.** Rules write it; every hand sub-tool clears it on
+  the tiles it writes; Auto + Ctrl clears it without changing the look
+  ("release from the rules"). `reevaluate_auto` re-runs a chunk's flagged
+  tiles after a sculpt stroke (`TerrainBrushHit::just_finalized`, drained by
+  `reevaluate_auto_after_sculpt`), inside `LevelOps` when a terrain change
+  is undone/redone, and 0.4 s after the rule stack last changed
+  (`reevaluate_auto_on_rules_change`, so a slider drag runs once). That
+  re-evaluation is *not* recorded in history — auto tiles are derived from
+  heights + rules, and re-running after an undo converges on the same
+  grid. "Apply rules" (disc / hovered chunk / all loaded) *is* recorded,
+  because it changes which tiles are auto.
+- **Brush masks** (`BrushMasks` on `PaintToolState`): height, slope, noise
+  (the same `Band`/`NoiseMask` types) and only-over-layer; multiplied into
+  every sub-tool's weight. Header shows ● while any is active.
+- **Panel**: Rules section (enable, name, layer, ▲▼ reorder, ×, the three
+  conditions, "+ Rule" taking the selected layer, Apply to chunk under
+  cursor / to loaded chunks) with a 32×12 height-by-slope swatch in layer
+  tints (noise left out so it reads); Brush masks section.
+- **Format note**: the user has said format bumps are free in this phase of
+  the project (`CLAUDE.md` Development Notes); the v8 reader was kept only
+  because it was ten lines.
+- **Not yet**: imported greyscale masks as rules (later), paint-aware bake
+  albedo and debug views (Phase 4).
