@@ -22,9 +22,10 @@ use std::collections::HashSet;
 use crate::balance::{Balance, spawn_balance_loss_popup, spawn_balance_popup};
 use crate::cafe::CafeOpen;
 use crate::coffee_menu::Brewing;
-use crate::customer::{Customer, CustomerState, HappyFace, ServedTimer};
+use crate::customer::{AngryFace, Customer, CustomerState, HappyFace, ServedTimer};
 use crate::delivery::{DeliveredDrink, DeliveryAssets};
-use crate::drinks::{brew_secs_for, price_for};
+use crate::drink_station::MachineInUse;
+use crate::drinks::{drink as drink_info, payout};
 use crate::grid::{CafeAnchor, step_along_floor};
 use crate::pause_menu::GamePaused;
 use crate::placement::CoffeeMachine;
@@ -40,8 +41,6 @@ const STAFF_SIZE: f32 = 0.4;
 const SPREAD_X: f32 = 0.6;
 /// How long a wandering staffer heads toward one spot before re-rolling a target.
 const WANDER_REPATH_SECS: f32 = 2.5;
-/// Tip = price * friendliness * this. Friendliness 1.0 → +50% of the price.
-const TIP_FRACTION: f32 = 0.5;
 const SERVED_HOLD_SECS: f32 = 5.0;
 const CARRY_SCALE: f32 = 0.15;
 /// Height of a counter top above the floor, in shell-local units: a drink set
@@ -92,6 +91,7 @@ enum AgentState {
         customer: Entity,
         counter: (i32, i32),
         drink: &'static str,
+        quality: f32,
     },
     Leaving,
 }
@@ -247,7 +247,10 @@ pub fn tick_staff(
     mut balance: ResMut<Balance>,
     mut agents_q: Query<(Entity, &mut Transform, &mut StaffAgent)>,
     mut customers_q: Query<(Entity, &mut Customer)>,
-    machines_q: Query<(Entity, &GlobalTransform, Has<Brewing>), With<CoffeeMachine>>,
+    machines_q: Query<
+        (Entity, &GlobalTransform, Has<Brewing>, Has<MachineInUse>),
+        With<CoffeeMachine>,
+    >,
     brewing_q: Query<&Brewing>,
 ) {
     if paused.0 {
@@ -287,15 +290,16 @@ pub fn tick_staff(
         }
     }
 
-    // Idle machines (no Brewing, unclaimed) and a set for arrival re-checks.
+    // Idle machines (no Brewing, not the player's, unclaimed) and a set for
+    // arrival re-checks.
     let mut idle_machines: Vec<(Entity, Vec3)> = Vec::new();
     let idle_machine_set: HashSet<Entity> = machines_q
         .iter()
-        .filter(|(_, _, has_brew)| !*has_brew)
-        .map(|(e, _, _)| e)
+        .filter(|(_, _, has_brew, in_use)| !*has_brew && !*in_use)
+        .map(|(e, ..)| e)
         .collect();
-    for (entity, gt, has_brew) in machines_q.iter() {
-        if !has_brew && !claimed_machines.contains(&entity) {
+    for (entity, gt, ..) in machines_q.iter() {
+        if idle_machine_set.contains(&entity) && !claimed_machines.contains(&entity) {
             idle_machines.push((entity, gt.translation()));
         }
     }
@@ -310,7 +314,7 @@ pub fn tick_staff(
                 if can_work
                     && !waiting.is_empty()
                     && !idle_machines.is_empty()
-                    && brew_secs_for(waiting.last().unwrap().2).is_some()
+                    && drink_info(waiting.last().unwrap().2).is_some()
                 {
                     let (customer, counter, drink) = waiting.pop().unwrap();
                     let (machine, mpos) = idle_machines.pop().unwrap();
@@ -348,17 +352,17 @@ pub fn tick_staff(
                         agent.state = AgentState::Wandering;
                         continue;
                     }
-                    let dmod = staff
-                        .members
-                        .get(agent.roster_index)
-                        .map(|m| m.drink_time_mod)
-                        .unwrap_or(0.0);
-                    let base = brew_secs_for(drink).unwrap_or(4.0);
-                    commands.entity(machine).insert(Brewing {
-                        drink,
-                        total_secs: (base * (1.0 + dmod)).max(0.5),
-                        elapsed: 0.0,
-                    });
+                    let (Some(member), Some(info)) =
+                        (staff.members.get(agent.roster_index), drink_info(drink))
+                    else {
+                        agent.state = AgentState::Wandering;
+                        continue;
+                    };
+                    let secs = (info.brew_secs * (1.0 + member.drink_time_mod)).max(0.5);
+                    let quality = member.brew_quality(info.difficulty, &mut rand::rng());
+                    commands
+                        .entity(machine)
+                        .insert(Brewing::timed(drink, secs, quality));
                     agent.state = AgentState::WaitBrew {
                         customer,
                         counter,
@@ -379,9 +383,9 @@ pub fn tick_staff(
                     agent.state = AgentState::Wandering;
                     continue;
                 }
-                let ready = brewing_q.get(machine).map(|b| b.ready());
+                let ready = brewing_q.get(machine).map(|b| (b.ready(), b.quality));
                 match ready {
-                    Ok(true) => {
+                    Ok((true, quality)) => {
                         commands.entity(machine).remove::<Brewing>();
                         let cube = commands
                             .spawn_owned((
@@ -398,9 +402,10 @@ pub fn tick_staff(
                             customer,
                             counter,
                             drink,
+                            quality,
                         };
                     }
-                    Ok(false) => {} // still brewing — hold position
+                    Ok((false, _)) => {} // still brewing — hold position
                     Err(_) => {
                         // Brewing vanished (e.g. player picked it up) — give up.
                         agent.state = AgentState::Wandering;
@@ -412,6 +417,7 @@ pub fn tick_staff(
                 customer,
                 counter,
                 drink,
+                quality,
             } => {
                 if step_toward(&anchor, &mut transform, agent.target, speed, dt) {
                     serve(
@@ -425,6 +431,7 @@ pub fn tick_staff(
                         customer,
                         counter,
                         drink,
+                        quality,
                     );
                     if let Some(cube) = agent.carried_visual.take() {
                         commands.entity(cube).despawn();
@@ -443,7 +450,8 @@ pub fn tick_staff(
 }
 
 /// Replicate the correct-serve half of `handle_delivery_click`: deposit a drink
-/// cube on the counter, credit price + a friendliness tip, and arm the customer's
+/// cube on the counter, credit the [`payout`] for `quality` + the staffer's
+/// friendliness, and arm the customer's
 /// served timer. No-op if the customer is no longer waiting at `counter`.
 fn serve(
     commands: &mut Commands,
@@ -456,6 +464,7 @@ fn serve(
     customer: Entity,
     counter: (i32, i32),
     drink: &'static str,
+    quality: f32,
 ) {
     let Ok((_, mut cust)) = customers_q.get_mut(customer) else {
         return;
@@ -464,15 +473,17 @@ fn serve(
         return;
     }
 
-    if let Some(price) = price_for(drink) {
+    let mut happy = true;
+    if let Some(info) = drink_info(drink) {
         let friendliness = staff
             .members
             .get(roster_index)
             .map(|m| m.friendliness)
             .unwrap_or(0.0);
-        let tip = (price as f32 * friendliness * TIP_FRACTION).round() as i64;
-        balance.0 += price + tip;
-        spawn_balance_popup(commands, price + tip);
+        let paid = payout(info.price, quality, false, friendliness);
+        balance.0 += paid.amount;
+        spawn_balance_popup(commands, paid.amount, false);
+        happy = !paid.unhappy;
     }
 
     commands.spawn_owned((
@@ -488,12 +499,15 @@ fn serve(
     ));
 
     cust.state = CustomerState::Served;
-    commands.entity(customer).insert((
-        ServedTimer {
-            remaining: SERVED_HOLD_SECS,
-        },
-        HappyFace,
-    ));
+    let mut customer_cmds = commands.entity(customer);
+    customer_cmds.insert(ServedTimer {
+        remaining: SERVED_HOLD_SECS,
+    });
+    if happy {
+        customer_cmds.insert(HappyFace);
+    } else {
+        customer_cmds.insert(AngryFace);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -502,7 +516,7 @@ fn serve(
 
 fn spawn_notice_toast(commands: &mut Commands, names: &[String]) {
     let message = format!(
-        "Couldn't make payroll — {} staff quit: {}",
+        "Couldn't make payroll - {} staff quit: {}",
         names.len(),
         names.join(", ")
     );

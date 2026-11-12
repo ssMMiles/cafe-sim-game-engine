@@ -27,7 +27,7 @@ use crate::time::{DAY_START_HOUR, GameTime};
 
 /// Bump on any incompatible change to [`CafeSaveFile`] so older saves are
 /// rejected with a clear error rather than silently mis-deserializing.
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 pub const SLOT_COUNT: u8 = 4;
 

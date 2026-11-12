@@ -1,9 +1,10 @@
 //! Staff — hire employees and assign them jobs.
 //!
-//! This is a UI + data scaffold: staff members carry randomly-rolled stats
-//! (drink-making, movement speed, friendliness) and a per-day wage, but those
-//! stats do not yet affect gameplay. They are displayed in the Shop Overview's
-//! Staff section and persisted in the save file.
+//! Staff members carry randomly-rolled stats (drink time, movement speed,
+//! friendliness, skill) and a per-day wage. Baristas use them in
+//! `staff_agent.rs`; skill sets the quality of the drinks they make
+//! ([`StaffMember::brew_quality`]). Shown in the Shop Overview's Staff section
+//! and persisted in the save file.
 //!
 //! The Shop Overview body (in `shop_overview.rs`) renders the roster and the
 //! inline "Assign Job" dropdown; this module owns the data model, the random
@@ -51,10 +52,32 @@ pub struct StaffMember {
     pub move_speed_mod: f32,
     /// `[0.0, 1.0]`.
     pub friendliness: f32,
+    /// Drink-making skill, `[SKILL_MIN, 1.0]`: the centre of their drink quality.
+    pub skill: f32,
     /// Per-day wage, derived from the stats with ±20% variance.
     pub pay: i64,
     /// `None` = "Chilling" (no job assigned).
     pub job: Option<Job>,
+}
+
+/// Lowest rollable skill: even a poor hire mostly makes drinks customers accept.
+pub const SKILL_MIN: f32 = 0.3;
+/// A staffer's drinks land within ± this of their centre quality.
+pub const QUALITY_SPREAD: f32 = 0.1;
+/// How much a drink's difficulty (0..1) pulls a staffer's quality down.
+pub const DIFFICULTY_PENALTY: f32 = 0.35;
+
+impl StaffMember {
+    /// Centre of this staffer's quality for a drink of `difficulty`.
+    pub fn quality_centre(&self, difficulty: f32) -> f32 {
+        self.skill * (1.0 - DIFFICULTY_PENALTY * difficulty)
+    }
+
+    /// One drink's quality: a small random spread around [`Self::quality_centre`].
+    pub fn brew_quality(&self, difficulty: f32, rng: &mut impl rand::Rng) -> f32 {
+        let spread = rng.random_range(-QUALITY_SPREAD..=QUALITY_SPREAD);
+        (self.quality_centre(difficulty) + spread).clamp(0.0, 1.0)
+    }
 }
 
 /// The current roster.
@@ -128,12 +151,14 @@ pub fn generate_candidate() -> StaffMember {
     let drink_time_mod = rng.random_range(-0.5..=0.5);
     let move_speed_mod = rng.random_range(-0.2..=0.4);
     let friendliness = rng.random_range(0.0..=1.0);
+    let skill = rng.random_range(SKILL_MIN..=1.0);
 
-    // Quality in [0, 1]: faster drinks, higher speed, and higher friendliness
+    // Quality in [0, 1]: faster drinks, higher speed, friendliness and skill
     // all push it up. Each component is normalized to its own range first.
     let drink_q = (0.5 - drink_time_mod) / 1.0; // -0.5 -> 1.0, +0.5 -> 0.0
     let speed_q = (move_speed_mod + 0.2) / 0.6; // -0.2 -> 0.0, +0.4 -> 1.0
-    let quality = (drink_q + speed_q + friendliness) / 3.0;
+    let skill_q = (skill - SKILL_MIN) / (1.0 - SKILL_MIN);
+    let quality = (drink_q + speed_q + friendliness + skill_q) / 4.0;
 
     // Map quality to a base wage, then apply ±20% luck.
     const PAY_MIN: f32 = 8.0;
@@ -147,6 +172,7 @@ pub fn generate_candidate() -> StaffMember {
         drink_time_mod,
         move_speed_mod,
         friendliness,
+        skill,
         pay,
         job: None,
     }
@@ -401,8 +427,9 @@ pub fn build_hire_menu(
 // ----------------------------------------------------------------------------
 
 /// The three stat lines for a staff/candidate card.
-pub fn stat_lines(m: &StaffMember) -> [String; 3] {
+pub fn stat_lines(m: &StaffMember) -> [String; 4] {
     [
+        format!("Skill: {:.0}%", m.skill * 100.0),
         format!("Drink Time: {:+.0}%", m.drink_time_mod * 100.0),
         format!("Move Speed: {:+.0}%", m.move_speed_mod * 100.0),
         format!("Friendliness: {:.0}%", m.friendliness * 100.0),
@@ -445,4 +472,24 @@ pub fn spawn_button(
             TextColor(text),
         ))
         .id()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brew_quality_stays_near_the_centre() {
+        let mut rng = rand::rng();
+        for _ in 0..50 {
+            let m = generate_candidate();
+            for difficulty in [0.0, 0.5, 1.0] {
+                let centre = m.quality_centre(difficulty);
+                for _ in 0..50 {
+                    let q = m.brew_quality(difficulty, &mut rng);
+                    assert!((q - centre).abs() <= QUALITY_SPREAD + 1e-6);
+                }
+            }
+        }
+    }
 }

@@ -1,8 +1,9 @@
 //! Brew menu — pops up when the player left-clicks on a placed coffee machine.
 //!
 //! Mirrors the build shop's panel layout but renders a horizontal carousel of
-//! drinks pulled from [`crate::drinks::DRINKS`]. Selecting a drink closes the
-//! menu and attaches a [`Brewing`] component to the machine that was clicked.
+//! drinks pulled from [`crate::drinks::DRINKS`]. Selecting one hands over to
+//! the brew station's minigames (`drink_station.rs`), which finish by
+//! attaching a ready [`Brewing`]. Staff brews are the only timed ones.
 //! Acts as a modal, so placement and cursor-lock systems all gate on the active
 //! menu.
 //!
@@ -16,6 +17,7 @@ use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button}
 use engine_api::PlayerCamera;
 use std::collections::HashSet;
 
+use crate::drink_station::{BrewSession, MachineInUse};
 use crate::drinks::DRINKS;
 use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
@@ -45,17 +47,41 @@ pub struct DrinkCard {
 #[derive(Resource, Default)]
 pub struct ActiveCoffeeMachine(pub Option<Entity>);
 
-/// Attached to a [`CoffeeMachine`] entity while it's producing a drink. Once
-/// `elapsed >= total_secs` the popup reads "Ready!" but the component stays
-/// (no pickup mechanic yet).
+/// Attached to a [`CoffeeMachine`] entity while it's producing a drink, and
+/// kept once `elapsed >= total_secs` until the drink is picked up.
 #[derive(Component)]
 pub struct Brewing {
     pub drink: &'static str,
     pub total_secs: f32,
     pub elapsed: f32,
+    /// 0..=1, decided when the drink is started (staff) or finished (player).
+    pub quality: f32,
+    pub perfect: bool,
 }
 
 impl Brewing {
+    /// A drink that brews for `secs` before it's ready (staff).
+    pub fn timed(drink: &'static str, secs: f32, quality: f32) -> Self {
+        Self {
+            drink,
+            total_secs: secs,
+            elapsed: 0.0,
+            quality,
+            perfect: false,
+        }
+    }
+
+    /// A drink that's already made (the player played its minigames).
+    pub fn finished(drink: &'static str, quality: f32, perfect: bool) -> Self {
+        Self {
+            drink,
+            total_secs: 0.0,
+            elapsed: 0.0,
+            quality,
+            perfect,
+        }
+    }
+
     pub fn ready(&self) -> bool {
         self.elapsed >= self.total_secs
     }
@@ -87,7 +113,7 @@ pub fn handle_machine_click(
     mut active: ResMut<ActiveMenu>,
     mut active_machine: ResMut<ActiveCoffeeMachine>,
     cam_q: Query<&GlobalTransform, With<PlayerCamera>>,
-    machine_q: Query<Has<Brewing>, With<CoffeeMachine>>,
+    machine_q: Query<(Has<Brewing>, Has<MachineInUse>), With<CoffeeMachine>>,
     parent_q: Query<&ChildOf>,
     mut ray_cast: MeshRayCast,
 ) {
@@ -115,16 +141,16 @@ pub fn handle_machine_click(
     // Walk up the hierarchy from the hit mesh until we find a CoffeeMachine
     // ancestor (the hit lands on a deep mesh child of the scene root).
     let mut entity = hit_entity;
-    let (machine, is_brewing) = loop {
-        if let Ok(is_brewing) = machine_q.get(entity) {
-            break (entity, is_brewing);
+    let (machine, busy) = loop {
+        if let Ok((is_brewing, in_use)) = machine_q.get(entity) {
+            break (entity, is_brewing || in_use);
         }
         match parent_q.get(entity) {
             Ok(child_of) => entity = child_of.parent(),
             Err(_) => return,
         }
     };
-    if is_brewing {
+    if busy {
         return;
     }
 
@@ -248,7 +274,7 @@ pub fn sync_coffee_menu_ui(
                 TextColor(text_color),
             ))
             .with_child_owned((
-                Text::new(format!("{:.0}s", drink.brew_secs)),
+                Text::new(format!("${} - {} steps", drink.price, drink.steps.len())),
                 TextFont {
                     font_size: FontSize::Px(12.0),
                     ..default()
@@ -266,22 +292,20 @@ pub fn handle_drink_click(
     mut active: ResMut<ActiveMenu>,
     mut active_machine: ResMut<ActiveCoffeeMachine>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
-    machine_q: Query<(), (With<CoffeeMachine>, Without<Brewing>)>,
+    mut session: ResMut<BrewSession>,
+    machine_q: Query<(), (With<CoffeeMachine>, Without<Brewing>, Without<MachineInUse>)>,
 ) {
     for card in &pressed {
         let Some(drink) = DRINKS.get(card.index) else {
             continue;
         };
+        active.close();
         if let Some(machine) = active_machine.0
             && machine_q.get(machine).is_ok()
+            && session.start(&mut commands, machine, drink)
         {
-            commands.entity(machine).insert(Brewing {
-                drink: drink.name,
-                total_secs: drink.brew_secs,
-                elapsed: 0.0,
-            });
+            *active = ActiveMenu::Brew;
         }
-        active.close();
         active_machine.0 = None;
         // Swallow the click so the same press doesn't re-toggle the menu via
         // handle_machine_click or trigger placement.

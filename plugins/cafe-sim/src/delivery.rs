@@ -2,7 +2,8 @@
 //!
 //! Bridges the brewing system (`coffee_menu`) and the customer AI (`customer`):
 //! when the player clicks a machine whose `Brewing` is `ready()`, the drink
-//! becomes a yellow cube attached to the player camera. Clicking a countertop
+//! becomes a cube attached to the player camera (cream, or gold for a perfect
+//! drink). Clicking a countertop
 //! whose waiting customer ordered that same drink deposits the cube on the
 //! counter, awards the drink's price, and starts a 5s `ServedTimer`. When the
 //! timer elapses the counter cube despawns and the customer walks out (+Z).
@@ -13,7 +14,7 @@ use engine_api::{PlayerCamera, ToonMaterial};
 use crate::balance::{Balance, spawn_balance_popup};
 use crate::coffee_menu::Brewing;
 use crate::customer::{AngryFace, CUSTOMER_FLOAT, Customer, CustomerState, HappyFace, ServedTimer};
-use crate::drinks::price_for;
+use crate::drinks::{drink as drink_info, payout};
 use crate::grid::CafeAnchor;
 use crate::menus::ActiveMenu;
 use crate::pause_menu::GamePaused;
@@ -35,11 +36,26 @@ const SERVED_HOLD_SECS_WRONG: f32 = 1.0;
 pub struct DeliveryAssets {
     pub mesh: Handle<Mesh>,
     pub material: Handle<ToonMaterial>,
+    /// Worn by a perfect drink wherever it is: machine, hand, counter.
+    pub perfect_material: Handle<ToonMaterial>,
+}
+
+impl DeliveryAssets {
+    pub fn material_for(&self, perfect: bool) -> Handle<ToonMaterial> {
+        if perfect {
+            self.perfect_material.clone()
+        } else {
+            self.material.clone()
+        }
+    }
 }
 
 #[derive(Resource, Default)]
 pub struct CarriedDrink {
     pub drink: Option<&'static str>,
+    /// Copied from the machine's [`Brewing`] at pickup.
+    pub quality: f32,
+    pub perfect: bool,
     pub visual: Option<Entity>,
 }
 
@@ -61,8 +77,13 @@ pub fn init_delivery_assets(world: &mut World) {
     let mesh = world
         .resource_mut::<Assets<Mesh>>()
         .add(Cuboid::from_length(1.0));
-    let material = probe_lit_in(world, Color::srgb(1.0, 0.85, 0.2));
-    world.insert_resource(DeliveryAssets { mesh, material });
+    let material = probe_lit_in(world, Color::srgb(0.92, 0.88, 0.80));
+    let perfect_material = probe_lit_in(world, Color::srgb(1.0, 0.72, 0.1));
+    world.insert_resource(DeliveryAssets {
+        mesh,
+        material,
+        perfect_material,
+    });
 }
 
 /// Pickup: raycast the camera ray to a `CoffeeMachine` ancestor whose `Brewing`
@@ -109,6 +130,8 @@ pub fn handle_pickup_click(
     }
 
     carried.drink = Some(brewing.drink);
+    carried.quality = brewing.quality;
+    carried.perfect = brewing.perfect;
     commands.entity(machine).remove::<Brewing>();
     mouse.clear_just_pressed(MouseButton::Left);
 }
@@ -178,9 +201,12 @@ pub fn handle_delivery_click(
         SERVED_HOLD_SECS_WRONG
     };
 
-    if correct && let Some(price) = price_for(drink) {
-        balance.0 += price;
-        spawn_balance_popup(&mut commands, price);
+    let mut happy = false;
+    if correct && let Some(info) = drink_info(drink) {
+        let paid = payout(info.price, carried.quality, carried.perfect, 0.0);
+        balance.0 += paid.amount;
+        spawn_balance_popup(&mut commands, paid.amount, carried.perfect);
+        happy = !paid.unhappy;
     }
 
     commands.spawn_owned((
@@ -188,7 +214,7 @@ pub fn handle_delivery_click(
             customer: customer_entity,
         },
         Mesh3d(assets.mesh.clone()),
-        MeshMaterial3d(assets.material.clone()),
+        MeshMaterial3d(assets.material_for(carried.perfect)),
         anchor.place(
             Transform::from_translation(
                 anchor.cell_local(cell.0, cell.1) + Vec3::Y * COUNTER_DRINK_Y_OFFSET,
@@ -202,7 +228,7 @@ pub fn handle_delivery_click(
     customer_cmds.insert(ServedTimer {
         remaining: hold_secs,
     });
-    if correct {
+    if happy {
         customer_cmds.insert(HappyFace);
     } else {
         customer_cmds.insert(AngryFace);
@@ -285,7 +311,7 @@ pub fn manage_carried_visual(
             let cube = commands
                 .spawn_owned((
                     Mesh3d(assets.mesh.clone()),
-                    MeshMaterial3d(assets.material.clone()),
+                    MeshMaterial3d(assets.material_for(carried.perfect)),
                     Transform::from_translation(HAND_OFFSET).with_scale(Vec3::splat(HAND_SCALE)),
                 ))
                 .id();
@@ -335,7 +361,7 @@ pub fn tick_served_timer(
     }
 }
 
-/// Spawn a small yellow cube on top of any machine whose `Brewing` is `ready()`
+/// Spawn a small drink cube on top of any machine whose `Brewing` is `ready()`
 /// and doesn't already have one, and despawn cubes whose machine has dropped
 /// its `Brewing` (i.e. pickup happened) or vanished entirely. Mirrors the
 /// `manage_brew_popups` pattern in `coffee_menu`.
@@ -361,7 +387,7 @@ pub fn manage_ready_drinks(
         }
     }
 
-    for (machine, _brewing, gt) in machines_q.iter() {
+    for (machine, brewing, gt) in machines_q.iter() {
         if !ready_machines.contains(&machine) || already_has_cube.contains(&machine) {
             continue;
         }
@@ -371,7 +397,7 @@ pub fn manage_ready_drinks(
         commands.spawn_owned((
             ReadyDrink { machine },
             Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(assets.material.clone()),
+            MeshMaterial3d(assets.material_for(brewing.perfect)),
             anchor.place(
                 Transform::from_translation(Vec3::new(
                     over_machine.x,

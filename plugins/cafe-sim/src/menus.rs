@@ -20,6 +20,8 @@ pub enum ActiveMenu {
     Shop,
     ShopOverview,
     Coffee,
+    /// The brew station's minigame overlay (`drink_station.rs`).
+    Brew,
     HireStaff,
 }
 

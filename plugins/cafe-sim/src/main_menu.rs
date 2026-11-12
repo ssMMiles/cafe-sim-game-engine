@@ -70,9 +70,9 @@ pub struct MainMenuRoot;
 pub struct ShellStatusLabel;
 
 const SHELL_FOUND: &str = "Cafe shell found";
-const SHELL_LOADING: &str = "Loading the cafe shell…";
+const SHELL_LOADING: &str = "Loading the cafe shell...";
 const SHELL_MISSING: &str =
-    "No cafe shell in this level — place the cafe-shell prefab in the editor (F1) and save";
+    "No cafe shell in this level - place the cafe-shell prefab in the editor (F1) and save";
 
 #[derive(Component, Debug)]
 pub enum MainMenuButton {

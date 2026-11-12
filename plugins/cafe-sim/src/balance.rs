@@ -90,10 +90,17 @@ pub struct BalancePopup {
 
 const POPUP_GAIN_RGB: (f32, f32, f32) = (0.55, 1.0, 0.55);
 const POPUP_LOSS_RGB: (f32, f32, f32) = (1.0, 0.45, 0.45);
+const POPUP_PERFECT_RGB: (f32, f32, f32) = (1.0, 0.80, 0.30);
 
 /// Green `+$amount` floater shown when the player earns money.
-pub fn spawn_balance_popup(commands: &mut Commands, amount: i64) {
-    spawn_change_popup(commands, format!("+${amount}"), POPUP_GAIN_RGB);
+/// Green `+$amount` floater for money earned; gold with "PERFECT" for a
+/// perfect drink.
+pub fn spawn_balance_popup(commands: &mut Commands, amount: i64, perfect: bool) {
+    if perfect {
+        spawn_change_popup(commands, format!("+${amount}  PERFECT"), POPUP_PERFECT_RGB);
+    } else {
+        spawn_change_popup(commands, format!("+${amount}"), POPUP_GAIN_RGB);
+    }
 }
 
 /// Red `-$amount` floater shown when money is deducted (e.g. staff payroll).

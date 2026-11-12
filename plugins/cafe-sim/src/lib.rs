@@ -20,10 +20,12 @@ mod coffee_menu;
 mod cursor;
 mod customer;
 mod delivery;
+mod drink_station;
 mod drinks;
 mod grid;
 mod main_menu;
 mod menus;
+mod minigames;
 mod pause_menu;
 mod placement;
 mod saves;
@@ -57,6 +59,10 @@ use delivery::{
     CarriedDrink, cleanup_orphan_drinks, handle_delivery_click, handle_discard_click,
     handle_pickup_click, init_delivery_assets, manage_carried_visual, manage_ready_drinks,
     tick_served_timer,
+};
+use drink_station::{
+    BrewSession, end_brew_session_when_closed, handle_brew_cancel, sync_brew_overlay,
+    tick_brew_session,
 };
 use grid::{CafeAnchor, draw_floor_grid};
 use main_menu::{
@@ -125,6 +131,7 @@ impl DynamicPlugin for CafeSimPlugin {
         // loaded, and the "new game" path resets them via `apply_new_game`.
         world.insert_resource(ActiveMenu::default());
         world.insert_resource(ActiveCoffeeMachine::default());
+        world.insert_resource(BrewSession::default());
         world.insert_resource(CarriedDrink::default());
         world.insert_resource(ShopNameEditing::default());
         world.insert_resource(ShopState::default());
@@ -229,6 +236,15 @@ impl DynamicPlugin for CafeSimPlugin {
                         sync_active_coffee_machine,
                         build_shop_overview,
                         build_hire_menu,
+                    )
+                        .chain(),
+                    // Brew station minigames: after pause has had its chance
+                    // to close the menu, so a cancelled session ends this frame.
+                    (
+                        handle_brew_cancel,
+                        tick_brew_session,
+                        end_brew_session_when_closed,
+                        sync_brew_overlay,
                     )
                         .chain(),
                 )
