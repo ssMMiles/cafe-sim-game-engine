@@ -386,7 +386,7 @@ Chunk data uses rkyv zero-copy serialization. Heights are quantized u16 (0-65535
 
 ## Build System
 
-`build.rs` also stamps `BUILD_COMMIT` (short HEAD hash, re-run via `.git/HEAD` + the branch ref) into the binary, which every perf snapshot records. It generates `assets/asset_manifest.manifest` at compile time: `kind|name|asset_path` lines for meshes (first glTF per `assets/meshes/*/`, excluding `character/`), textures (`assets/textures/*.{png,jpg,jpeg}`) and audio (`assets/audio/*.{ogg,wav,mp3}`), loaded async via `AssetManifestLoader`. It exists because WASM cannot list directories. Prefabs are *not* in it — the `PrefabLibrary` discovers them at runtime.
+`build.rs` also stamps `BUILD_COMMIT` (short HEAD hash, re-run via HEAD + the branch ref, both resolved with `git rev-parse --git-path` so worktrees work) into the binary, which every perf snapshot records. **Every `rerun-if-changed` path must exist**: cargo treats a missing one as always stale, which re-ran the script and recompiled the engine on every build (the optional `assets/audio`, and a worktree's branch ref looked up in the wrong git dir). It generates `assets/asset_manifest.manifest` at compile time: `kind|name|asset_path` lines for meshes (first glTF per `assets/meshes/*/`, excluding `character/`), textures (`assets/textures/*.{png,jpg,jpeg}`) and audio (`assets/audio/*.{ogg,wav,mp3}`), loaded async via `AssetManifestLoader`. It exists because WASM cannot list directories. Prefabs are *not* in it — the `PrefabLibrary` discovers them at runtime.
 
 ## Assets Browser (`docs/ASSET_BROWSER_PLAN.md`)
 

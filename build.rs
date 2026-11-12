@@ -24,7 +24,13 @@ const LEGACY_MESH_MANIFEST: &str = "assets/meshes/manifest.manifest";
 
 fn main() {
     for dir in ["assets/meshes", "assets/textures", "assets/audio"] {
-        println!("cargo:rerun-if-changed={dir}");
+        // Cargo treats a watched path that doesn't exist as always stale, so
+        // watching the optional `assets/audio` made every build re-run this
+        // script and recompile the engine crate. A missing directory is
+        // simply not watched; creating it later needs `touch build.rs`.
+        if Path::new(dir).is_dir() {
+            println!("cargo:rerun-if-changed={dir}");
+        }
     }
     stamp_build_commit();
 
@@ -38,7 +44,9 @@ fn main() {
     );
     scan_flat("audio", "assets/audio", &["ogg", "wav", "mp3"], &mut lines);
 
-    if let Err(e) = fs::write(MANIFEST, &lines) {
+    // Leave an unchanged manifest alone, so its mtime only moves with content.
+    let unchanged = fs::read_to_string(MANIFEST).is_ok_and(|old| old == lines);
+    if !unchanged && let Err(e) = fs::write(MANIFEST, &lines) {
         println!("cargo:warning=Could not write {MANIFEST}: {e}");
         return;
     }
@@ -122,36 +130,50 @@ fn scan_flat(kind: &str, dir: &str, exts: &[&str], lines: &mut String) {
 /// watched paths changes, so the marker would routinely be stale in the
 /// direction that misleads (saying "clean" after an edit).
 fn stamp_build_commit() {
-    // Re-run when HEAD moves (checkout, and commits via the ref it names).
-    // `.git` is a *file* in a worktree, pointing at the real git dir.
-    let git_dir = match fs::read_to_string(".git") {
-        Ok(text) => text
-            .strip_prefix("gitdir:")
-            .map(|p| p.trim().to_string())
-            .unwrap_or_else(|| ".git".into()),
-        Err(_) => ".git".into(),
-    };
-    let head = Path::new(&git_dir).join("HEAD");
-    if let Ok(contents) = fs::read_to_string(&head) {
-        println!("cargo:rerun-if-changed={}", head.display());
-        if let Some(reference) = contents.strip_prefix("ref:") {
-            // Commits on this branch move the ref file, not HEAD itself.
-            // (A packed ref has no file; then the hash can go stale until
-            // something else re-runs this script.)
-            println!(
-                "cargo:rerun-if-changed={}",
-                Path::new(&git_dir).join(reference.trim()).display()
-            );
+    // Re-run when HEAD moves: checkout moves HEAD, commits move the branch
+    // ref it names. `git rev-parse --git-path` resolves both correctly in a
+    // worktree, where HEAD is private but branch refs live in the shared git
+    // dir. Only existing files are watched — cargo treats a missing watched
+    // path as always stale, which rebuilt the engine on every `cargo run`.
+    // A packed ref has no file of its own; `packed-refs` stands in for it.
+    let head = git_path("HEAD");
+    if let Some(head) = &head {
+        watch_if_exists(head);
+    }
+    if let Some(reference) = head
+        .and_then(|h| fs::read_to_string(h).ok())
+        .and_then(|c| c.strip_prefix("ref:").map(|r| r.trim().to_string()))
+    {
+        match git_path(&reference) {
+            Some(ref_file) if Path::new(&ref_file).is_file() => watch_if_exists(&ref_file),
+            _ => {
+                if let Some(packed) = git_path("packed-refs") {
+                    watch_if_exists(&packed);
+                }
+            }
         }
     }
 
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=BUILD_COMMIT={commit}");
+}
+
+fn git(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
         .output()
         .ok()
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|hash| !hash.is_empty())
-        .unwrap_or_else(|| "unknown".into());
-    println!("cargo:rustc-env=BUILD_COMMIT={commit}");
+        .filter(|s| !s.is_empty())
+}
+
+fn git_path(path: &str) -> Option<String> {
+    git(&["rev-parse", "--git-path", path])
+}
+
+fn watch_if_exists(path: &str) {
+    if Path::new(path).exists() {
+        println!("cargo:rerun-if-changed={path}");
+    }
 }
