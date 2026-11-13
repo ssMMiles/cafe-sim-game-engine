@@ -106,6 +106,15 @@ edition = "2024"
 # switch that feature on — not used directly.
 getrandom = { version = "0.4.1", features = ["wasm_js"] }
 
+# Not used by the engine itself. Plugins (cafe-sim) depend on rand, and a
+# dependency only a plugin has changes the unified feature set of crates the
+# engine shares with it (getrandom, zerocopy, ...) between `cargo build` and
+# `cargo build --workspace` — so bevy's metadata hash differs between the host
+# and the dylibs and the plugin loader rejects them with a TypeId mismatch.
+# Mirroring the dependency here keeps both builds on one feature set. Any
+# other plugin-only dependency needs the same treatment.
+rand = "0.10"
+
 # Terrain storage
 rkyv = { version = "0.8", features = ["bytecheck"] }
 crc32fast = "1.4"

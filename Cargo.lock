@@ -2962,6 +2962,7 @@ dependencies = [
  "libloading",
  "log",
  "naga",
+ "rand",
  "rayon",
  "rkyv",
  "serde",
