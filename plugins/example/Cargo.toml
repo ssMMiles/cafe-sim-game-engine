@@ -4,7 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["dylib"]
+# dylib: loaded and hot-reloaded by the host in native dev builds.
+# rlib: linked straight into the engine for web / `static-plugins` builds.
+# (rustc drops the dylib type on wasm with a warning.) docs/STATIC_PLUGINS_PLAN.md
+crate-type = ["dylib", "rlib"]
+
+[features]
+# The dylib's FFI exports (`engine_api::add!`) and bevy as a dylib — the same
+# one the host links, even when this crate is built alone. The engine depends
+# on plugins with `default-features = false`: in one binary the identically
+# named exports of two plugins would collide.
+default = ["dynamic"]
+dynamic = ["bevy/dynamic_linking"]
 
 [dependencies]
 engine-api = { path = "../../crates/engine-api" }

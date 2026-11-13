@@ -9,6 +9,7 @@ use std::collections::HashSet;
 /// Re-export so the `add!` macro can reference bevy via `$crate::bevy`.
 pub use bevy;
 
+pub mod lifecycle;
 pub mod script;
 pub mod toon_curve;
 pub mod toon_material;
@@ -97,7 +98,7 @@ pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 16;
 ///   the plugin's schedule and may spawn entities and insert resources.
 /// - [`teardown`](Self::teardown) runs when the plugin becomes inactive, and
 ///   before a hot-reload of an active plugin. Entities tagged with
-///   [`ScriptOwned`] are despawned automatically by the generated FFI shim
+///   [`ScriptOwned`] are despawned automatically by [`lifecycle::teardown`]
 ///   *after* `teardown` returns, so plugin-private components get their drop
 ///   fns called while the old code pages are still mapped.
 ///
@@ -150,11 +151,18 @@ impl ScriptOwned {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct AutoCollider;
 
-/// Exports a type implementing [`DynamicPlugin`] from a script dylib.
+/// Exports a type implementing [`DynamicPlugin`] from a plugin crate.
 ///
-/// Generates `plugin_setup`, `plugin_teardown`, `plugin_name`, and
-/// `plugin_abi_version` FFI entry points, plus a `pub const PLUGIN_NAME`
-/// usable inside the plugin (e.g. for `ScriptOwned { plugin: PLUGIN_NAME }`).
+/// Always generates a `pub const PLUGIN_NAME` (use it for
+/// `ScriptOwned::new(PLUGIN_NAME)`) and `pub fn plugin()`, the constructor a
+/// statically linking host lists in its `StaticPlugins`.
+///
+/// With the calling crate's `dynamic` feature on (every plugin's default) it
+/// also generates the dylib's FFI entry points — `plugin_register`,
+/// `plugin_setup`, `plugin_teardown`, `plugin_name`, `plugin_abi_version`.
+/// Those are off in static builds: every plugin exports the same symbol names,
+/// so two plugins linked into one binary would collide.
+/// `docs/STATIC_PLUGINS_PLAN.md`.
 ///
 /// All FFI bodies are wrapped in [`std::panic::catch_unwind`] so a plugin
 /// panic becomes a non-zero return code instead of unwinding across the FFI
@@ -183,13 +191,22 @@ macro_rules! add {
         /// Stable name for this plugin. Use with `ScriptOwned::new(PLUGIN_NAME)`.
         pub const PLUGIN_NAME: &str = $plugin_name;
 
+        /// Constructor for a statically linked build of this plugin; the host
+        /// lists it in `StaticPlugins` under [`PLUGIN_NAME`].
+        pub fn plugin() -> ::std::boxed::Box<dyn $crate::DynamicPlugin + Send + Sync> {
+            ::std::boxed::Box::new(<$plugin_type as ::std::default::Default>::default())
+        }
+
+        #[cfg(feature = "dynamic")]
         const __PLUGIN_NAME_C: &[u8] = ::std::concat!($plugin_name, "\0").as_bytes();
 
+        #[cfg(feature = "dynamic")]
         #[unsafe(no_mangle)]
         pub extern "C" fn plugin_name() -> *const ::std::os::raw::c_char {
             __PLUGIN_NAME_C.as_ptr() as *const ::std::os::raw::c_char
         }
 
+        #[cfg(feature = "dynamic")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugin_register(
             world_ptr: *mut ::std::ffi::c_void,
@@ -212,17 +229,7 @@ macro_rules! add {
                     return 2;
                 }
                 let plugin = <$plugin_type as ::std::default::Default>::default();
-                // `resource_scope` lifts the registry out of the world for the
-                // call, so `register` can take both without aliasing it.
-                world.resource_scope(
-                    |world, mut registry: $crate::bevy::prelude::Mut<$crate::ScriptRegistry>| {
-                        <$plugin_type as $crate::DynamicPlugin>::register(
-                            &plugin,
-                            world,
-                            &mut registry,
-                        );
-                    },
-                );
+                $crate::lifecycle::register(&plugin, world);
                 0
             }));
             match result {
@@ -231,6 +238,7 @@ macro_rules! add {
             }
         }
 
+        #[cfg(feature = "dynamic")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugin_setup(
             world_ptr: *mut ::std::ffi::c_void,
@@ -275,6 +283,7 @@ macro_rules! add {
             }
         }
 
+        #[cfg(feature = "dynamic")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugin_teardown(
             world_ptr: *mut ::std::ffi::c_void,
@@ -284,27 +293,8 @@ macro_rules! add {
                     &mut *(world_ptr as *mut $crate::bevy::prelude::World)
                 };
 
-                // User-defined cleanup runs first (custom resource/observer teardown).
                 let plugin = <$plugin_type as ::std::default::Default>::default();
-                <$plugin_type as $crate::DynamicPlugin>::teardown(&plugin, world);
-
-                // Auto-despawn entities carrying ScriptOwned for this plugin.
-                // Compare by string content (different dylibs may have
-                // different static-string addresses for the same literal).
-                let mut to_despawn: ::std::vec::Vec<$crate::bevy::prelude::Entity> =
-                    ::std::vec::Vec::new();
-                let mut query = world.query::<(
-                    $crate::bevy::prelude::Entity,
-                    &$crate::ScriptOwned,
-                )>();
-                for (entity, owned) in query.iter(world) {
-                    if owned.plugin == PLUGIN_NAME {
-                        to_despawn.push(entity);
-                    }
-                }
-                for entity in to_despawn {
-                    world.despawn(entity);
-                }
+                $crate::lifecycle::teardown(&plugin, PLUGIN_NAME, world);
                 0
             }));
             match result {
@@ -313,6 +303,7 @@ macro_rules! add {
             }
         }
 
+        #[cfg(feature = "dynamic")]
         #[unsafe(no_mangle)]
         pub extern "C" fn plugin_abi_version() -> u32 {
             $crate::ENGINE_SCRIPTS_ABI_VERSION

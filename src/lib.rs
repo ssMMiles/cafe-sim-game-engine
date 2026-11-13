@@ -26,6 +26,7 @@ mod menu;
 mod projects;
 mod script_host;
 mod settings;
+mod static_plugins;
 mod storage;
 mod ui;
 

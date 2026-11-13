@@ -17,6 +17,7 @@
 #   web-release       tools/web.sh release    (→ pkg/)          release   target/web-release
 #   web-check         cargo web-check                           dev       target/web
 #   profiling         cargo run-profiling                       dev       target/profiling
+#   static            cargo run-static | build-static | test-static  dev   target/static
 #
 # Profiles already get their own subdirectory, so `perf` shares `target/`
 # with dev without conflict; the separate dirs exist for *feature* changes.
@@ -26,6 +27,12 @@ build-plugins = "build --workspace --exclude engine"
 perf = "test --profile perf"
 web-check = "check --target wasm32-unknown-unknown --target-dir target/web"
 run-profiling = "run --features profiling --target-dir target/profiling"
+# Plugins linked into the binary instead of loaded as dylibs, and bevy linked
+# statically (`--no-default-features` drops `dynamic`): a self-contained
+# binary. Different bevy features → its own dir. docs/STATIC_PLUGINS_PLAN.md
+run-static = "run --no-default-features --features static-plugins --target-dir target/static"
+build-static = "build --no-default-features --features static-plugins --target-dir target/static"
+test-static = "test --no-default-features --features static-plugins --target-dir target/static"
 
 # sccache: shares compiled dependency artifacts across target dirs and
 # worktrees, so a new configuration or a second worktree hits the cache for

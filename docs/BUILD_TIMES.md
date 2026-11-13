@@ -18,7 +18,8 @@ lowering for it (issue #171); the only workaround is glam `scalar-math`,
 which costs runtime SIMD everywhere. Moving
 `dynamic_linking` out of the workspace features (plugins must link the same
 bevy dylib as the host; `cargo build-plugins` builds them alone, so a
-per-crate toggle would silently give them a static bevy), and per-config
+per-crate toggle would silently give them a static bevy — done 2026-11-13 by
+giving the plugins the toggle too, §3), and per-config
 target dirs (a workflow choice, not a manifest change).
 
 Corrections found while applying: `mesh_picking` **is** used (the editor's
@@ -156,12 +157,15 @@ bevy = { version = "0.20", default-features = false, features = [
   speeds up *our* crate's codegen on every incremental build; deps at
   `opt-level = 3` should stay on LLVM (`[profile.dev.package."*"]
   codegen-backend = "llvm"`), which is also what keeps the game fast.
-- **`dynamic_linking`** in the workspace bevy features is right for dev
-  (it is what makes the incremental link fast). Bevy excludes `bevy_dylib`
-  on wasm itself, so the web build is unaffected. It *is* on for native
-  `--release` too, which costs runtime (no LTO across bevy) rather than
-  build time — move it to a `dev` feature or `cargo run --features
-  bevy/dynamic_linking` when a release native binary matters.
+- **`dynamic_linking`** is right for dev (it is what makes the incremental
+  link fast). Bevy excludes `bevy_dylib` on wasm itself, so the web build is
+  unaffected. Since 2026-11-13 it is not in the workspace bevy features but
+  in the engine's and every plugin's default `dynamic` feature (so
+  `cargo build-plugins` still gets it), and `cargo build-static` /
+  `run-static` turn it off for a self-contained binary — required there, not
+  just faster: with it on, rustc links plugins' dylib form and the static
+  build fails (`docs/STATIC_PLUGINS_PLAN.md`). It is still on for plain
+  native `--release`.
 - **Linker: lld, applied 2026-11-04.** `-Clink-arg=-fuse-ld=lld` in the
   `[target.aarch64-apple-darwin]` table. Measured on this project, `touch
   src/lib.rs` then `cargo build`:

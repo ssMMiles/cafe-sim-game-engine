@@ -31,9 +31,12 @@ bevy = { version = "0.20", default-features = false, features = [
     "png", "jpeg",
     # web build (WEBGL2 is a compile-time cfg; we ship webgpu only)
     "web", "webgpu",
-    # system names in spans / wgpu labels; fast incremental native link
+    # system names in spans / wgpu labels
     "debug",
-    "dynamic_linking",
+    # `dynamic_linking` (fast incremental native link) is not here: the engine's
+    # and every plugin's default `dynamic` feature switches it on, so every dev
+    # build — `cargo build-plugins` included — links the one bevy dylib, while
+    # `static-plugins` builds turn it off and produce a self-contained binary.
 ] }
 
 [[bin]]
@@ -45,6 +48,12 @@ name = "game_engine_lib"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = ["dynamic"]
+# Native dev: bevy as a dylib (fast incremental link; plugin dylibs load
+# against the same one). Plugins mirror it in their own `dynamic` feature.
+# Off only for `static-plugins` builds (`--no-default-features`). Bevy
+# excludes `bevy_dylib` on wasm itself. docs/STATIC_PLUGINS_PLAN.md
+dynamic = ["bevy/dynamic_linking"]
 # Every feature below changes bevy's or avian's feature set and therefore
 # rebuilds them. Each has its own build configuration (alias + target dir)
 # in .cargo/config.toml — never pass them by hand. See docs/BUILD_TIMES.md §4.
@@ -56,6 +65,11 @@ opfs = []
 # stutters with it, not steady-state frame time. `tools/web-trace.mjs`
 # records and summarises a run. Build: `tools/web.sh profile`.
 web-profile = ["bevy/trace"]
+# Link every plugin into the binary instead of loading dylibs — a native
+# single binary. The web build always does this (the wasm dependency table
+# below), so it needs no feature. Own target dir: `cargo run-static`.
+# docs/STATIC_PLUGINS_PLAN.md
+static-plugins = ["dep:cafe-sim", "dep:example", "dep:example2"]
 
 # Build profiles — see docs/BUILD_TIMES.md for the reasoning behind each.
 # There are exactly four: dev (all native work), perf (benchmarks), web-dev
@@ -150,8 +164,16 @@ bytemuck = { version = "1", features = ["derive"] }
 exr = "1.73"
 half = "2.6"
 engine-api = { path = "crates/engine-api" }
-libloading = "0.8"
 toml = "0.8"
+
+# Plugins, linked statically. Never a plain dependency: in the default dev
+# build the engine must not depend on any plugin, or editing one rebuilds the
+# engine. `default-features = false` drops their dylib FFI exports, which would
+# collide between plugins. Keep in step with the wasm table and the
+# `static-plugins` feature (`static_plugins.rs` tests both).
+cafe-sim = { path = "plugins/cafe-sim", default-features = false, optional = true }
+example = { path = "plugins/example", default-features = false, optional = true }
+example2 = { path = "plugins/example2", default-features = false, optional = true }
 
 # World bundles (File → Export world as zip): the exporter is native-only, the
 # web page unpacks the archive with its own JavaScript. Reading support is
@@ -159,8 +181,14 @@ toml = "0.8"
 # the only codec the bundles use.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Plugin dylibs (script_host); wasm only ever links plugins statically.
+libloading = "0.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# wasm has no dylibs, so the web build always links every plugin in.
+cafe-sim = { path = "plugins/cafe-sim", default-features = false }
+example = { path = "plugins/example", default-features = false }
+example2 = { path = "plugins/example2", default-features = false }
 wasm-bindgen = "0.2.111"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
