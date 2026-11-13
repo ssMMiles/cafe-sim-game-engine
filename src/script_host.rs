@@ -389,6 +389,15 @@ fn run_register(world: &mut World, plugin_id: &str, register_fn: PluginRegisterF
 
     match result {
         Ok(0) => true,
+        Ok(2) => {
+            bevy::log::error!(
+                "[scripts] '{plugin_id}' TypeId mismatch — the dylib was compiled against \
+                 different bevy metadata than the engine. Rebuild both together \
+                 (cargo build --workspace) and restart; a dependency only a plugin has \
+                 must be mirrored in the engine's Cargo.toml."
+            );
+            false
+        }
         Ok(code) => {
             bevy::log::error!("[scripts] '{plugin_id}' plugin_register returned error code {code}");
             false

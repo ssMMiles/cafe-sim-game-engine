@@ -198,6 +198,19 @@ macro_rules! add {
                 let world = unsafe {
                     &mut *(world_ptr as *mut $crate::bevy::prelude::World)
                 };
+                // The host always inserts the registry, so not finding it means
+                // this dylib resolved `ScriptRegistry` to a different TypeId:
+                // it was built against different bevy/engine-api metadata.
+                // Report that (code 2, like `plugin_setup`) rather than letting
+                // `resource_scope` panic into an anonymous code 1.
+                if !world.contains_resource::<$crate::ScriptRegistry>() {
+                    ::std::eprintln!(
+                        "[scripts] TypeId mismatch: ScriptRegistry not found from the DLL. \
+                         It was compiled against different bevy metadata. Rebuild the \
+                         full workspace and restart."
+                    );
+                    return 2;
+                }
                 let plugin = <$plugin_type as ::std::default::Default>::default();
                 // `resource_scope` lifts the registry out of the world for the
                 // call, so `register` can take both without aliasing it.
