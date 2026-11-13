@@ -13,6 +13,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{ClearColorConfig, RenderTarget, visibility::RenderLayers};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use std::collections::HashMap;
@@ -89,6 +90,10 @@ pub fn init_thumbnails(world: &mut World) {
                 ..default()
             },
             RenderTarget::Image(image_handle.clone().into()),
+            // The default (TonyMcMapFace) needs bevy's `tonemapping_luts`
+            // feature, which the engine doesn't build; it logged an error per
+            // camera. Linear is what the main camera uses too.
+            Tonemapping::Linear,
             Transform::from_translation(origin + cam_offset).looking_at(origin, Vec3::Y),
             layers.clone(),
             ThumbnailCamera { frames_left: None },
