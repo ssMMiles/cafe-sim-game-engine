@@ -7,10 +7,10 @@ use bevy::prelude::*;
 
 use super::StorageError;
 
-// See the note on `StorageError`: this is the native half of the `Storage`
-// abstraction, currently only exercised on the wasm path.
+// See the note on `StorageError`: the native half of the `Storage`
+// abstraction. Plugin files (`plugin_files.rs`) use `save`/`load`/`list_keys`.
 #[allow(dead_code)]
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct NativeStorage {
     base_path: PathBuf,
 }

@@ -3,6 +3,7 @@
 //! into [`CafePhase::Playing`].
 
 use bevy::{picking::hover::Hovered, prelude::*, ui::Pressed, ui_widgets::Button};
+use engine_api::PluginFiles;
 
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
@@ -33,17 +34,18 @@ pub struct SlotBackButton;
 // Systems
 // ----------------------------------------------------------------------------
 
-/// Build the picker. Re-probes every slot from disk so the cards always
-/// reflect current state — cheap because there are only 4 files.
+/// Build the picker. Re-probes every slot so the cards always reflect
+/// current state — cheap: the host mirrors the files in memory.
 pub fn build_slot_picker(
     commands: &mut Commands,
     theme: &UiTheme,
     mode: SlotPickerMode,
     cache: &mut SlotMetadataCache,
+    files: &PluginFiles,
 ) {
     cache.0.clear();
     for slot in 1..=SLOT_COUNT {
-        cache.0.insert(slot, saves::probe_slot(slot));
+        cache.0.insert(slot, saves::probe_slot(files, slot));
     }
 
     let title = match mode {
@@ -181,6 +183,7 @@ pub fn handle_slot_picker_buttons(
     slots_pressed: Query<&SlotButton, Added<Pressed>>,
     back_pressed: Query<(), (Added<Pressed>, With<SlotBackButton>)>,
     cache: Res<SlotMetadataCache>,
+    files: Res<PluginFiles>,
     mut phase: ResMut<CafePhase>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut commands: Commands,
@@ -219,31 +222,33 @@ pub fn handle_slot_picker_buttons(
         let slot = slot.0;
         let status = cache.0.get(&slot).cloned().unwrap_or(SlotStatus::Empty);
         match (mode, status) {
-            (SlotPickerMode::LoadGame, SlotStatus::Occupied(_)) => match saves::load_slot(slot) {
-                Ok(Some(file)) => {
-                    saves::apply_save(
-                        &file,
-                        &mut commands,
-                        &asset_server,
-                        &mut occupancy,
-                        &mut shop,
-                        &mut balance,
-                        &mut day_start,
-                        &mut time,
-                        &mut cafe_open,
-                        &mut staff,
-                        &anchor,
-                    );
-                    *phase = CafePhase::Playing { slot };
-                    info!("Loaded cafe-sim slot {slot}");
+            (SlotPickerMode::LoadGame, SlotStatus::Occupied(_)) => {
+                match saves::load_slot(&files, slot) {
+                    Ok(Some(file)) => {
+                        saves::apply_save(
+                            &file,
+                            &mut commands,
+                            &asset_server,
+                            &mut occupancy,
+                            &mut shop,
+                            &mut balance,
+                            &mut day_start,
+                            &mut time,
+                            &mut cafe_open,
+                            &mut staff,
+                            &anchor,
+                        );
+                        *phase = CafePhase::Playing { slot };
+                        info!("Loaded cafe-sim slot {slot}");
+                    }
+                    Ok(None) => {
+                        warn!("Slot {slot} disappeared between probe and load");
+                    }
+                    Err(e) => {
+                        error!("Failed to load slot {slot}: {e}");
+                    }
                 }
-                Ok(None) => {
-                    warn!("Slot {slot} disappeared between probe and load");
-                }
-                Err(e) => {
-                    error!("Failed to load slot {slot}: {e}");
-                }
-            },
+            }
             (SlotPickerMode::LoadGame, _) => {
                 // Empty or incompatible — ignore click.
             }

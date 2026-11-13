@@ -10,6 +10,7 @@ use std::collections::HashSet;
 pub use bevy;
 
 pub mod lifecycle;
+pub mod plugin_files;
 pub mod script;
 pub mod toon_curve;
 pub mod toon_material;
@@ -18,6 +19,7 @@ pub use script::{
     LevelDataHooks, PropDef, PropDefault, PropValue, RegisteredScript, ScriptBinding,
     ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
 };
+pub use plugin_files::{FileRead, PluginFiles};
 pub use toon_curve::ToonCurve;
 pub use toon_material::{
     DefaultToonLightmap, ProbeVolumeImages, TOON_DOUBLE_SIDED_DEF, ToonMaterial, ToonMaterialKey,
@@ -74,7 +76,10 @@ pub use unlit_material::{UnlitMaterial, UnlitUniform};
 ///   one on a mesh gets nothing on screen. `ToonMaterial` with
 ///   `shading.unlit = 1` is the opaque flat colour, this is the translucent
 ///   one.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 16;
+/// - 17: [`PluginFiles`] — per-plugin persistent files, mirrored in memory by
+///   the host (OPFS on the web). A plugin that writes them needs a host that
+///   provides the resource.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 17;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///

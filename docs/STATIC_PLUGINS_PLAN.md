@@ -1,6 +1,6 @@
 # Static plugins: one plugin codebase, dylib in dev, compiled-in for web/release
 
-Status: **Steps 1–2 landed 2026-11-13** (host backend split; crates, features, static list). Steps 3–4 open.
+Status: **Steps 1–3 landed 2026-11-13** (host backend split; crates, features, static list; plugin files). Step 4 open.
 
 ## Why
 
@@ -85,8 +85,11 @@ normally on unload rather than `mem::forget`-ed.
   default feature `dynamic` and each plugin's `dynamic` turn it on, so in every
   existing configuration bevy's feature set — and hash — is exactly what it
   was (checked: dev, `--workspace` and web rebuilt only our crates). Plugins
-  carry it themselves because `cargo build-plugins` builds them without the
-  engine (`docs/BUILD_TIMES.md` §3 warned about exactly that).
+  carry it themselves so a plugin built on its own still links the bevy
+  dylib (`docs/BUILD_TIMES.md` §3 warned about exactly that). Separately,
+  `cargo build-plugins` was `--workspace --exclude engine`, which resolved
+  bevy with fewer features than the host and so produced dylibs the loader
+  rejected; it is plain `--workspace` now.
 - Engine `Cargo.toml`: each plugin is an optional `default-features = false`
   dependency behind `static-plugins`, and a plain one in the wasm table — the
   web build (`tools/web.sh`, `cargo web-check`, CI's `wasm-pack`) links them
@@ -108,11 +111,27 @@ block the others have, three lines in the engine's `Cargo.toml` (optional dep,
 wasm dep, `static-plugins` entry) and one in `static_plugins::all`. The test
 names whichever is missing.
 
-### 3. Plugin storage
+### 3. Plugin files (done)
 
-`plugins/cafe-sim/src/saves.rs` uses `std::fs`. engine-api grows a small async
-storage API (OPFS on web, `fs` native — the engine's `storage/` module already
-has both halves) that plugins call instead. Only plugin-side blocker found.
+OPFS is async-only, so a plugin can't do a blocking read on the web. Rather
+than make plugin save code async, the host mirrors each plugin's folder in
+memory: `engine_api::PluginFiles` (resource, ABI 17).
+
+- Folder: `projects/{project}/saves/{plugin}/` — under the working dir
+  natively, the same key in OPFS. Keys are plain relative paths
+  (`is_valid_key`).
+- `src/plugin_files.rs` (host): on plugin load, reads the folder on the
+  `IoTaskPool` through the engine's `Storage` and lands it in an inbox
+  (`Arc<Mutex>` — the futures aren't `Send` on wasm); `apply_loaded_folders`
+  hands it over. Until then `read` says `FileRead::Loading`, after it
+  `Missing`/`Present`. A read error still marks the folder loaded, or the
+  plugin would wait forever.
+- `write` updates the mirror at once and queues the bytes; `flush_writes`
+  (`Last`) spawns the writes; `release` flushes and drops the mirror on
+  unload — needed because cafe-sim saves on Quit and the unload runs on the
+  next state transition. Fire-and-forget: a failed write is only logged.
+- cafe-sim: `saves.rs` reads/writes `slot{n}.bin` through it; the main menu
+  waits for `is_loaded` as it waits for the shell ("Reading save files...").
 
 ### 4. Move the character controller into cafe-sim
 
@@ -127,7 +146,6 @@ script already does that job).
   plugin calls contains nothing there; a plugin panic kills the tab.
 - **`rand` on wasm:** covered by the engine's `getrandom` `wasm_js` pin —
   `cargo web-check` builds cafe-sim cleanly.
-- **Saves on wasm:** cafe-sim's `load_raw`/`save_raw` are stubs there (step 3).
 - **rustc warns** `dropping unsupported crate type dylib` once per plugin on
   wasm. Expected; crate types can't be per-target.
 - **Project manifests still decide** which plugins a project *uses*; the static

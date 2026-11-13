@@ -1,17 +1,17 @@
 //! Cafe-sim save slots.
 //!
-//! Four fixed slots persisted to disk at
-//! `projects/cafe-sim/saves/slot{1..4}.bin`, relative to the current working
-//! directory (matches the convention used by the engine's `NativeStorage`).
-//!
-//! On wasm this module degrades to no-ops — the game still runs, slots just
-//! always read back as empty. Adding wasm persistence later means routing
-//! load/save through the engine's OPFS-backed storage.
+//! Four fixed slots, `slot{1..4}.bin` in this plugin's
+//! [`PluginFiles`] folder — `projects/{project}/saves/cafe-sim/` on disk
+//! natively, the same key in OPFS on the web. Reads come from the host's
+//! in-memory mirror and writes are persisted in the background, so the main
+//! menu waits for [`PluginFiles::is_loaded`] before offering the slots.
 
 use bevy::prelude::*;
+use engine_api::{FileRead, PluginFiles};
 use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::collections::HashMap;
 
+use crate::PLUGIN_NAME;
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
 use crate::catalog;
@@ -31,9 +31,9 @@ pub const SAVE_VERSION: u32 = 3;
 
 pub const SLOT_COUNT: u8 = 4;
 
-/// Storage key (path) for a given slot. Slots are 1-indexed in the UI.
-pub fn slot_key(slot: u8) -> String {
-    format!("projects/cafe-sim/saves/slot{slot}.bin")
+/// [`PluginFiles`] key for a given slot. Slots are 1-indexed in the UI.
+fn slot_key(slot: u8) -> String {
+    format!("slot{slot}.bin")
 }
 
 // ----------------------------------------------------------------------------
@@ -235,10 +235,10 @@ pub fn deserialize(bytes: &[u8]) -> Result<CafeSaveFile, String> {
 
 /// Probe a slot and return its status. Used to populate
 /// [`SlotMetadataCache`] when the slot picker opens.
-pub fn probe_slot(slot: u8) -> SlotStatus {
-    match load_raw(slot) {
-        Ok(None) => SlotStatus::Empty,
-        Ok(Some(bytes)) => match deserialize(&bytes) {
+pub fn probe_slot(files: &PluginFiles, slot: u8) -> SlotStatus {
+    match files.read(PLUGIN_NAME, &slot_key(slot)) {
+        FileRead::Missing => SlotStatus::Empty,
+        FileRead::Present(bytes) => match deserialize(bytes) {
             Ok(file) => SlotStatus::Occupied(SlotInfo {
                 shop_name: file.shop_name,
                 day: file.day,
@@ -249,58 +249,26 @@ pub fn probe_slot(slot: u8) -> SlotStatus {
                 SlotStatus::Incompatible
             }
         },
-        Err(e) => {
-            warn!("slot {slot} read error: {e}");
+        // The main menu doesn't open the picker before the files are read;
+        // if it ever does, don't let New Game treat a real save as empty.
+        FileRead::Loading => {
+            warn!("slot {slot} probed before the save files were read");
             SlotStatus::Incompatible
         }
     }
 }
 
-/// Load and deserialize a slot's save file. `Ok(None)` if the file
-/// doesn't exist.
-pub fn load_slot(slot: u8) -> Result<Option<CafeSaveFile>, String> {
-    match load_raw(slot)? {
-        None => Ok(None),
-        Some(bytes) => deserialize(&bytes).map(Some),
+/// Load and deserialize a slot's save file. `Ok(None)` if there is none.
+pub fn load_slot(files: &PluginFiles, slot: u8) -> Result<Option<CafeSaveFile>, String> {
+    match files.read(PLUGIN_NAME, &slot_key(slot)) {
+        FileRead::Present(bytes) => deserialize(bytes).map(Some),
+        FileRead::Missing => Ok(None),
+        FileRead::Loading => Err("save files are still being read".into()),
     }
 }
 
-/// Write a save file to a slot. Creates parent dirs if needed.
-pub fn save_slot(slot: u8, file: &CafeSaveFile) -> Result<(), String> {
-    let bytes = serialize(file)?;
-    save_raw(slot, &bytes)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn load_raw(slot: u8) -> Result<Option<Vec<u8>>, String> {
-    use std::fs;
-    use std::io::ErrorKind;
-    let path = slot_key(slot);
-    match fs::read(&path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("read {path}: {e}")),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn save_raw(slot: u8, bytes: &[u8]) -> Result<(), String> {
-    use std::fs;
-    use std::path::Path;
-    let path = slot_key(slot);
-    if let Some(parent) = Path::new(&path).parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    fs::write(&path, bytes).map_err(|e| format!("write {path}: {e}"))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn load_raw(_slot: u8) -> Result<Option<Vec<u8>>, String> {
-    Ok(None)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn save_raw(_slot: u8, _bytes: &[u8]) -> Result<(), String> {
-    warn!("save not implemented on wasm — skipping");
+/// Write a save file to a slot. Persisted by the host in the background.
+pub fn save_slot(files: &mut PluginFiles, slot: u8, file: &CafeSaveFile) -> Result<(), String> {
+    files.write(PLUGIN_NAME, &slot_key(slot), serialize(file)?);
     Ok(())
 }

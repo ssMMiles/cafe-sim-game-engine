@@ -23,7 +23,12 @@
 # with dev without conflict; the separate dirs exist for *feature* changes.
 
 [alias]
-build-plugins = "build --workspace --exclude engine"
+# Plugins *with* the engine selected: excluding it resolves bevy with fewer
+# features than the host (bevy_gizmos, serde/glam extras, getrandom/wasm_js
+# come from the engine's other deps), so the dylibs got a different bevy hash
+# and the loader rejected them with a TypeId mismatch. The engine never
+# depends on a plugin in this config, so a plugin edit still doesn't rebuild it.
+build-plugins = "build --workspace"
 perf = "test --profile perf"
 web-check = "check --target wasm32-unknown-unknown --target-dir target/web"
 run-profiling = "run --features profiling --target-dir target/profiling"

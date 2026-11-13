@@ -23,6 +23,7 @@ use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
 mod editor;
 mod game;
 mod menu;
+mod plugin_files;
 mod projects;
 mod script_host;
 mod settings;

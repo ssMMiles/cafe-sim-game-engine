@@ -10,15 +10,17 @@
 //! ```
 //!
 //! New Game and Load Game wait for the level's cafe shell (see
-//! [`crate::cafe_scene`]): a status line under the title says whether it has
-//! been found, and the buttons do nothing until it has.
+//! [`crate::cafe_scene`]) and for the host to have read the save files (see
+//! [`crate::saves`]): a status line under the title says which is missing,
+//! and the buttons do nothing until both are there.
 //!
 //! All UI here is `ScriptOwned`, so the existing plugin teardown handles
 //! cleanup when the player drops back to the engine main menu.
 
 use bevy::{prelude::*, ui::Pressed};
-use engine_api::AppState;
+use engine_api::{AppState, PluginFiles};
 
+use crate::PLUGIN_NAME;
 use crate::grid::CafeAnchor;
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 use crate::ui::{ButtonVariant, UiExt, UiTheme};
@@ -71,6 +73,7 @@ pub struct ShellStatusLabel;
 
 const SHELL_FOUND: &str = "Cafe shell found";
 const SHELL_LOADING: &str = "Loading the cafe shell...";
+const SAVES_LOADING: &str = "Reading save files...";
 const SHELL_MISSING: &str =
     "No cafe shell in this level - place the cafe-shell prefab in the editor (F1) and save";
 
@@ -81,7 +84,12 @@ pub enum MainMenuButton {
     Quit,
 }
 
-pub fn build_main_menu(commands: &mut Commands, theme: &UiTheme, anchor: &CafeAnchor) {
+pub fn build_main_menu(
+    commands: &mut Commands,
+    theme: &UiTheme,
+    anchor: &CafeAnchor,
+    files: &PluginFiles,
+) {
     commands
         .spawn_owned((
             MainMenuRoot,
@@ -99,7 +107,7 @@ pub fn build_main_menu(commands: &mut Commands, theme: &UiTheme, anchor: &CafeAn
         ))
         .with_children(|parent| {
             parent.ui_title("Cafe Sim", theme);
-            let (text, color) = shell_status(anchor, theme);
+            let (text, color) = menu_status(anchor, files, theme);
             parent
                 .spawn_owned((
                     ShellStatusLabel,
@@ -139,8 +147,16 @@ pub fn build_main_menu(commands: &mut Commands, theme: &UiTheme, anchor: &CafeAn
         });
 }
 
-fn shell_status(anchor: &CafeAnchor, theme: &UiTheme) -> (&'static str, Color) {
+/// Whether New Game / Load Game may proceed.
+fn ready(anchor: &CafeAnchor, files: &PluginFiles) -> bool {
+    anchor.is_resolved() && files.is_loaded(PLUGIN_NAME)
+}
+
+fn menu_status(anchor: &CafeAnchor, files: &PluginFiles, theme: &UiTheme) -> (&'static str, Color) {
     match (anchor.is_resolved(), anchor.is_loading()) {
+        // The slot picker reads every slot, so it waits for the files (a
+        // moment natively, an async OPFS read on the web).
+        (true, _) if !files.is_loaded(PLUGIN_NAME) => (SAVES_LOADING, theme.text_dim),
         (true, _) => (SHELL_FOUND, theme.text_dim),
         // Its glTF is still streaming; the grid's size isn't known yet.
         (_, true) => (SHELL_LOADING, theme.text_dim),
@@ -148,18 +164,19 @@ fn shell_status(anchor: &CafeAnchor, theme: &UiTheme) -> (&'static str, Color) {
     }
 }
 
-/// Keep the status line in step with the anchor — the shell can stream in
-/// (or be lost) while the menu is up.
+/// Keep the status line in step with the anchor and the save files — the
+/// shell can stream in (or be lost) and the files land while the menu is up.
 pub fn sync_shell_status(
     anchor: Res<CafeAnchor>,
+    files: Res<PluginFiles>,
     theme: Res<UiTheme>,
     labels: Query<&Children, With<ShellStatusLabel>>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
-    if !anchor.is_changed() {
+    if !anchor.is_changed() && !files.is_changed() {
         return;
     }
-    let (text, color) = shell_status(&anchor, &theme);
+    let (text, color) = menu_status(&anchor, &files, &theme);
     for children in &labels {
         for child in children.iter() {
             if let Ok((mut t, mut c)) = texts.get_mut(child) {
@@ -173,6 +190,7 @@ pub fn sync_shell_status(
 pub fn handle_main_menu_buttons(
     pressed: Query<&MainMenuButton, Added<Pressed>>,
     anchor: Res<CafeAnchor>,
+    files: Res<PluginFiles>,
     mut phase: ResMut<CafePhase>,
     mut app_state: ResMut<NextState<AppState>>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
@@ -180,10 +198,14 @@ pub fn handle_main_menu_buttons(
     for action in &pressed {
         match action {
             // Both paths end in `apply_save`/`apply_new_game` against the
-            // anchor, so neither may start without a shell; the status line
-            // already says why.
-            MainMenuButton::NewGame | MainMenuButton::LoadGame if !anchor.is_resolved() => {
-                warn!("[cafe-sim] cannot start: no cafe shell in this level");
+            // anchor, so neither may start without a shell, and the picker
+            // needs the save files; the status line already says which.
+            MainMenuButton::NewGame | MainMenuButton::LoadGame if !ready(&anchor, &files) => {
+                warn!(
+                    "[cafe-sim] cannot start yet (shell resolved: {}, save files read: {})",
+                    anchor.is_resolved(),
+                    files.is_loaded(PLUGIN_NAME)
+                );
             }
             MainMenuButton::NewGame => {
                 *phase = CafePhase::SlotPicker(SlotPickerMode::NewGame);

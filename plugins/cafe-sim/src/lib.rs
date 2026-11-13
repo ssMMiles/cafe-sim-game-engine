@@ -9,7 +9,8 @@
 
 use bevy::prelude::*;
 use engine_api::{
-    DynamicPlugin, Player, PlayerCamera, ScriptBinding, ScriptRegistry, ScriptSchema, add,
+    DynamicPlugin, Player, PlayerCamera, PluginFiles, ScriptBinding, ScriptRegistry, ScriptSchema,
+    add,
 };
 
 mod balance;
@@ -303,6 +304,7 @@ fn apply_phase_transitions(
     mut commands: Commands,
     theme: Res<UiTheme>,
     mut cache: ResMut<SlotMetadataCache>,
+    files: Res<PluginFiles>,
     balance: Res<Balance>,
     time: Res<GameTime>,
     anchor: Res<CafeAnchor>,
@@ -337,10 +339,10 @@ fn apply_phase_transitions(
 
     match curr {
         CafePhase::MainMenu => {
-            build_main_menu(&mut commands, &theme, &anchor);
+            build_main_menu(&mut commands, &theme, &anchor, &files);
         }
         CafePhase::SlotPicker(mode) => {
-            build_slot_picker(&mut commands, &theme, mode, &mut cache);
+            build_slot_picker(&mut commands, &theme, mode, &mut cache, &files);
         }
         CafePhase::Playing { .. } => {
             // The slot-picker click handler has already applied save data

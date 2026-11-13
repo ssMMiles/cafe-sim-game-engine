@@ -9,7 +9,7 @@
 //! `PauseMenuState`), which is editor-only.
 
 use bevy::{prelude::*, ui::Pressed};
-use engine_api::AppState;
+use engine_api::{AppState, PluginFiles};
 
 use crate::balance::DayStartBalance;
 use crate::main_menu::CafePhase;
@@ -123,6 +123,7 @@ pub fn handle_pause_buttons(
     time: Res<GameTime>,
     staff: Res<Staff>,
     pieces_q: Query<(&PlacedCell, &CafePiece)>,
+    mut files: ResMut<PluginFiles>,
 ) {
     for action in &pressed {
         match action {
@@ -130,13 +131,17 @@ pub fn handle_pause_buttons(
                 paused.0 = false;
             }
             PauseMenuButton::Save => {
-                save_active_slot(&phase, &shop, &day_start, &time, &staff, &pieces_q);
+                save_active_slot(
+                    &mut files, &phase, &shop, &day_start, &time, &staff, &pieces_q,
+                );
             }
             PauseMenuButton::Exit => {
                 // Auto-save the active slot before dropping back to the
                 // engine main menu — the plugin is about to be torn down
                 // and any unsaved state would be lost.
-                save_active_slot(&phase, &shop, &day_start, &time, &staff, &pieces_q);
+                save_active_slot(
+                    &mut files, &phase, &shop, &day_start, &time, &staff, &pieces_q,
+                );
                 paused.0 = false;
                 app_state.set(AppState::MainMenu);
             }
@@ -145,6 +150,7 @@ pub fn handle_pause_buttons(
 }
 
 fn save_active_slot(
+    files: &mut PluginFiles,
     phase: &CafePhase,
     shop: &ShopState,
     day_start: &DayStartBalance,
@@ -157,7 +163,7 @@ fn save_active_slot(
     };
     let pieces: Vec<(PlacedCell, CafePiece)> = pieces_q.iter().map(|(c, p)| (*c, *p)).collect();
     let file = saves::capture_state(shop, day_start, time, staff, &pieces);
-    match saves::save_slot(slot, &file) {
+    match saves::save_slot(files, slot, &file) {
         Ok(()) => info!("Saved cafe-sim slot {slot}"),
         Err(e) => error!("Save to slot {slot} failed: {e}"),
     }

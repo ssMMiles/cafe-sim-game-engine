@@ -127,6 +127,7 @@ pub struct ScriptHostPlugin;
 
 impl Plugin for ScriptHostPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(crate::plugin_files::PluginFilesPlugin);
         app.init_resource::<ScriptRegistry>();
         app.insert_resource(StaticPlugins(crate::static_plugins::all()));
         app.init_resource::<ReloadRequested>();
@@ -759,6 +760,8 @@ fn unload_one(world: &mut World, id: &str) {
     };
     loaded.backend.release();
     refresh_loaded_plugin_ids(world);
+    // After teardown, which may have queued a last save.
+    crate::plugin_files::release(world, id);
     info!("[scripts] '{id}' unloaded");
 }
 
@@ -821,6 +824,7 @@ fn try_load_plugin(world: &mut World, plugin_id: &str) {
         },
     );
     refresh_loaded_plugin_ids(world);
+    crate::plugin_files::request_load(world, plugin_id);
 
     // Gameplay mode wants it running immediately; the editor leaves it
     // registered but idle.
@@ -1556,6 +1560,7 @@ mod tests {
         world.init_resource::<ReportedMissingScripts>();
         world.init_resource::<AppliedPluginData>();
         world.insert_resource(LoadedPlugins::default());
+        world.init_resource::<engine_api::PluginFiles>();
         world
     }
 
