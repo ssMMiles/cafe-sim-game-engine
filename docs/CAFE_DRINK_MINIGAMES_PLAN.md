@@ -78,6 +78,23 @@ run `cargo build-plugins` (the host hot-reloads on mtime).
 - `BrewSession::start` returns `false` for a drink with no steps (and logs it), so the Brew menu
   can't open empty.
 
+**Tuning pass 1 (2026-11-13, from play):**
+
+- Trace draws what you actually drew: a trail of dots graded green/yellow/red by distance to the
+  path, plus a draining "milk" bar and a status line (accuracy so far, seconds left). Limits cut
+  to 5 s (heart, 2.5 canvas widths) and 5.5 s (spiral, 2.7).
+- Scoop has a budget: the full scoops this attempt's band needs plus `spare_scoops` (1), shown as
+  "Scoops left: N"; the last scoop ends the step. Spamming tiny scoops no longer works.
+- Froth's band drifts once you first reach it (two sines, random direction, `drift` 0.08,
+  `drift_period_secs` 3.5), so tapping to park the needle doesn't work. Band lowered and jitter
+  cut so jitter + drift stays under the scald line (the data test enforces it).
+- Stir is scored on **speed**: a speed meter with a green band (`good_from` × `safe_speed` up to
+  `safe_speed`), score = share of the stirring spent in the green, slosh/spill above it as
+  before; status line shows the live share. The clock starts at the first sweep. Timing out
+  scales the score by how far it mixed.
+- Overlay plumbing for these: `MeterReading { value, zone }` (moving good zone on a bar),
+  `MinigameState::status` (live line under the meters), `MinigameState::trail` (canvas dots).
+
 **Not played yet:** Froth, Stir, the new Scoop, Trace, the Latte and Cappuccino recipes, the
 perfect presentation. **Known gaps:** a customer's `unhappy` flag only picks the angry face; the
 tuning numbers are all first guesses.

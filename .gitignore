@@ -1,7 +1,9 @@
 target
 bevy_docs
 worlds
-pkg.worktrees/
+pkg/
+.worktrees/
 projects
 editor_settings.json
 perf-snapshot-*.md
+gpu.trace

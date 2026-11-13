@@ -6,6 +6,10 @@
 //! the scoop bar tells you how full the scoop is, never how far it will lift
 //! the cup — the first scoop shows you the ratio, the rest is your judgement.
 //! A partial last scoop is how you land in the band. Nothing comes back out.
+//!
+//! Scoops are limited: as many full ones as this attempt's band needs, plus
+//! `spare_scoops`. That leaves room for one top-up, not for creeping up on
+//! the line with a dozen tiny ones. The last scoop ends the step.
 
 use rand::RngExt;
 
@@ -23,6 +27,8 @@ pub struct ScoopParams {
     pub band: (f32, f32),
     /// The band moves by up to ± this each attempt.
     pub jitter: f32,
+    /// Scoops allowed beyond the full ones the band needs.
+    pub spare_scoops: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +43,9 @@ pub struct ScoopState {
     band: (f32, f32),
     /// Filling the scoop since a fresh press.
     filling: bool,
+    /// Scoops tipped in so far, and how many this attempt allows.
+    scoops: u32,
+    max_scoops: u32,
 }
 
 /// Under the band, the score falls to 0 this far below it.
@@ -51,12 +60,28 @@ impl ScoopState {
         } else {
             0.0
         };
+        let capacity = p.capacity * (1.0 + roll);
+        let band = shifted(p.band, p.jitter, rng);
+        let full_scoops = (0.5 * (band.0 + band.1) / capacity).ceil() as u32;
         Self {
             amount: 0.0,
             in_scoop: 0.0,
-            capacity: p.capacity * (1.0 + roll),
-            band: shifted(p.band, p.jitter, rng),
+            capacity,
+            band,
             filling: false,
+            scoops: 0,
+            max_scoops: full_scoops + p.spare_scoops,
+        }
+    }
+
+    pub fn scoops_left(&self) -> u32 {
+        self.max_scoops - self.scoops
+    }
+
+    pub fn status(&self) -> String {
+        match self.scoops_left() {
+            1 => "Last scoop!".into(),
+            n => format!("Scoops left: {n}"),
         }
     }
 
@@ -79,14 +104,7 @@ impl ScoopState {
     ) -> Outcome {
         if input.confirm {
             self.tip();
-            return Outcome::Done {
-                score: band_score(
-                    self.amount,
-                    self.band,
-                    self.band.0 - UNDER_RANGE,
-                    self.band.1 + OVER_RANGE,
-                ),
-            };
+            return self.done();
         }
         if input.pressed {
             self.filling = true;
@@ -96,13 +114,31 @@ impl ScoopState {
                 self.in_scoop = (self.in_scoop + input.dt / p.fill_secs).min(1.0);
             } else {
                 self.tip();
+                if self.scoops_left() == 0 {
+                    return self.done();
+                }
             }
         }
         Outcome::Running
     }
 
+    fn done(&self) -> Outcome {
+        Outcome::Done {
+            score: band_score(
+                self.amount,
+                self.band,
+                self.band.0 - UNDER_RANGE,
+                self.band.1 + OVER_RANGE,
+            ),
+        }
+    }
+
+    /// Empty the scoop into the cup. An empty scoop doesn't count.
     fn tip(&mut self) {
-        self.amount = (self.amount + self.in_scoop * self.capacity).min(1.0);
+        if self.in_scoop > 0.0 {
+            self.amount = (self.amount + self.in_scoop * self.capacity).min(1.0);
+            self.scoops += 1;
+        }
         self.in_scoop = 0.0;
         self.filling = false;
     }
@@ -119,6 +155,7 @@ mod tests {
         fill_secs: 1.0,
         band: (0.55, 0.6),
         jitter: 0.0,
+        spare_scoops: 1,
     };
 
     fn confirm() -> MinigameInput {
@@ -189,6 +226,30 @@ mod tests {
             scoop(&mut s, 1.5);
         }
         assert!(done(&mut s) <= 0.2);
+    }
+
+    #[test]
+    fn the_scoop_budget_is_the_full_scoops_needed_plus_spares() {
+        // Band centre 0.575 / capacity 0.2 → 3 full scoops, + 1 spare.
+        let s = ScoopState::new(&P, &mut rng());
+        assert_eq!(s.scoops_left(), 4);
+    }
+
+    #[test]
+    fn the_last_scoop_ends_the_step() {
+        let mut s = ScoopState::new(&P, &mut rng());
+        for _ in 0..3 {
+            scoop(&mut s, 0.3);
+        }
+        s.update(&P, &press(), &mut rng());
+        for _ in 0..10 {
+            s.update(&P, &hold(), &mut rng());
+        }
+        // Tiny scoops add up to far too little, and the fourth one ends it.
+        match s.update(&P, &release(), &mut rng()) {
+            Outcome::Done { score } => assert!(score <= 0.2, "{score}"),
+            Outcome::Running => panic!("the last scoop must end the step"),
+        }
     }
 
     #[test]

@@ -5,10 +5,13 @@
 //! Progress only ever moves forward, and only to path within a short reach
 //! ahead of where you are, so cutting across the shape skips nothing. The
 //! score is how much of the path you drew × how close to it you stayed.
+//!
+//! What the player actually drew is kept as a trail of graded points the
+//! overlay draws over the path, and a draining bar shows the jug running dry.
 
 use bevy::math::Vec2;
 
-use super::{MeterLayout, MeterShape, MinigameInput, Outcome};
+use super::{Grade, MeterLayout, MeterShape, MinigameInput, Outcome, TrailPoint};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TraceParams {
@@ -30,12 +33,19 @@ pub struct TraceState {
     deviation: f32,
     elapsed: f32,
     started: bool,
+    /// Where the cursor went while drawing, at most [`TRAIL_MAX`] points.
+    trail: Vec<TrailPoint>,
 }
 
 /// How near the first point a press must land to start drawing.
 const START_RADIUS: f32 = 0.08;
 /// How far ahead along the path the cursor can pull the progress per frame.
 const REACH: f32 = 0.12;
+/// A drawn point is recorded once the cursor is this far from the last one.
+const TRAIL_SPACING: f32 = 0.012;
+const TRAIL_MAX: usize = 240;
+/// Drawn within this share of the tolerance: on the line.
+const GOOD_SHARE: f32 = 0.5;
 
 impl TraceState {
     pub fn new(p: &TraceParams, _rng: &mut impl rand::Rng) -> Self {
@@ -45,16 +55,40 @@ impl TraceState {
             deviation: 0.0,
             elapsed: 0.0,
             started: false,
+            trail: Vec::new(),
         }
     }
 
-    pub fn meter(&self, p: &TraceParams) -> MeterLayout {
-        MeterLayout {
-            shape: MeterShape::Canvas { path: p.path },
-            zones: Vec::new(),
-            cursor: true,
-            caption: "pour",
+    pub fn meters(&self, p: &TraceParams) -> Vec<MeterLayout> {
+        vec![
+            MeterLayout {
+                shape: MeterShape::Canvas { path: p.path },
+                zones: Vec::new(),
+                cursor: true,
+                caption: "pour",
+            },
+            MeterLayout::bar(true, true, "milk"),
+        ]
+    }
+
+    /// Share of the jug left, 1 until the first press.
+    pub fn time_left(&self, p: &TraceParams) -> f32 {
+        (1.0 - self.elapsed / p.max_secs).clamp(0.0, 1.0)
+    }
+
+    pub fn trail(&self) -> &[TrailPoint] {
+        &self.trail
+    }
+
+    pub fn status(&self, p: &TraceParams) -> String {
+        if !self.started {
+            return "Press on the gold dot to start pouring".into();
         }
+        format!(
+            "On the line {:.0}%   -   {:.1} s left",
+            self.accuracy(p) * 100.0,
+            (p.max_secs - self.elapsed).max(0.0),
+        )
     }
 
     /// How far along the path the drawing has got, 0..1.
@@ -78,6 +112,9 @@ impl TraceState {
         if !input.held || self.elapsed >= p.max_secs {
             return self.done(p);
         }
+        if let Some(c) = input.cursor {
+            self.record(p, c);
+        }
         if let Some(c) = input.cursor
             && let Some((s, d)) = nearest_ahead(p.path, c, self.progress, REACH)
             && d <= 2.0 * p.tolerance
@@ -92,9 +129,40 @@ impl TraceState {
         Outcome::Running
     }
 
+    /// Add `c` to the trail if it has moved far enough, graded by its
+    /// distance to the nearest point anywhere on the path.
+    fn record(&mut self, p: &TraceParams, c: Vec2) {
+        if self.trail.len() >= TRAIL_MAX
+            || self
+                .trail
+                .last()
+                .is_some_and(|t| t.at.distance(c) < TRAIL_SPACING)
+        {
+            return;
+        }
+        let d = nearest_ahead(p.path, c, 0.0, self.total).map_or(f32::INFINITY, |(_, d)| d);
+        let grade = if d <= GOOD_SHARE * p.tolerance {
+            Grade::Good
+        } else if d <= p.tolerance {
+            Grade::Off
+        } else {
+            Grade::Bad
+        };
+        self.trail.push(TrailPoint { at: c, grade });
+    }
+
+    /// 1 for drawing exactly on the line, falling to 0 at the tolerance.
+    fn accuracy(&self, p: &TraceParams) -> f32 {
+        if self.progress > 0.0 {
+            (1.0 - self.deviation / self.progress / p.tolerance).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
     fn done(&self, p: &TraceParams) -> Outcome {
         let accuracy = if self.progress > 0.0 {
-            (1.0 - self.deviation / self.progress / p.tolerance).clamp(0.0, 1.0)
+            self.accuracy(p)
         } else {
             0.0
         };
@@ -232,6 +300,25 @@ mod tests {
             assert_eq!(s.update(&P, &at(hold(), L[1])), Outcome::Running);
         }
         assert_eq!(s.fraction(), 0.0);
+    }
+
+    #[test]
+    fn the_trail_records_where_the_cursor_went_and_grades_it() {
+        let mut s = TraceState::new(&P, &mut rng());
+        s.update(&P, &at(press(), L[0]));
+        // Along the bottom edge, then well off the path.
+        for i in 1..=20 {
+            s.update(&P, &at(hold(), Vec2::new(0.1 + 0.02 * i as f32, 0.1)));
+        }
+        s.update(&P, &at(hold(), Vec2::new(0.5, 0.5)));
+        let trail = s.trail();
+        assert!(trail.len() >= 15, "{}", trail.len());
+        assert!(
+            trail[..trail.len() - 1]
+                .iter()
+                .all(|t| t.grade == Grade::Good)
+        );
+        assert_eq!(trail.last().map(|t| t.grade), Some(Grade::Bad));
     }
 
     #[test]

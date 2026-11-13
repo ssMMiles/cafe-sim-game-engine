@@ -63,7 +63,9 @@ impl Minigame {
             }
             Minigame::Steep(p) => fits(p.window, p.jitter, 1.0) && p.duration_secs > 0.0,
             Minigame::Froth(p) => {
-                fits(p.band, p.jitter, p.scald)
+                fits(p.band, p.jitter + p.drift, p.scald)
+                    && p.drift >= 0.0
+                    && p.drift_period_secs > 0.0
                     && p.scald <= 1.0
                     && p.heat_rate > 0.0
                     && p.cool_rate > 0.0
@@ -73,10 +75,10 @@ impl Minigame {
             Minigame::Stir(p) => {
                 p.mix_per_rad > 0.0
                     && p.safe_speed > 0.0
+                    && (0.0..1.0).contains(&p.good_from)
                     && p.slosh_gain > 0.0
                     && p.slosh_decay > 0.0
-                    && 0.0 < p.ideal_secs
-                    && p.ideal_secs < p.max_secs
+                    && p.max_secs > 0.0
             }
             Minigame::Trace(p) => {
                 p.path.len() >= 2
@@ -145,6 +147,36 @@ pub struct MeterLayout {
     pub cursor: bool,
     /// Short label under the meter.
     pub caption: &'static str,
+}
+
+/// One meter's moving parts this frame, in [`MinigameState::meters`] order.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MeterReading {
+    pub value: f32,
+    /// A good zone that moves during the step (Froth's drifting band),
+    /// `(from, to)` along a bar. Static zones live in [`MeterLayout::zones`].
+    pub zone: Option<(f32, f32)>,
+}
+
+impl From<f32> for MeterReading {
+    fn from(value: f32) -> Self {
+        Self { value, zone: None }
+    }
+}
+
+/// How close a drawn point came to the path it was following.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grade {
+    Good,
+    Off,
+    Bad,
+}
+
+/// A point the player actually drew on a canvas.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrailPoint {
+    pub at: Vec2,
+    pub grade: Grade,
 }
 
 impl MeterLayout {
@@ -217,22 +249,42 @@ impl MinigameState {
             (Self::Pour(s), Minigame::Pour(_)) => vec![s.meter()],
             (Self::Steep(s), Minigame::Steep(_)) => vec![s.meter()],
             (Self::Froth(s), Minigame::Froth(p)) => s.meters(p),
-            (Self::Stir(s), Minigame::Stir(_)) => s.meters(),
-            (Self::Trace(s), Minigame::Trace(p)) => vec![s.meter(p)],
+            (Self::Stir(s), Minigame::Stir(p)) => s.meters(p),
+            (Self::Trace(s), Minigame::Trace(p)) => s.meters(p),
             _ => unreachable!("minigame state built from a different game"),
         }
     }
 
     /// Each meter's reading this frame, in [`Self::meters`] order.
-    pub fn readings(&self) -> Vec<f32> {
+    pub fn readings(&self, game: &Minigame) -> Vec<MeterReading> {
+        let plain = |values: &[f32]| values.iter().map(|&v| v.into()).collect();
+        match (self, game) {
+            (Self::Pressure(s), _) => plain(&[s.value]),
+            (Self::Scoop(s), _) => plain(&[s.amount, s.in_scoop]),
+            (Self::Pour(s), _) => plain(&[s.fill]),
+            (Self::Steep(s), _) => plain(&[s.progress]),
+            (Self::Froth(s), Minigame::Froth(p)) => s.readings(p),
+            (Self::Stir(s), Minigame::Stir(p)) => s.readings(p),
+            (Self::Trace(s), Minigame::Trace(p)) => plain(&[s.fraction(), s.time_left(p)]),
+            _ => unreachable!("minigame state built from a different game"),
+        }
+    }
+
+    /// One line of live feedback under the meters, if the game has any.
+    pub fn status(&self, game: &Minigame) -> Option<String> {
+        match (self, game) {
+            (Self::Scoop(s), _) => Some(s.status()),
+            (Self::Stir(s), _) => s.status(),
+            (Self::Trace(s), Minigame::Trace(p)) => Some(s.status(p)),
+            _ => None,
+        }
+    }
+
+    /// What the player has drawn so far, for a game with a canvas.
+    pub fn trail(&self) -> &[TrailPoint] {
         match self {
-            Self::Pressure(s) => vec![s.value],
-            Self::Scoop(s) => vec![s.amount, s.in_scoop],
-            Self::Pour(s) => vec![s.fill],
-            Self::Steep(s) => vec![s.progress],
-            Self::Froth(s) => vec![s.temp, s.foam],
-            Self::Stir(s) => vec![0.0, s.mixed, s.slosh],
-            Self::Trace(s) => vec![s.fraction()],
+            Self::Trace(s) => s.trail(),
+            _ => &[],
         }
     }
 

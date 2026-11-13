@@ -45,7 +45,7 @@ pub const PERFECT_STEP: f32 = 0.9;
 // ----------------------------------------------------------------------------
 
 const SCOOP_HINT: &str =
-    "Hold to fill the scoop, let go to tip it in. Done when the cup is in the green";
+    "Hold to fill the scoop, let go to tip it in. Scoops are limited - get the cup into the green";
 const POUR_HINT: &str = "Hold to pour - it keeps flowing a moment after you let go";
 
 const fn scoop(label: &'static str, weight: f32, capacity: f32, band: (f32, f32)) -> Step {
@@ -59,6 +59,7 @@ const fn scoop(label: &'static str, weight: f32, capacity: f32, band: (f32, f32)
             fill_secs: 1.2,
             band,
             jitter: 0.12,
+            spare_scoops: 1,
         }),
     }
 }
@@ -113,17 +114,19 @@ const PULL_SHOT: Step = Step {
     }),
 };
 
-const STEAM_HINT: &str =
-    "Hold to heat, let go to cool. Keep the needle in the green until the foam is full";
+const STEAM_HINT: &str = "Hold to heat, let go to cool. The green band drifts - keep the needle in it until the foam is full";
 
 const STEAM_MILK: FrothParams = FrothParams {
     heat_rate: 0.45,
     cool_rate: 0.22,
-    band: (0.6, 0.72),
-    jitter: 0.12,
+    // Jitter + drift must keep the band below the scald line.
+    band: (0.55, 0.65),
+    jitter: 0.05,
     scald: 0.9,
     foam_secs: 3.0,
     time_limit_secs: 12.0,
+    drift: 0.08,
+    drift_period_secs: 3.5,
 };
 
 const STEAM: Step = Step {
@@ -139,13 +142,14 @@ const STEAM_STIFF: Step = Step {
     hint: STEAM_HINT,
     weight: 0.6,
     game: Minigame::Froth(FrothParams {
-        band: (0.64, 0.72),
+        band: (0.6, 0.68),
         foam_secs: 4.0,
         ..STEAM_MILK
     }),
 };
 
-const TRACE_HINT: &str = "Press on the gold dot and, holding, follow the dots to the end";
+const TRACE_HINT: &str =
+    "Press on the gold dot and, holding, follow the dots before the milk runs out";
 
 /// Latte art: from the notch at the top, round the right lobe, down to the
 /// tip and back up the left.
@@ -277,7 +281,7 @@ pub const DRINKS: &[Drink] = &[
                 game: Minigame::Trace(TraceParams {
                     path: HEART,
                     tolerance: 0.05,
-                    max_secs: 8.0,
+                    max_secs: 5.0,
                 }),
             },
         ],
@@ -325,7 +329,7 @@ pub const DRINKS: &[Drink] = &[
                 game: Minigame::Trace(TraceParams {
                     path: SPIRAL,
                     tolerance: 0.04,
-                    max_secs: 8.0,
+                    max_secs: 5.5,
                 }),
             },
         ],
@@ -344,15 +348,15 @@ pub const DRINKS: &[Drink] = &[
             },
             Step {
                 label: "Whisk",
-                hint: "Circle the cursor round the dish. Steady, not frantic, or it sloshes over",
+                hint: "Circle the cursor round the dish. Keep the speed needle in the green until it's mixed",
                 weight: 0.3,
                 game: Minigame::Stir(StirParams {
                     mix_per_rad: 1.0 / (6.0 * core::f32::consts::TAU), // six turns
                     safe_speed: 1.5 * core::f32::consts::TAU,          // 1.5 turns a second
+                    good_from: 0.6,
                     slosh_gain: 0.01,
                     slosh_decay: 0.4,
-                    ideal_secs: 4.5,
-                    max_secs: 12.0,
+                    max_secs: 15.0,
                 }),
             },
         ],

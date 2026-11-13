@@ -22,7 +22,7 @@ use crate::coffee_menu::Brewing;
 use crate::drinks::{Drink, PERFECT_STEP};
 use crate::menus::ActiveMenu;
 use crate::minigames::{
-    MeterLayout, MeterShape, MeterZone, MinigameInput, MinigameState, Outcome, point_along,
+    Grade, MeterLayout, MeterShape, MeterZone, MinigameInput, MinigameState, Outcome, point_along,
 };
 use crate::pause_menu::GamePaused;
 use crate::spawn::SpawnOwnedCommands;
@@ -41,6 +41,9 @@ const CANVAS_DOTS: usize = 48;
 const PATH_DOT_PX: f32 = 6.0;
 const MARKER_PX: f32 = 14.0;
 const STEP_DOT_PX: f32 = 10.0;
+/// Dots kept ready on a canvas for the player's trail (`TraceState`'s cap).
+const TRAIL_SLOTS: usize = 240;
+const TRAIL_DOT_PX: f32 = 5.0;
 
 const GOOD: Color = Color::srgb(0.28, 0.72, 0.40);
 const BAD: Color = Color::srgb(0.75, 0.25, 0.25);
@@ -115,6 +118,11 @@ enum Part {
     Fill { vertical: bool },
     /// Positioned at the reading's fraction along a canvas path.
     Marker { path: &'static [Vec2] },
+    /// The reading's moving good zone along a bar; empty when it has none.
+    Zone { vertical: bool },
+    /// One dot of what the player has drawn ([`MinigameState::trail`]);
+    /// hidden until the trail reaches it.
+    Trail { slot: usize },
 }
 
 /// The meter the game measures the cursor over ([`MeterLayout::cursor`]).
@@ -123,6 +131,10 @@ pub struct CursorSurface;
 
 #[derive(Component)]
 pub struct StepResultText;
+
+/// The game's live feedback line ([`MinigameState::status`]).
+#[derive(Component)]
+pub struct StepStatusText;
 
 #[derive(Component)]
 pub struct CancelBrewButton;
@@ -241,8 +253,9 @@ pub fn sync_brew_overlay(
     mut commands: Commands,
     session: Res<BrewSession>,
     roots: Query<(Entity, &BrewOverlayRoot)>,
-    mut parts: Query<(&mut Node, &MeterPart)>,
-    mut result_text: Query<&mut Text, With<StepResultText>>,
+    mut parts: Query<(&mut Node, &mut BackgroundColor, &MeterPart)>,
+    mut result_text: Query<&mut Text, (With<StepResultText>, Without<StepStatusText>)>,
+    mut status_text: Query<&mut Text, With<StepStatusText>>,
 ) {
     let Some(s) = session.0.as_ref() else {
         for (e, _) in &roots {
@@ -259,12 +272,27 @@ pub fn sync_brew_overlay(
         return; // new nodes are queryable next frame
     }
 
-    let readings = s.state.readings();
+    let game = &s.drink.steps[s.step].game;
+    let readings = s.state.readings(game);
+    let trail = s.state.trail();
     let pct = |v: f32| Val::Percent(v.clamp(0.0, 1.0) * 100.0);
-    for (mut node, part) in &mut parts {
-        let Some(&value) = readings.get(part.index) else {
+    for (mut node, mut color, part) in &mut parts {
+        if let Part::Trail { slot } = part.kind {
+            match trail.get(slot) {
+                Some(point) => {
+                    node.display = Display::Flex;
+                    node.left = pct(point.at.x);
+                    node.bottom = pct(point.at.y);
+                    color.0 = grade_color(point.grade);
+                }
+                None => node.display = Display::None,
+            }
+            continue;
+        }
+        let Some(reading) = readings.get(part.index) else {
             continue;
         };
+        let value = reading.value;
         match part.kind {
             Part::Needle { vertical: true } => node.bottom = pct(value),
             Part::Needle { vertical: false } => node.left = pct(value),
@@ -275,6 +303,26 @@ pub fn sync_brew_overlay(
                 node.left = pct(at.x);
                 node.bottom = pct(at.y);
             }
+            Part::Zone { vertical } => {
+                let (start, extent) = match reading.zone {
+                    Some((from, to)) => (pct(from), pct(to - from)),
+                    None => (Val::Percent(0.0), Val::Percent(0.0)),
+                };
+                if vertical {
+                    node.bottom = start;
+                    node.height = extent;
+                } else {
+                    node.left = start;
+                    node.width = extent;
+                }
+            }
+            Part::Trail { .. } => unreachable!("handled above"),
+        }
+    }
+    let status = s.state.status(game).unwrap_or_default();
+    for mut text in &mut status_text {
+        if **text != status {
+            **text = status.clone();
         }
     }
     let result = match s.flash {
@@ -285,6 +333,14 @@ pub fn sync_brew_overlay(
         if **text != result {
             **text = result.clone();
         }
+    }
+}
+
+fn grade_color(grade: Grade) -> Color {
+    match grade {
+        Grade::Good => Color::srgb(0.35, 0.85, 0.45),
+        Grade::Off => Color::srgb(0.95, 0.80, 0.30),
+        Grade::Bad => Color::srgb(0.90, 0.30, 0.30),
     }
 }
 
@@ -363,6 +419,22 @@ fn spawn_overlay(commands: &mut Commands, s: &Session) {
         commands.entity(meters).add_child(meter);
     }
 
+    let status = commands
+        .spawn_owned((
+            StepStatusText,
+            Text::new(""),
+            TextFont {
+                font_size: FontSize::Px(15.0),
+                ..default()
+            },
+            TextColor(text),
+            Node {
+                min_height: Val::Px(20.0),
+                ..default()
+            },
+        ))
+        .id();
+
     let result = commands
         .spawn_owned((
             StepResultText,
@@ -409,7 +481,7 @@ fn spawn_overlay(commands: &mut Commands, s: &Session) {
 
     commands
         .entity(root)
-        .add_children(&[title, dots, subtitle, hint, meters, result, buttons]);
+        .add_children(&[title, dots, subtitle, hint, meters, status, result, buttons]);
 }
 
 /// A row of round dots: filled for steps done or current, hollow for the rest.
@@ -542,6 +614,18 @@ fn bar_parts(
         let node = span(from, Val::Percent((to - from) * 100.0));
         out.push(commands.spawn_owned((node, BackgroundColor(color))).id());
     }
+    out.push(
+        commands
+            .spawn_owned((
+                span(0.0, Val::Px(0.0)),
+                BackgroundColor(GOOD),
+                MeterPart {
+                    index,
+                    kind: Part::Zone { vertical },
+                },
+            ))
+            .id(),
+    );
     if fill {
         out.push(
             commands
@@ -608,6 +692,22 @@ fn canvas_parts(
         out.push(
             commands
                 .spawn_owned((dot(at, size), BackgroundColor(color)))
+                .id(),
+        );
+    }
+    for slot in 0..TRAIL_SLOTS {
+        let mut node = dot(Vec2::ZERO, TRAIL_DOT_PX);
+        node.display = Display::None;
+        out.push(
+            commands
+                .spawn_owned((
+                    node,
+                    BackgroundColor(GOOD),
+                    MeterPart {
+                        index,
+                        kind: Part::Trail { slot },
+                    },
+                ))
                 .id(),
         );
     }
