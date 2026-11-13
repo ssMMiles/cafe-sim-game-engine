@@ -22,6 +22,7 @@ use bevy::{
     render::render_resource::{
         Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     },
+    sprite_render::{MeshMaterial2d, SpriteMeshMaterial},
     window::PrimaryWindow,
 };
 
@@ -359,4 +360,50 @@ pub fn adjust_camera_distance(
         let (min_dist, max_dist) = setting_ranges::THIRD_PERSON_DISTANCE;
         settings.third_person_distance = settings.third_person_distance.clamp(min_dist, max_dist);
     }
+}
+
+/// Re-prepare every sprite material whose image changed, one frame later.
+///
+/// Bevy 0.20 draws each `Sprite` as a `Mesh2d` quad with a cached
+/// `SpriteMeshMaterial` (`bevy_sprite_render::sprite_mesh`), and a material's
+/// bind group captures its image's GPU texture view when the *material* is
+/// prepared. Nothing re-prepares it when only the image changes. Resizing an
+/// image replaces its GPU texture, so the material keeps sampling the old one.
+///
+/// That is what froze gameplay after an editor round trip: the editor resizes
+/// [`GameRenderTarget`] to its viewport tab and `restore_render_target` sizes
+/// it back, so the render texture gets a new GPU texture each time. The first
+/// gameplay entry got a fresh material only because the sprite's
+/// `custom_size` was new, which is part of bevy's material cache key. The
+/// second entry hit the cache and got gameplay 1's material, still bound to
+/// gameplay 1's texture. The camera rendered into the new texture every frame
+/// while the screen showed the old one.
+///
+/// Marking the material modified makes bevy re-prepare it against the current
+/// texture. It waits a frame because bevy prepares 2D materials with no
+/// ordering against images: on the frame of the change the material could be
+/// re-prepared against the old texture again, but by the next frame the new
+/// one exists.
+pub fn refresh_sprite_materials_after_image_change(
+    mut image_events: MessageReader<AssetEvent<Image>>,
+    mut changed_last_frame: Local<Vec<AssetId<Image>>>,
+    sprites: Query<(&Sprite, &MeshMaterial2d<SpriteMeshMaterial>)>,
+    mut materials: ResMut<Assets<SpriteMeshMaterial>>,
+) {
+    if !changed_last_frame.is_empty() {
+        for (sprite, material) in &sprites {
+            if changed_last_frame.contains(&sprite.image.id())
+                && let Some(mut material) = materials.get_mut(&material.0)
+            {
+                // `get_mut` only emits `Modified` once the asset is borrowed
+                // mutably.
+                let _: &mut SpriteMeshMaterial = &mut material;
+            }
+        }
+        changed_last_frame.clear();
+    }
+    changed_last_frame.extend(image_events.read().filter_map(|event| match event {
+        AssetEvent::Modified { id } => Some(*id),
+        _ => None,
+    }));
 }

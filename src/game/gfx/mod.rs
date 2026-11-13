@@ -15,7 +15,7 @@ pub mod toon_material;
 use atmosphere::{AtmospherePlugin, sync_atmosphere_settings};
 use camera::{
     adjust_camera_distance, apply_freecam_movement, camera_follow, handle_camera_input,
-    resize_render_texture_sprite,
+    refresh_sprite_materials_after_image_change, resize_render_texture_sprite,
 };
 use crosshair::update_crosshair_display;
 use post_process::{EdgeDetectionPlugin, sync_edge_detection_settings};
@@ -68,6 +68,10 @@ impl Plugin for GfxPlugin {
         app.add_systems(Update, update_toon_look.in_set(GfxSet::InGame));
 
         app.add_systems(Update, update_crosshair_display.in_set(GfxSet::InGame));
+
+        // Every frame in every mode: it must see the editor's resizes of the
+        // render target as well as the restore on the way back to gameplay.
+        app.add_systems(Update, refresh_sprite_materials_after_image_change);
 
         // Gameplay camera drivers. In `EditorMode::Editor` the editor's fly
         // camera owns the camera transform and the viewport is an egui tab,
