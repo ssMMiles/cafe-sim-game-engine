@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use engine_api::{
-    AutoCollider, ConvertToToon, DefaultToonLightmap, DynamicLit, PlayerCamera, ProbeVolumeImages,
-    ToonMaterial, UnlitMaterial,
+    AutoCollider, ConvertToToon, DefaultToonLightmap, DynamicLit, GltfSurface, PlayerCamera,
+    ProbeVolumeImages, ToonMaterial, UnlitMaterial,
 };
 use std::collections::HashMap;
 
@@ -178,7 +178,7 @@ pub fn apply_paint_when_loaded(
                 for e in meshes {
                     commands
                         .entity(e)
-                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .remove::<GltfSurface>()
                         .insert(MeshMaterial3d(tinted.clone()));
                 }
             }
@@ -193,7 +193,7 @@ pub fn apply_paint_when_loaded(
                 for e in meshes {
                     commands
                         .entity(e)
-                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .remove::<GltfSurface>()
                         .insert(MeshMaterial3d(tinted.clone()));
                 }
             }
@@ -208,7 +208,7 @@ pub fn apply_paint_when_loaded(
                 for e in meshes {
                     commands
                         .entity(e)
-                        .remove::<MeshMaterial3d<StandardMaterial>>()
+                        .remove::<GltfSurface>()
                         .insert(MeshMaterial3d(tinted.clone()));
                 }
             }

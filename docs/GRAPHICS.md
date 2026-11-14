@@ -252,12 +252,19 @@ lightmap (`bootstrap.rs:242-253`).
 `src/game/gltf_loading.rs`.
 - **The observer.** One global observer, `on_scene_ready`, handles every
   `WorldAssetRoot` scene instance, placed or plugin-spawned alike.
+- **What the loader gives us.** Bevy 0.20's glTF loader attaches no
+  material component itself: it produces a `GltfMaterial` asset per material
+  and leaves the rest to glTF *extension handlers*. `PbrPlugin`'s handler was
+  what used to create `StandardMaterial`s and put `MeshMaterial3d` on every
+  primitive; without `PbrPlugin` (§5.1) our own handler
+  (`gltf_loading::register_gltf_surface_handler`) puts engine-api's
+  `GltfSurface(Handle<GltfMaterial>)` there instead. Nothing renders it.
 - **What converts.** A root carrying `ConvertToToon` (engine-api) has each
-  mesh's `StandardMaterial` replaced by a `ToonMaterial` built with
+  mesh's `GltfSurface` replaced by a `ToonMaterial` built with
   `with_surface_of`: colour, base colour texture, `uv_transform` and
   sidedness (`cull_mode: None` → double-sided) survive. Anything visible
   that doesn't — normal maps, emissive, transparency, unlit, a base colour on
-  UV1 (`dropped_standard_features`) — is logged as a warning once per source
+  UV1 (`dropped_gltf_features`) — is logged as a warning once per source
   material. No asset in the repo uses any of those today.
 - **Source.** `DynamicLit` on the root picks the probe source; otherwise it
   is the lightmap source.

@@ -1,5 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
+    gltf::GltfMaterial,
     image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
     math::Affine2,
     mesh::UvChannel,
@@ -138,8 +139,8 @@ pub fn create_probe_volume_images(images: &mut Assets<Image>) -> ProbeVolumeImag
 /// so the bind group and the [`ToonMaterialKey`] are the whole contract a
 /// renderer has to honour (`docs/GRAPHICS.md` §5.1).
 ///
-/// Built from a glTF's `StandardMaterial` with [`ToonMaterial::with_surface_of`];
-/// whatever that drops is listed by [`dropped_standard_features`].
+/// Built from a glTF's [`GltfMaterial`] with [`ToonMaterial::with_surface_of`];
+/// whatever that drops is listed by [`dropped_gltf_features`].
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[uniform(0, ToonSurfaceUniform)]
 #[bind_group_data(ToonMaterialKey)]
@@ -243,38 +244,44 @@ impl ToonMaterial {
         self
     }
 
-    /// Take the surface — colour, texture, UV transform, sidedness — from a
-    /// `StandardMaterial` (what glTF scenes spawn with). Everything else it
-    /// carries is ignored; [`dropped_standard_features`] says what that loses.
-    pub fn with_surface_of(mut self, standard: &StandardMaterial) -> Self {
-        self.base_color = standard.base_color;
-        self.base_color_texture = standard.base_color_texture.clone();
-        self.uv_transform = standard.uv_transform;
+    /// Take the surface — colour, texture, UV transform, sidedness — from the
+    /// renderer-agnostic material bevy's glTF loader produces (reachable on a
+    /// spawned mesh through [`crate::GltfSurface`]). Everything else it
+    /// carries is ignored; [`dropped_gltf_features`] says what that loses.
+    ///
+    /// Not `StandardMaterial`: in Bevy 0.20 the loader never makes one itself.
+    /// `PbrPlugin` registers a glTF extension handler that does, and the host
+    /// disabled `PbrPlugin` with the scene pass — which is how every glTF
+    /// mesh went white between 2026-11-08 and 2026-11-13.
+    pub fn with_surface_of(mut self, gltf: &GltfMaterial) -> Self {
+        self.base_color = gltf.base_color;
+        self.base_color_texture = gltf.base_color_texture.clone();
+        self.uv_transform = gltf.uv_transform;
         // `cull_mode` rather than `double_sided`: it is what decides whether
         // back faces are visible, and the glTF loader sets both together.
-        self.double_sided = standard.cull_mode.is_none();
+        self.double_sided = gltf.cull_mode.is_none();
         self
     }
 }
 
-/// The `StandardMaterial` features a toon conversion throws away that would
+/// The [`GltfMaterial`] features a toon conversion throws away that would
 /// visibly change the result — not the PBR parameters (metallic, roughness,
 /// reflectance) that have no meaning under baked toon lighting.
-pub fn dropped_standard_features(standard: &StandardMaterial) -> Vec<&'static str> {
+pub fn dropped_gltf_features(gltf: &GltfMaterial) -> Vec<&'static str> {
     let mut dropped = Vec::new();
-    if standard.normal_map_texture.is_some() {
+    if gltf.normal_map_texture.is_some() {
         dropped.push("normal map");
     }
-    if standard.emissive != LinearRgba::BLACK || standard.emissive_texture.is_some() {
+    if gltf.emissive != LinearRgba::BLACK || gltf.emissive_texture.is_some() {
         dropped.push("emissive");
     }
-    if !matches!(standard.alpha_mode, AlphaMode::Opaque) {
+    if !matches!(gltf.alpha_mode, AlphaMode::Opaque) {
         dropped.push("transparency (toon is always opaque)");
     }
-    if standard.unlit {
+    if gltf.unlit {
         dropped.push("unlit");
     }
-    if standard.base_color_channel != UvChannel::Uv0 {
+    if gltf.base_color_channel != UvChannel::Uv0 {
         dropped.push("base colour on UV1 (toon reads UV0)");
     }
     dropped
@@ -359,8 +366,8 @@ mod tests {
     use super::*;
 
     /// What a glTF `doubleSided` material looks like after bevy's loader.
-    fn gltf_double_sided() -> StandardMaterial {
-        StandardMaterial {
+    fn gltf_double_sided() -> GltfMaterial {
+        GltfMaterial {
             base_color: Color::srgb(0.2, 0.4, 0.6),
             base_color_texture: Some(Handle::default()),
             uv_transform: Affine2::from_scale(Vec2::splat(2.0)),
@@ -372,16 +379,16 @@ mod tests {
 
     #[test]
     fn the_surface_survives_conversion() {
-        let standard = gltf_double_sided();
-        let toon = ToonMaterial::default().with_surface_of(&standard);
-        assert_eq!(toon.base_color, standard.base_color);
-        assert_eq!(toon.base_color_texture, standard.base_color_texture);
-        assert_eq!(toon.uv_transform, standard.uv_transform);
+        let gltf = gltf_double_sided();
+        let toon = ToonMaterial::default().with_surface_of(&gltf);
+        assert_eq!(toon.base_color, gltf.base_color);
+        assert_eq!(toon.base_color_texture, gltf.base_color_texture);
+        assert_eq!(toon.uv_transform, gltf.uv_transform);
         assert!(toon.double_sided);
         assert!(ToonMaterialKey::from(&toon).double_sided);
 
-        // The default StandardMaterial culls back faces: single-sided.
-        let single = ToonMaterial::default().with_surface_of(&StandardMaterial::default());
+        // The default glTF material culls back faces: single-sided.
+        let single = ToonMaterial::default().with_surface_of(&GltfMaterial::default());
         assert!(!single.double_sided);
     }
 
@@ -410,21 +417,21 @@ mod tests {
     #[test]
     fn only_visible_losses_are_reported() {
         // PBR parameters mean nothing under baked toon lighting: no noise.
-        let plain = StandardMaterial {
+        let plain = GltfMaterial {
             metallic: 1.0,
             perceptual_roughness: 0.1,
             ..default()
         };
-        assert!(dropped_standard_features(&plain).is_empty());
-        assert!(dropped_standard_features(&gltf_double_sided()).is_empty());
+        assert!(dropped_gltf_features(&plain).is_empty());
+        assert!(dropped_gltf_features(&gltf_double_sided()).is_empty());
 
-        let fancy = StandardMaterial {
+        let fancy = GltfMaterial {
             normal_map_texture: Some(Handle::default()),
             emissive: LinearRgba::RED,
             alpha_mode: AlphaMode::Blend,
             ..default()
         };
-        let dropped = dropped_standard_features(&fancy);
+        let dropped = dropped_gltf_features(&fancy);
         assert_eq!(dropped.len(), 3, "{dropped:?}");
     }
 }

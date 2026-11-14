@@ -15,16 +15,16 @@ pub mod script;
 pub mod toon_curve;
 pub mod toon_material;
 pub mod unlit_material;
+pub use plugin_files::{FileRead, PluginFiles};
 pub use script::{
     LevelDataHooks, PropDef, PropDefault, PropValue, RegisteredScript, ScriptBinding,
     ScriptBindings, ScriptHydrateFn, ScriptProp, ScriptRegistry, ScriptSchema,
 };
-pub use plugin_files::{FileRead, PluginFiles};
 pub use toon_curve::ToonCurve;
 pub use toon_material::{
     DefaultToonLightmap, ProbeVolumeImages, TOON_DOUBLE_SIDED_DEF, ToonMaterial, ToonMaterialKey,
     ToonShading, ToonSource, ToonSurfaceUniform, create_default_toon_lightmap,
-    create_probe_volume_images, dropped_standard_features,
+    create_probe_volume_images, dropped_gltf_features,
 };
 pub use unlit_material::{UnlitMaterial, UnlitUniform};
 
@@ -79,7 +79,11 @@ pub use unlit_material::{UnlitMaterial, UnlitUniform};
 /// - 17: [`PluginFiles`] — per-plugin persistent files, mirrored in memory by
 ///   the host (OPFS on the web). A plugin that writes them needs a host that
 ///   provides the resource.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 17;
+/// - 18: [`GltfSurface`] replaces `MeshMaterial3d<StandardMaterial>` as what a
+///   spawned glTF mesh carries, and [`ToonMaterial::with_surface_of`] /
+///   [`dropped_gltf_features`] read bevy's `GltfMaterial`. `StandardMaterial`
+///   no longer exists in the app at all.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 18;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -378,10 +382,10 @@ impl BlobShadow {
 }
 
 /// Ask the host to re-dress a glTF scene in toon materials once it has
-/// spawned: every sub-mesh's `StandardMaterial` is replaced by a
+/// spawned: every sub-mesh's [`GltfSurface`] is replaced by a
 /// [`ToonMaterial`] carrying its colour, texture and sidedness
-/// ([`ToonMaterial::with_surface_of`]), and the marker is removed. Put it on the `WorldAssetRoot`
-/// entity. Without [`DynamicLit`] the scene is treated as static level
+/// ([`ToonMaterial::with_surface_of`]), and the marker is removed. Put it on
+/// the `WorldAssetRoot` entity. Without [`DynamicLit`] the scene is treated as static level
 /// geometry and shades from a baked lightmap (white until one is applied);
 /// with it, from the probe volume at its own position — and then every
 /// instance of one glTF material shares one toon material, so identical
@@ -389,9 +393,28 @@ impl BlobShadow {
 ///
 /// Plugins spawning scenes at runtime (furniture, props) want
 /// `(ConvertToToon, DynamicLit)`. A translucent preview cannot be toon
-/// (toon is always opaque) — leave it on `StandardMaterial`.
+/// (toon is always opaque) — dress it in an [`UnlitMaterial`] instead.
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub struct ConvertToToon;
+
+/// The glTF material a spawned mesh primitive was authored with.
+///
+/// Bevy 0.20's glTF loader is renderer-agnostic: it produces a
+/// [`GltfMaterial`](bevy::gltf::GltfMaterial) asset per material and leaves
+/// attaching *a* material component to glTF extension handlers (`PbrPlugin`'s
+/// handler is what used to put `MeshMaterial3d<StandardMaterial>` on every
+/// primitive). The host's handler puts this on every primitive instead, and
+/// nothing renders it: the conversion ([`ConvertToToon`]) reads it to build
+/// the mesh's [`ToonMaterial`] and removes it, and a plugin dressing meshes
+/// by hand should remove it too, so the glTF material asset isn't kept alive
+/// for nothing.
+///
+/// Reflected because it is authored into the glTF's `WorldAsset` and bevy's
+/// spawner copies components by reflection — an unregistered one panics the
+/// spawn. The host registers it alongside its handler.
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component, Clone)]
+pub struct GltfSurface(pub Handle<bevy::gltf::GltfMaterial>);
 
 /// A scene root whose meshes move through the world and should be lit from
 /// the irradiance probe volume rather than a baked lightmap. Put it beside

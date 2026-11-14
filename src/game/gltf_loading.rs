@@ -1,4 +1,4 @@
-use engine_api::{UnlitMaterial, dropped_standard_features};
+use engine_api::{GltfSurface, UnlitMaterial, dropped_gltf_features};
 
 use crate::game::{
     GameEntity,
@@ -8,12 +8,73 @@ pub use engine_api::{ConvertToToon, DynamicLit};
 
 use super::gfx::camera::PlayerCamera;
 use bevy::{
+    asset::LoadContext,
+    ecs::world::EntityWorldMut,
+    gltf::{
+        GltfMaterial,
+        extensions::{ErasedGltfExtensionHandler, GltfExtensionHandler, GltfExtensionHandlers},
+        gltf,
+    },
     log,
     picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
     platform::collections::{HashMap, HashSet},
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
+
+/// The glTF extension handler that puts a [`GltfSurface`] on every spawned
+/// mesh primitive.
+///
+/// Bevy 0.20's loader attaches no material component of its own: it produces
+/// a `GltfMaterial` asset per material and hands each primitive to the
+/// registered extension handlers. `PbrPlugin`'s handler is what used to make
+/// a `StandardMaterial` and insert `MeshMaterial3d<StandardMaterial>`; with
+/// `PbrPlugin` gone (scene pass Phase 5b) nothing did, and every glTF mesh
+/// converted to the bare white template. This is the replacement, holding a
+/// handle to the loader's own material so [`convert_to_toon`] can read it.
+#[derive(Clone, Default)]
+struct GltfSurfaceHandler;
+
+impl GltfExtensionHandler for GltfSurfaceHandler {
+    fn dyn_clone(&self) -> Box<dyn ErasedGltfExtensionHandler> {
+        Box::new(self.clone())
+    }
+
+    fn on_spawn_mesh_and_material(
+        &mut self,
+        load_context: &mut LoadContext<'_>,
+        _primitive: &gltf::Primitive,
+        _mesh: &gltf::Mesh,
+        _material: &gltf::Material,
+        entity: &mut EntityWorldMut,
+        material_label: &str,
+    ) {
+        // The loader has already added the `GltfMaterial` under this label
+        // (the default material included), so the handle resolves.
+        let handle = load_context.get_label_handle::<GltfMaterial>(material_label.to_string());
+        entity.insert(GltfSurface(handle));
+    }
+}
+
+/// Register [`GltfSurfaceHandler`] with the glTF loader. Must run after
+/// `GltfPlugin::build` (which creates the handler list) and before its
+/// `finish` (which hands the list to the loader) — i.e. right after
+/// `DefaultPlugins` is added, where `lib.rs` calls it.
+pub fn register_gltf_surface_handler(app: &mut App) {
+    // The spawner copies scene components by reflection and panics on an
+    // unregistered type.
+    app.register_type::<GltfSurface>();
+    let handlers = app.world_mut().resource_mut::<GltfExtensionHandlers>();
+    #[cfg(target_family = "wasm")]
+    bevy::tasks::block_on(async {
+        handlers.0.write().await.push(Box::new(GltfSurfaceHandler));
+    });
+    #[cfg(not(target_family = "wasm"))]
+    handlers
+        .0
+        .write_blocking()
+        .push(Box::new(GltfSurfaceHandler));
+}
 
 /// Dress every mesh of a scene in one translucent unlit tint once it has
 /// loaded — the placement ghost. The scene's own materials are replaced, not
@@ -34,30 +95,30 @@ pub struct PendingMaterial {
 /// a single draw. Lightmapped conversions are *not* cached: each sub-mesh
 /// gets its own lightmap, which is a material property, so they stay one
 /// material per mesh entity (`object_lightmaps::unique_material` relies on
-/// it). Keyed by the source `StandardMaterial`'s id; `None` is "the mesh had
+/// it). Keyed by the source `GltfMaterial`'s id; `None` is "the mesh had
 /// no material".
 ///
 /// Handles here are strong, so cached materials live for the session — a
 /// bounded set (one per glTF material ever converted dynamically), and it
 /// keeps a key from being re-used for a dead asset.
 #[derive(Resource, Default)]
-pub struct ProbeToonMaterials(HashMap<Option<AssetId<StandardMaterial>>, Handle<ToonMaterial>>);
+pub struct ProbeToonMaterials(HashMap<Option<AssetId<GltfMaterial>>, Handle<ToonMaterial>>);
 
-/// Put `material` on every mesh under `children`, taking the glTF's own
-/// `StandardMaterial` off — nothing renders that type any more, but leaving
-/// it would keep its asset alive for nothing.
+/// Put `material` on every mesh under `children`, taking its [`GltfSurface`]
+/// off — nothing reads it after this, and leaving it would keep the glTF
+/// material asset alive for nothing.
 pub fn apply_material_to_meshes<M: Material>(
     commands: &mut Commands,
     children: &Children,
     material: &Handle<M>,
-    mesh_query: &Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
+    mesh_query: &Query<(Entity, Option<&GltfSurface>), With<Mesh3d>>,
     children_query: &Query<&Children>,
 ) {
     for child in children.iter() {
         if let Ok((entity, _)) = mesh_query.get(child) {
             commands
                 .entity(entity)
-                .remove::<MeshMaterial3d<StandardMaterial>>()
+                .remove::<GltfSurface>()
                 .insert(MeshMaterial3d(material.clone()));
         }
 
@@ -96,15 +157,15 @@ pub fn on_scene_ready(
         Option<&Children>,
         Option<&Name>,
     )>,
-    mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
+    mesh_query: Query<(Entity, Option<&GltfSurface>), With<Mesh3d>>,
     children_query: Query<&Children>,
-    std_materials: Res<Assets<StandardMaterial>>,
+    gltf_materials: Res<Assets<GltfMaterial>>,
     mut toon_materials: ResMut<Assets<ToonMaterial>>,
     mut unlit_materials: ResMut<Assets<UnlitMaterial>>,
     mut shared: ResMut<ProbeToonMaterials>,
     default_lightmap: Option<Res<DefaultToonLightmap>>,
     probes: Res<ProbeVolumeImages>,
-    mut warned: Local<HashSet<AssetId<StandardMaterial>>>,
+    mut warned: Local<HashSet<AssetId<GltfMaterial>>>,
 ) {
     let entity = trigger.entity;
 
@@ -180,7 +241,7 @@ pub fn on_scene_ready(
             children,
             &mesh_query,
             &children_query,
-            &std_materials,
+            &gltf_materials,
             &mut toon_materials,
             shared,
             &template,
@@ -200,44 +261,45 @@ pub fn on_scene_ready(
 
 /// Re-dress every mesh under `children` in a toon material: `template`'s
 /// lighting with the surface (colour, texture, sidedness) of the mesh's own
-/// `StandardMaterial`. With `shared`, instances of one source material reuse
-/// one toon material (see [`ProbeToonMaterials`]); without it each mesh
-/// entity gets its own. `dropped` hears about every source material that
-/// uses something toon shading can't show ([`dropped_standard_features`]).
+/// glTF material ([`GltfSurface`], put there by [`GltfSurfaceHandler`]). With
+/// `shared`, instances of one source material reuse one toon material (see
+/// [`ProbeToonMaterials`]); without it each mesh entity gets its own.
+/// `dropped` hears about every source material that uses something toon
+/// shading can't show ([`dropped_gltf_features`]).
 fn convert_to_toon(
     commands: &mut Commands,
     children: &Children,
-    mesh_query: &Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
+    mesh_query: &Query<(Entity, Option<&GltfSurface>), With<Mesh3d>>,
     children_query: &Query<&Children>,
-    std_materials: &Assets<StandardMaterial>,
+    gltf_materials: &Assets<GltfMaterial>,
     toon_materials: &mut Assets<ToonMaterial>,
     mut shared: Option<&mut ProbeToonMaterials>,
     template: &ToonMaterial,
-    dropped: &mut dyn FnMut(AssetId<StandardMaterial>, &[&str]),
+    dropped: &mut dyn FnMut(AssetId<GltfMaterial>, &[&str]),
 ) {
     let mut stack: Vec<Entity> = children.iter().collect();
     while let Some(entity) = stack.pop() {
-        if let Ok((entity, maybe_mat)) = mesh_query.get(entity) {
-            let standard = maybe_mat.and_then(|m| Some((m.id(), std_materials.get(&m.0)?)));
-            if let Some((id, standard)) = standard {
-                let features = dropped_standard_features(standard);
+        if let Ok((entity, maybe_surface)) = mesh_query.get(entity) {
+            let surface = maybe_surface.and_then(|s| Some((s.0.id(), gltf_materials.get(&s.0)?)));
+            if let Some((id, gltf)) = surface {
+                let features = dropped_gltf_features(gltf);
                 if !features.is_empty() {
                     dropped(id, &features);
                 }
             }
             let build = |toon_materials: &mut Assets<ToonMaterial>| {
-                let toon = match standard {
-                    Some((_, standard)) => template.clone().with_surface_of(standard),
+                let toon = match surface {
+                    Some((_, gltf)) => template.clone().with_surface_of(gltf),
                     // No glTF surface to copy: the mesh had no material, or
-                    // its `StandardMaterial` asset isn't in `Assets` (never
+                    // its `GltfMaterial` asset isn't in `Assets` (never
                     // loaded, or already dropped). The result is the bare
                     // template — flat white — so say so once rather than
                     // leave a white object as the only clue.
                     None => {
                         bevy::log::warn_once!(
-                            "mesh {entity} has no readable glTF material (component present: {}); \
+                            "mesh {entity} has no readable glTF material (GltfSurface present: {}); \
                              converting to a plain white toon material",
-                            maybe_mat.is_some()
+                            maybe_surface.is_some()
                         );
                         template.clone()
                     }
@@ -247,7 +309,7 @@ fn convert_to_toon(
             let handle = match shared.as_deref_mut() {
                 Some(cache) => cache
                     .0
-                    .entry(maybe_mat.map(|m| m.id()))
+                    .entry(maybe_surface.map(|s| s.0.id()))
                     .or_insert_with(|| build(toon_materials))
                     .clone(),
                 None => build(toon_materials),
@@ -255,7 +317,7 @@ fn convert_to_toon(
 
             commands
                 .entity(entity)
-                .remove::<MeshMaterial3d<StandardMaterial>>()
+                .remove::<GltfSurface>()
                 .insert(MeshMaterial3d(handle));
         }
         if let Ok(grandchildren) = children_query.get(entity) {
@@ -319,7 +381,7 @@ fn propagate_to_mesh_children(
     children: &Children,
     interactable: &Interactable,
     parent_entity: Entity,
-    mesh_query: &Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
+    mesh_query: &Query<(Entity, Option<&GltfSurface>), With<Mesh3d>>,
     children_query: &Query<&Children>,
 ) {
     for child in children.iter() {
@@ -571,19 +633,19 @@ mod tests {
     #[test]
     fn probe_lit_conversions_share_a_material_per_source_material() {
         let mut world = World::new();
-        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<GltfMaterial>::default());
         world.insert_resource(Assets::<ToonMaterial>::default());
         world.init_resource::<ProbeToonMaterials>();
         let gltf_material = world
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::default());
+            .resource_mut::<Assets<GltfMaterial>>()
+            .add(GltfMaterial::default());
 
         let spawn_scene = |world: &mut World| {
             let root = world.spawn_empty().id();
             let mesh = world
                 .spawn((
                     Mesh3d(Handle::default()),
-                    MeshMaterial3d(gltf_material.clone()),
+                    GltfSurface(gltf_material.clone()),
                 ))
                 .id();
             world.entity_mut(root).add_child(mesh);
@@ -598,8 +660,8 @@ mod tests {
             In((root, source)): In<(Entity, ToonSource)>,
             mut commands: Commands,
             children: Query<&Children>,
-            mesh_query: Query<(Entity, Option<&MeshMaterial3d<StandardMaterial>>), With<Mesh3d>>,
-            std_materials: Res<Assets<StandardMaterial>>,
+            mesh_query: Query<(Entity, Option<&GltfSurface>), With<Mesh3d>>,
+            gltf_materials: Res<Assets<GltfMaterial>>,
             mut toon_materials: ResMut<Assets<ToonMaterial>>,
             mut shared: ResMut<ProbeToonMaterials>,
         ) {
@@ -619,7 +681,7 @@ mod tests {
                 children.get(root).unwrap(),
                 &mesh_query,
                 &children,
-                &std_materials,
+                &gltf_materials,
                 &mut toon_materials,
                 shared,
                 &template,
@@ -640,10 +702,75 @@ mod tests {
         assert_ne!(material_of(&world, mesh_c), material_of(&world, mesh_d));
         assert_ne!(material_of(&world, mesh_a), material_of(&world, mesh_c));
         assert!(
-            world
-                .get::<MeshMaterial3d<StandardMaterial>>(mesh_a)
-                .is_none(),
+            world.get::<GltfSurface>(mesh_a).is_none(),
             "the glTF material binding is replaced, not shadowed"
         );
+    }
+
+    /// The regression test for the white-meshes bug: a real glTF loaded
+    /// through bevy's loader with our handler registered — and nothing of
+    /// bevy_pbr, exactly like the app — spawns every mesh with a
+    /// [`GltfSurface`] whose asset carries the authored colour.
+    #[test]
+    fn spawned_gltf_meshes_carry_their_authored_material() {
+        use bevy::{
+            asset::AssetPlugin,
+            world_serialization::{WorldAsset, WorldAssetRoot},
+        };
+
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            TransformPlugin,
+            AssetPlugin {
+                file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(),
+                ..default()
+            },
+            bevy::mesh::MeshPlugin,
+            bevy::image::ImagePlugin::default(),
+            bevy::world_serialization::WorldSerializationPlugin,
+            bevy::gltf::GltfPlugin::default(),
+        ));
+        // The loader allocates these without a plugin registering them.
+        app.init_asset::<bevy::animation::AnimationClip>();
+        register_gltf_surface_handler(&mut app);
+        // `App::update` never runs plugin `finish`, and that is where
+        // `GltfPlugin` registers its loader.
+        app.finish();
+        app.cleanup();
+
+        let scene: Handle<WorldAsset> = app
+            .world()
+            .resource::<AssetServer>()
+            .load("meshes/character/robotv2.gltf#Scene0");
+        app.world_mut().spawn(WorldAssetRoot(scene));
+
+        let mut surfaces = Vec::new();
+        for _ in 0..2000 {
+            app.update();
+            let world = app.world_mut();
+            let mut meshes = world.query_filtered::<Option<&GltfSurface>, With<Mesh3d>>();
+            surfaces = meshes.iter(world).map(|s| s.cloned()).collect();
+            if !surfaces.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!surfaces.is_empty(), "the robot scene never spawned");
+
+        let materials = app.world().resource::<Assets<GltfMaterial>>();
+        for surface in &surfaces {
+            let surface = surface
+                .as_ref()
+                .expect("every glTF primitive carries a GltfSurface");
+            let material = materials
+                .get(&surface.0)
+                .expect("the GltfSurface handle resolves to a loaded GltfMaterial");
+            assert_ne!(
+                material.base_color,
+                Color::WHITE,
+                "the robot's materials are authored dark; white means the surface was lost"
+            );
+        }
     }
 }

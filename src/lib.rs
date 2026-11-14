@@ -89,31 +89,30 @@ pub fn run() {
             // too; `scene_pass::gizmos` draws them instead.
             .disable::<bevy::pbr::PbrPlugin>()
             .disable::<bevy::gizmos_render::GizmoRenderPlugin>(),
-    )
-    // `StandardMaterial` is still an *asset*: the glTF loader produces one per
-    // material and `ToonMaterial::with_surface_of` reads it. `MaterialPlugin`
-    // used to register the type and the component; now we do, the way the
-    // scene pass does for its own materials.
-    .init_asset::<StandardMaterial>()
-    .register_asset_reflect::<StandardMaterial>()
-    .register_type::<MeshMaterial3d<StandardMaterial>>()
-    // Per-pass GPU timings, surfaced in the editor (inspector → nothing
-    // selected → GPU timings). Bevy only adds this itself under
-    // `tracing-tracy`; it costs two timestamps per recorded span and falls
-    // back to CPU encode times where `TIMESTAMP_QUERY` is unavailable.
-    .add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin)
-    .add_plugins(PhysicsPlugins::default())
-    .add_plugins(storage::StoragePlugin)
-    .add_plugins(settings::SettingsPlugin)
-    .add_plugins(ui::UiPlugin)
-    .add_plugins(projects::ProjectsPlugin)
-    .add_plugins(menu::MenuPlugin)
-    .add_plugins(game::SimulationPlugin)
-    .add_plugins(editor::EditorPlugin)
-    .add_plugins(script_host::ScriptHostPlugin)
-    .add_systems(Startup, initialize)
-    .init_state::<AppState>()
-    .run();
+    );
+    // With `PbrPlugin` went the glTF extension handler that gave every
+    // spawned primitive a `StandardMaterial`; ours gives it a `GltfSurface`
+    // instead (the loader's own material, which `ConvertToToon` reads). It
+    // has to land between `GltfPlugin::build` and `::finish`, i.e. here.
+    game::gltf_loading::register_gltf_surface_handler(&mut app);
+    app
+        // Per-pass GPU timings, surfaced in the editor (inspector → nothing
+        // selected → GPU timings). Bevy only adds this itself under
+        // `tracing-tracy`; it costs two timestamps per recorded span and falls
+        // back to CPU encode times where `TIMESTAMP_QUERY` is unavailable.
+        .add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin)
+        .add_plugins(PhysicsPlugins::default())
+        .add_plugins(storage::StoragePlugin)
+        .add_plugins(settings::SettingsPlugin)
+        .add_plugins(ui::UiPlugin)
+        .add_plugins(projects::ProjectsPlugin)
+        .add_plugins(menu::MenuPlugin)
+        .add_plugins(game::SimulationPlugin)
+        .add_plugins(editor::EditorPlugin)
+        .add_plugins(script_host::ScriptHostPlugin)
+        .add_systems(Startup, initialize)
+        .init_state::<AppState>()
+        .run();
 }
 
 /// Point bevy's Chrome trace at the temp dir instead of the working

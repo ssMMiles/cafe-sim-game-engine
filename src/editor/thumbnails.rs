@@ -6,9 +6,9 @@
 //! [`ThumbnailCache`] keeps by catalog key and `editor_ui` binds for egui.
 //! Subjects are spawned *with* `ConvertToToon` and no lightmap ever lands on
 //! them, so they render flat in their glTF base colours and textures — the
-//! shared white lightmap texel reads as "fully lit". Nothing in the app draws
-//! `StandardMaterial` (there is no bevy_pbr), so this is also the only way a
-//! subject renders at all.
+//! shared white lightmap texel reads as "fully lit". A freshly spawned glTF
+//! mesh carries only a `GltfSurface` (there is no bevy_pbr and nothing draws
+//! that), so this is also the only way a subject renders at all.
 //!
 //! The job pipeline advances one state per frame: spawn the subject, wait for
 //! its meshes to load (`Aabb`s appear, and the scene's dependencies — its
@@ -260,8 +260,8 @@ fn spawn_subject(
             Visibility::Inherited,
             // Toon, lightmap source, and no lightmap ever lands: the shared
             // white texel reads as "fully lit", so the subject renders flat
-            // in its own base colour and texture. Nothing in the app draws
-            // `StandardMaterial` any more (no bevy_pbr), so this is also the
+            // in its own base colour and texture. A fresh glTF mesh carries
+            // only a `GltfSurface`, which nothing draws, so this is also the
             // only way it renders at all.
             ConvertToToon,
         ));

@@ -294,10 +294,14 @@ inside `bevy_gizmos_render` is private, so this is a from-scratch renderer
 over `bevy_gizmos`' public `GizmoHandles`/`GizmoAsset` — solid, dotted and
 dashed lines, list and strip, perspective width, depth bias; **line joints
 are not supported** (nothing here configures them) and neither are retained
-`Gizmo` components (nothing uses them); and **`StandardMaterial` as an
-asset**, which the glTF loader still produces and `with_surface_of` converts:
-`init_asset` + `register_type::<MeshMaterial3d<StandardMaterial>>` by hand,
-the way Phase 1 did for terrain.
+`Gizmo` components (nothing uses them). `StandardMaterial` was at first kept
+as an asset (`init_asset` + `register_type` by hand) on the assumption that
+the glTF loader produces it — it does not: in Bevy 0.20 `PbrPlugin`'s glTF
+*extension handler* did, so removing the plugin left every spawned primitive
+with no material and every glTF mesh white (2026-11-08 → 2026-11-13). Since
+2026-11-13 our own handler puts engine-api's `GltfSurface` — a handle to the
+loader's renderer-agnostic `GltfMaterial` — on each primitive and
+`with_surface_of` reads that; `StandardMaterial` is gone entirely (ABI 18).
 
 What goes with `PbrPlugin`: `MaterialPlugin<StandardMaterial>`, the mesh
 render plugin (extraction, GPU preprocessing, binned phases, `mesh_view` bind

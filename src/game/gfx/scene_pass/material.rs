@@ -33,7 +33,7 @@ use bevy::{
             PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets, prepare_assets,
         },
         render_resource::{
-            AsBindGroup, BindGroup, BindGroupLayoutDescriptor, PipelineCache,
+            AsBindGroup, AsBindGroupError, BindGroup, BindGroupLayoutDescriptor, PipelineCache,
             SpecializedMeshPipeline, SpecializedMeshPipelines,
         },
         renderer::RenderDevice,
@@ -173,8 +173,15 @@ impl<M: SceneMaterial> RenderAsset for PreparedMaterial<M> {
                 bind_group: prepared.bind_group,
                 key: material.bind_group_data(),
             })
-            // A texture that hasn't finished uploading: try again next frame.
-            .map_err(PrepareAssetError::AsBindGroupError)
+            .map_err(|err| match err {
+                // A texture that hasn't finished uploading. This has to be
+                // bevy's *retry* variant: `PrepareAssetError::AsBindGroupError`
+                // is logged and the asset dropped for good, which is how every
+                // textured glTF material whose image landed a frame late
+                // (the cafe walls) rendered as nothing at all.
+                AsBindGroupError::RetryNextUpdate => PrepareAssetError::RetryNextUpdate(material),
+                other => PrepareAssetError::AsBindGroupError(other),
+            })
     }
 }
 
