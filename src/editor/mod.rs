@@ -65,7 +65,10 @@ use gizmo::{
 use grab::{GrabbedEntity, handle_grab_keys, place_grabbed_object, release_grab};
 use history::{History, apply_undo_redo, prepare_history, settle_history, undo_redo_hotkeys};
 use input::keyboard_free;
-use lightmap_toggle::{sync_lightmap_mode, toggle_lightmap_mode};
+use lightmap_toggle::{
+    TerrainDebugMode, reset_terrain_debug_view, sync_lightmap_mode, sync_terrain_debug_view,
+    toggle_lightmap_mode,
+};
 use object_placement::{
     PlacementPreviewEntity, adjust_placement_rotation, adjust_placement_scale, draw_preview_gizmo,
     handle_place_click, rebuild_preview_on_config_change, setup_placement_preview,
@@ -152,6 +155,7 @@ impl Plugin for EditorPlugin {
         app.add_message::<PrefabAction>();
         app.init_resource::<PrefabEditState>();
         app.init_resource::<LightingState>();
+        app.init_resource::<TerrainDebugMode>();
         app.init_resource::<History>();
         app.init_resource::<world_export::WorldExport>();
         app.add_systems(
@@ -281,7 +285,7 @@ impl Plugin for EditorPlugin {
         app.add_systems(OnExit(AppState::InGame), thumbnails::reset_thumbnail_rig);
         app.add_systems(
             OnEnter(EditorMode::Gameplay),
-            thumbnails::park_thumbnail_rig,
+            (thumbnails::park_thumbnail_rig, reset_terrain_debug_view),
         );
         app.add_observer(thumbnails::on_thumbnail_readback);
         app.add_systems(Startup, request_asset_manifest);
@@ -357,7 +361,12 @@ impl Plugin for EditorPlugin {
         );
         app.add_systems(
             Update,
-            (sync_physics_debug, sync_lightmap_mode).in_set(EditorSet::InGame),
+            (
+                sync_physics_debug,
+                sync_lightmap_mode,
+                sync_terrain_debug_view,
+            )
+                .in_set(EditorSet::InGame),
         );
 
         // ── Mode toggle (must work in both modes) ────────────────────────────

@@ -17,7 +17,7 @@ use super::object_lightmaps::{
 };
 use super::raycast::BakeHeightCache;
 use super::uv_unwrap::{
-    LightmapUvCache, cell_texels, lightmap_resolution, max_world_edge, texels_per_cell,
+    LightmapUvCache, cell_texels, grid_side, lightmap_resolution, max_world_edge, texels_per_cell,
 };
 use super::{BakeConfig, BakeRegion, raycast};
 use crate::game::gfx::toon_material::ToonMaterial;
@@ -40,12 +40,22 @@ pub struct ObjectBakeJob {
     tri_count: u32,
     mesh: MeshSnapshot,
     world_mat: Mat4,
-    cache: BakeHeightCache,
     /// Resolved on the main world — `unique_material` may *add* an asset, so
     /// it cannot run off-thread.
     material: Handle<ToonMaterial>,
     /// Where the finished EXR goes: a file path natively, an OPFS key on wasm.
     dest: LightmapLocation,
+}
+
+/// Everything one object bake pass needs off the main thread: the jobs and
+/// **one** terrain snapshot they all read. Objects used to each extract
+/// their own cache (bbox + 80 m ray reach), which overlapped almost
+/// entirely — dozens of copies of the same tiles, and since the paint-aware
+/// albedo grid rides along, twice the bytes. One region-wide extract instead,
+/// as `docs/GPU_OBJECT_BAKE_PLAN.md` suggested.
+pub struct ObjectBakePass {
+    pub jobs: Vec<ObjectBakeJob>,
+    pub cache: BakeHeightCache,
 }
 
 /// A finished sub-mesh lightmap on its way back to the ECS.
@@ -115,8 +125,13 @@ pub fn collect_object_bake_jobs(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ToonMaterial>,
     uv_cache: &mut LightmapUvCache,
-) -> Vec<ObjectBakeJob> {
+    paint: &crate::game::world::terrain::paint::PaintmapData,
+) -> Option<ObjectBakePass> {
+    let palette = &terrain_world.metadata.palette;
     let mut jobs = Vec::new();
+    // Union of every job's bounds; the one cache covers it plus ray reach.
+    let mut pass_min = Vec3::splat(f32::MAX);
+    let mut pass_max = Vec3::splat(f32::MIN);
 
     for (root_entity, placed_obj, global_transform) in placed_query.iter() {
         if !region.contains_point(global_transform.translation()) {
@@ -130,8 +145,8 @@ pub fn collect_object_bake_jobs(
             continue;
         }
 
-        // Compute the world-space bounding box across all sub-meshes so we can
-        // build a tight heightmap cache covering the entire object + ray reach.
+        // World-space bounds across all sub-meshes, folded into the pass's
+        // union below so one heightmap cache covers every object + ray reach.
         let ray_reach = config.ao_radius * 4.0;
         let mut bbox_min = Vec3::splat(f32::MAX);
         let mut bbox_max = Vec3::splat(f32::MIN);
@@ -204,20 +219,27 @@ pub fn collect_object_bake_jobs(
                 tri_count,
                 mesh: snapshot,
                 world_mat,
-                cache: BakeHeightCache::extract(
-                    heightmap,
-                    bbox_min.x - ray_reach,
-                    bbox_min.z - ray_reach,
-                    bbox_max.x + ray_reach,
-                    bbox_max.z + ray_reach,
-                ),
                 material,
                 dest: object_lightmap_location(terrain_world, placed_obj.id, k),
             });
+            pass_min = pass_min.min(bbox_min);
+            pass_max = pass_max.max(bbox_max);
         }
     }
 
-    jobs
+    if jobs.is_empty() {
+        return None;
+    }
+    let ray_reach = config.ao_radius * 4.0;
+    let cache = BakeHeightCache::extract(
+        heightmap,
+        pass_min.x - ray_reach,
+        pass_min.z - ray_reach,
+        pass_max.x + ray_reach,
+        pass_max.z + ray_reach,
+    )
+    .with_paint(paint, palette);
+    Some(ObjectBakePass { jobs, cache })
 }
 
 /// Bake every gathered job. **Touches no ECS state** — this is what runs on
@@ -239,12 +261,17 @@ pub fn collect_object_bake_jobs(
 /// shading is independent per texel. The split is also what a GPU bake would
 /// need — step 1's buffer is what it would upload. See
 /// `docs/GPU_OBJECT_BAKE_PLAN.md`.
-pub fn run_object_bake_jobs(
-    jobs: Vec<ObjectBakeJob>,
+///
+/// `async` only for the browser: on wasm this runs on the main thread, so it
+/// yields ([`pacing::breathe`]) between work bands to keep the tab alive;
+/// natively the awaits are no-ops on a worker thread.
+pub async fn run_object_bake_jobs(
+    pass: ObjectBakePass,
     config: &BakeConfig,
     lighting: &BakeLighting,
     bvh: &TriangleBvh,
 ) -> Vec<ObjectBakeResult> {
+    let ObjectBakePass { jobs, cache } = pass;
     let mut stats = BakeStats::default();
     let mut results = Vec::with_capacity(jobs.len());
 
@@ -268,9 +295,17 @@ pub fn run_object_bake_jobs(
         let mut written: Vec<bool> = geometry.iter().map(Option::is_some).collect();
         let covered_count = covered.iter().filter(|c| **c).count();
 
+        super::pacing::breathe().await;
+
         // Pass 2 — shade. This is the expensive one, and it parallelises.
         let t_shade = Instant::now();
-        let mut lightmap = shade_geometry(&geometry, res, &job.cache, bvh, config, lighting);
+        let grid = grid_side(job.tri_count) as usize;
+        let shaded = shade_geometry(
+            &geometry, &covered, res, grid, &cache, bvh, config, lighting,
+        )
+        .await;
+        let mut lightmap = shaded.lightmap;
+        stats.lattice_points += shaded.lattice_points;
         stats.shade += t_shade.elapsed();
 
         stats.sub_meshes += 1;
@@ -293,9 +328,8 @@ pub fn run_object_bake_jobs(
         // edges as speckle. Confined to each triangle's own cell (atlas
         // neighbours are not surface neighbours) and to covered texels
         // (the gutter is still empty until dilation below), and capped so
-        // a small cell can't be blurred flat.
-        let cell_px = cell_texels(res as u32, job.tri_count) as usize;
-        let blur_radius = config.blur_radius.min((cell_px / 4) as u32);
+        // a small cell can't be blurred flat — the same `cell_px` and radius
+        // the rasteriser's margin was sized with above.
         lightmap = lightmap.blur_cells(blur_radius, cell_px, &written);
 
         // Flood lit values one texel past each triangle's edge so bilinear
@@ -304,6 +338,7 @@ pub fn run_object_bake_jobs(
         // this must *not* scale with the gutter.
         lightmap.dilate(&mut written, config.dilate_passes);
         stats.post += t_post.elapsed();
+        super::pacing::breathe().await;
 
         // A failed write is logged but doesn't stop the live material from
         // picking up the result.
@@ -320,6 +355,7 @@ pub fn run_object_bake_jobs(
             material: job.material,
             image: lightmap.into_image(),
         });
+        super::pacing::breathe().await;
     }
 
     stats.report(config, lighting.lights.len());
@@ -343,6 +379,9 @@ struct BakeStats {
     /// Total atlas area, covered or not. The ratio shows how much of the
     /// per-triangle cell layout is gutter and unused half-cell.
     texels_total: usize,
+    /// Lattice points AO and bounce were actually evaluated at (per-cell
+    /// coarse grid); the rest of the covered texels interpolated them.
+    lattice_points: usize,
     max_res: usize,
     rasterize: Duration,
     shade: Duration,
@@ -358,22 +397,23 @@ impl BakeStats {
             return;
         }
         let total = self.rasterize + self.shade + self.post + self.io;
-        // Rays per covered texel: one sun shadow ray, the AO hemisphere, the
-        // bounce hemisphere, and one segment ray per placed light (an upper
-        // bound — lights out of range or behind the surface cast none, and a
-        // bounce ray only casts its shadow ray if it lands on terrain).
-        let rays_per_texel =
-            1 + config.ao_rays as usize + config.bounce_rays as usize + light_count;
-        let est_rays = self.texels_covered * rays_per_texel;
+        // Rays: one sun shadow ray and one segment ray per placed light per
+        // shaded texel (an upper bound — lights out of range or behind the
+        // surface cast none), plus the AO and bounce hemispheres, which are
+        // cast only at the coarse lattice points.
+        let per_texel = 1 + light_count;
+        let per_lattice = config.ao_rays as usize + config.bounce_rays as usize;
+        let est_rays = self.texels_covered * per_texel + self.lattice_points * per_lattice;
 
         info!(
             "Object bake: {} sub-mesh(es), {} of {} texels covered ({:.0}%), \
-             largest atlas {}², ≥{:.1}M rays",
+             largest atlas {}², AO/bounce at {} lattice points, ≥{:.1}M rays",
             self.sub_meshes,
             self.texels_covered,
             self.texels_total,
             100.0 * self.texels_covered as f32 / self.texels_total.max(1) as f32,
             self.max_res,
+            self.lattice_points,
             est_rays as f64 / 1.0e6,
         );
         info!(
@@ -556,115 +596,309 @@ fn rasterize_geometry(mesh: &MeshSnapshot, world_mat: &Mat4, res: usize, margin:
     Raster { geometry, covered }
 }
 
-/// Shade every covered texel with the baked lighting model.
+/// What [`shade_geometry`] hands back.
+struct Shaded {
+    lightmap: LightmapBuffer,
+    /// How many coarse-lattice points AO and bounce were evaluated at.
+    lattice_points: usize,
+}
+
+/// Lattice points per work band. AO + bounce at one point is ~4 µs natively
+/// and several times that on the wasm main thread, so this is a few tens of
+/// milliseconds a band — one yield's worth of frozen tab.
+const LATTICE_BAND: usize = 2048;
+/// Texels per work band for the per-texel pass (sun shadow + local lights:
+/// ~100 ns each natively).
+const TEXEL_BAND: usize = 1 << 16;
+
+/// Shade every texel that has geometry.
 ///
-/// This is where an object bake spends essentially all of its time: each
-/// covered texel casts a sun shadow ray, an AO hemisphere, a bounce
-/// hemisphere, and one segment ray per placed light. None of them depend on
-/// any other texel, so the pass is `par_iter` — matching what the CPU
-/// terrain bake has always done (`terrain.rs`).
+/// Two passes, as the CPU terrain bake does (`terrain::bake_chunk`): the
+/// terms that vary over metres — ambient occlusion and indirect bounce,
+/// ~98 % of the ray cost (`docs/GPU_OBJECT_BAKE_PLAN.md`, "Re-measured") —
+/// are evaluated on a lattice `cpu_lowfreq_downsample` texels apart and
+/// bilinearly interpolated, while the sun shadow and the local-light shadows
+/// — the sharp terms the toon bands key off — stay per texel.
 ///
-/// Bounce is the same terrain-only indirect term the terrain bake uses.
-/// Objects used to get none, so a crate's shaded side was lit by
-/// `ambient × ao` alone while the ground 10 cm away also had
-/// `sun × bounce` — a visible step exactly at the object/terrain junction.
-/// Unlike the terrain bake there is no coarse grid for it: object texels are
-/// sparse in the atlas and not spatially coherent across cells, so it is
-/// evaluated per texel, seeded by atlas index for decorrelated azimuths.
-///
-/// Uncovered texels stay black; `dilate` floods lit values into them after
-/// the blur, so nothing ever samples one.
-fn shade_geometry(
+/// The lattice is **per atlas cell**, never across cells: every cell holds
+/// exactly one triangle, so within a cell texels are contiguous in UV *and*
+/// in world space (by a linear map), but neighbouring cells hold unrelated
+/// triangles. Cells are the unwrapper's own — `grid` per side, cell `c`
+/// spanning texels `⌊c·res/grid⌋ ..< ⌊(c+1)·res/grid⌋` (`res` is a power of
+/// two, so the widths differ by one and a fixed `res/grid` would drift off
+/// the UV cells by up to a whole cell at the far edge). Each cell gets its
+/// own lattice, from its first texel to its last, and a texel only ever
+/// interpolates lattice points of its own cell. Lattice points are taken
+/// only on *covered* texels — the margin band carries another triangle's
+/// extrapolated geometry wherever it crosses the gutter, so a margin texel
+/// is a valid interpolation target but never a lattice source — and a texel
+/// whose four corners are all missing is evaluated exactly. Cells too small
+/// for two lattice steps are evaluated per texel.
+async fn shade_geometry(
     geometry: &[Option<TexelGeom>],
+    covered: &[bool],
     res: usize,
+    grid: usize,
     cache: &BakeHeightCache,
     bvh: &TriangleBvh,
     config: &BakeConfig,
     lighting: &BakeLighting,
-) -> LightmapBuffer {
+) -> Shaded {
     let sun_dir = lighting.sun_dir;
 
-    let texels: Vec<Vec3> = geometry
-        .par_iter()
-        .enumerate()
-        .map(|(idx, slot)| {
-            let Some(g) = slot else {
-                return Vec3::ZERO;
-            };
+    // AO + bounce for the texel at `idx`, which must have geometry.
+    let low_freq = |idx: usize, g: &TexelGeom| -> (f32, Vec3) {
+        let (dda, origin) = ray_origins(g);
+        let ao = raycast::compute_ao(
+            dda,
+            origin,
+            g.normal,
+            cache,
+            bvh,
+            config.ao_radius,
+            config.ao_rays,
+            config.ao_steps,
+            idx as u32,
+        );
+        let bounce = raycast::compute_indirect_bounce(
+            dda,
+            origin,
+            g.normal,
+            cache,
+            bvh,
+            lighting,
+            config.ao_radius * 4.0,
+            config.bounce_rays,
+            config.shadow_steps,
+            config.scenery_albedo,
+            config.bounce_count,
+            |dist| config.light_shadow_steps(dist),
+            idx as u32,
+        );
+        (ao, bounce)
+    };
 
-            // Two origins, as the terrain and probe bakes use. `origin` is
-            // the real surface point, for the BVH; `dda` is lifted 0.5 up
-            // for the coarse heightmap march, whose steps are ~1.25 m.
-            //
-            // Marching from the surface looked safe — "an object texel is
-            // not on the ground, so there is nothing to step off" — but the
-            // ray still crosses *terrain*, and plenty of object texels sit
-            // at or just below the bilinearly sampled heightmap: a building
-            // floor, anything resting on a slope, a half-buried prop. For
-            // those, `terrain_h > sample.y` fired on the very first step and
-            // killed the sun *and* every local light, baking the texel to
-            // the floor value. The cafe's own floor quad is exactly this
-            // case. The bounce walk inside `compute_indirect_bounce` already
-            // applies the same lift at each of its hits, for the same reason.
-            let origin = g.world_pos + g.face_normal * 0.02;
-            let dda = origin + Vec3::Y * 0.5;
+    // ── Pass 1: the lattice ────────────────────────────────────────────────
+    let step = config.cpu_lowfreq_downsample.max(1) as usize;
+    let grid = grid.clamp(1, res);
+    let lattice = (step > 1 && res / grid >= 2 * step).then(|| CellLattice::new(res, grid, step));
+    let mut lattice_values: Vec<Option<(f32, Vec3)>> = Vec::new();
+    let mut lattice_points = 0usize;
+    if let Some(lat) = &lattice {
+        let n = lat.points_total();
+        lattice_values = vec![None; n];
+        for band_start in (0..n).step_by(LATTICE_BAND) {
+            let band_end = (band_start + LATTICE_BAND).min(n);
+            let band: Vec<Option<(f32, Vec3)>> = (band_start..band_end)
+                .into_par_iter()
+                .map(|li| {
+                    let idx = lat.texel_of_point(li);
+                    if !covered[idx] {
+                        return None;
+                    }
+                    geometry[idx].as_ref().map(|g| low_freq(idx, g))
+                })
+                .collect();
+            lattice_points += band.iter().filter(|v| v.is_some()).count();
+            lattice_values[band_start..band_end].copy_from_slice(&band);
+            super::pacing::breathe().await;
+        }
+    }
 
-            let shadow = raycast::cast_shadow_ray(
-                dda,
-                origin,
-                sun_dir,
-                cache,
-                bvh,
-                config.ao_radius * 4.0,
-                config.shadow_steps,
-            );
-            let ao = raycast::compute_ao(
-                dda,
-                origin,
-                g.normal,
-                cache,
-                bvh,
-                config.ao_radius,
-                config.ao_rays,
-                config.ao_steps,
-                idx as u32,
-            );
-            let bounce = raycast::compute_indirect_bounce(
-                dda,
-                origin,
-                g.normal,
-                cache,
-                bvh,
-                lighting,
-                config.ao_radius * 4.0,
-                config.bounce_rays,
-                config.shadow_steps,
-                config.terrain_albedo,
-                config.scenery_albedo,
-                config.bounce_count,
-                |dist| config.light_shadow_steps(dist),
-                idx as u32,
-            );
-            let ndotl = g.normal.dot(sun_dir).max(0.0);
+    // ── Pass 2: every texel ───────────────────────────────────────────────
+    let mut texels: Vec<Vec3> = vec![Vec3::ZERO; res * res];
+    let mut exact_points = 0usize;
+    for band_start in (0..res * res).step_by(TEXEL_BAND) {
+        let band_end = (band_start + TEXEL_BAND).min(res * res);
+        let band: Vec<(Vec3, bool)> = (band_start..band_end)
+            .into_par_iter()
+            .map(|idx| {
+                let Some(g) = &geometry[idx] else {
+                    return (Vec3::ZERO, false);
+                };
+                let (dda, origin) = ray_origins(g);
 
-            let mut radiance =
-                lighting.sun_and_ambient(ndotl, shadow, ao, config.bounce_strength * bounce);
-            radiance += lighting.local_lights(origin, g.normal, |dir, dist| {
-                raycast::cast_shadow_ray_segment(
+                // Interpolated from the cell's lattice where it has values
+                // around this texel; evaluated exactly otherwise.
+                let (interpolated, exact) = match &lattice {
+                    Some(lat) => match lat.interpolate(&lattice_values, idx) {
+                        Some(v) => (v, false),
+                        None => (low_freq(idx, g), true),
+                    },
+                    None => (low_freq(idx, g), true),
+                };
+                let (ao, bounce) = interpolated;
+
+                let shadow = raycast::cast_shadow_ray(
                     dda,
                     origin,
-                    dir,
-                    dist,
+                    sun_dir,
                     cache,
                     bvh,
-                    config.light_shadow_steps(dist),
-                )
-            });
-            radiance
-        })
-        .collect();
+                    config.ao_radius * 4.0,
+                    config.shadow_steps,
+                );
+                let ndotl = g.normal.dot(sun_dir).max(0.0);
+                let mut radiance =
+                    lighting.sun_and_ambient(ndotl, shadow, ao, config.bounce_strength * bounce);
+                radiance += lighting.local_lights(origin, g.normal, |dir, dist| {
+                    raycast::cast_shadow_ray_segment(
+                        dda,
+                        origin,
+                        dir,
+                        dist,
+                        cache,
+                        bvh,
+                        config.light_shadow_steps(dist),
+                    )
+                });
+                (radiance, exact)
+            })
+            .collect();
+        for (i, (radiance, exact)) in band.into_iter().enumerate() {
+            texels[band_start + i] = radiance;
+            exact_points += exact as usize;
+        }
+        super::pacing::breathe().await;
+    }
 
-    LightmapBuffer { res, texels }
+    Shaded {
+        lightmap: LightmapBuffer { res, texels },
+        lattice_points: lattice_points + exact_points,
+    }
+}
+
+/// The two ray origins every object texel marches from.
+///
+/// `origin` is the real surface point, for the BVH; `dda` is lifted 0.5 up
+/// for the coarse heightmap march, whose steps are ~1.25 m. Marching from
+/// the surface looked safe — "an object texel is not on the ground, so there
+/// is nothing to step off" — but the ray still crosses *terrain*, and plenty
+/// of object texels sit at or just below the bilinearly sampled heightmap: a
+/// building floor, anything resting on a slope, a half-buried prop. For
+/// those, `terrain_h > sample.y` fired on the very first step and killed the
+/// sun *and* every local light, baking the texel to the floor value. The
+/// cafe's own floor quad is exactly this case. The bounce walk inside
+/// `compute_indirect_bounce` applies the same lift at each of its hits.
+#[inline]
+fn ray_origins(g: &TexelGeom) -> (Vec3, Vec3) {
+    let origin = g.world_pos + g.face_normal * 0.02;
+    (origin + Vec3::Y * 0.5, origin)
+}
+
+/// The per-cell coarse lattice AO and bounce are evaluated on.
+///
+/// Cells are the unwrapper's (`grid` per side; see [`shade_geometry`] for
+/// the bounds). Every cell gets `per_side` points along each axis at local
+/// offsets `0, step, 2·step, …` and its last texel, so the lattice always
+/// reaches the far edge; a narrower cell's surplus points clamp onto its
+/// last texel (duplicates, harmless). Point `(i, j)` of cell `(cx, cy)` lives
+/// at flat index `(cy·per_side + j)·width + cx·per_side + i`.
+struct CellLattice {
+    res: usize,
+    grid: usize,
+    step: usize,
+    /// Lattice points per cell side, sized for the widest cell.
+    per_side: usize,
+}
+
+impl CellLattice {
+    fn new(res: usize, grid: usize, step: usize) -> Self {
+        let widest = res.div_ceil(grid);
+        let per_side = (widest - 1).div_ceil(step) + 1;
+        Self {
+            res,
+            grid,
+            step,
+            per_side,
+        }
+    }
+
+    /// First texel of cell `c` (exclusive end is `cell_start(c + 1)`), the
+    /// unwrapper's `⌊c · res / grid⌋`.
+    #[inline]
+    fn cell_start(&self, c: usize) -> usize {
+        c * self.res / self.grid
+    }
+
+    /// The cell a texel coordinate lies in.
+    #[inline]
+    fn cell_of(&self, t: usize) -> usize {
+        let mut c = (t * self.grid / self.res).min(self.grid - 1);
+        while c > 0 && self.cell_start(c) > t {
+            c -= 1;
+        }
+        while c + 1 < self.grid && self.cell_start(c + 1) <= t {
+            c += 1;
+        }
+        c
+    }
+
+    fn width(&self) -> usize {
+        self.grid * self.per_side
+    }
+
+    fn points_total(&self) -> usize {
+        self.width() * self.width()
+    }
+
+    /// Texel coordinate of lattice point `k` along one axis in cell `c`.
+    #[inline]
+    fn point_at(&self, c: usize, k: usize) -> usize {
+        let start = self.cell_start(c);
+        let last = self.cell_start(c + 1) - 1;
+        (start + k * self.step).min(last)
+    }
+
+    /// The atlas texel a lattice point sits on.
+    fn texel_of_point(&self, li: usize) -> usize {
+        let w = self.width();
+        let (px, py) = (li % w, li / w);
+        let (cx, i) = (px / self.per_side, px % self.per_side);
+        let (cy, j) = (py / self.per_side, py % self.per_side);
+        self.point_at(cy, j) * self.res + self.point_at(cx, i)
+    }
+
+    /// Bilinear read of the lattice around texel `idx`, from whichever of
+    /// its four corners have values (weights renormalised). `None` when none
+    /// do.
+    fn interpolate(&self, values: &[Option<(f32, Vec3)>], idx: usize) -> Option<(f32, Vec3)> {
+        let (tx, ty) = (idx % self.res, idx / self.res);
+        let (cx, cy) = (self.cell_of(tx), self.cell_of(ty));
+        let axis = |c: usize, t: usize| -> (usize, usize, f32) {
+            let l = t - self.cell_start(c);
+            let k0 = (l / self.step).min(self.per_side - 1);
+            let k1 = (k0 + 1).min(self.per_side - 1);
+            let (p0, p1) = (self.point_at(c, k0), self.point_at(c, k1));
+            let f = if p1 > p0 {
+                (t - p0) as f32 / (p1 - p0) as f32
+            } else {
+                0.0
+            };
+            (k0, k1, f.clamp(0.0, 1.0))
+        };
+        let (i0, i1, fx) = axis(cx, tx);
+        let (j0, j1, fy) = axis(cy, ty);
+        let w = self.width();
+        let at = |i: usize, j: usize| values[(cy * self.per_side + j) * w + cx * self.per_side + i];
+
+        let mut sum_ao = 0.0f32;
+        let mut sum_bounce = Vec3::ZERO;
+        let mut sum_w = 0.0f32;
+        for (i, j, weight) in [
+            (i0, j0, (1.0 - fx) * (1.0 - fy)),
+            (i1, j0, fx * (1.0 - fy)),
+            (i0, j1, (1.0 - fx) * fy),
+            (i1, j1, fx * fy),
+        ] {
+            if let Some((ao, bounce)) = at(i, j) {
+                sum_ao += ao * weight;
+                sum_bounce += bounce * weight;
+                sum_w += weight;
+            }
+        }
+        (sum_w > 1e-6).then(|| (sum_ao / sum_w, sum_bounce / sum_w))
+    }
 }
 
 /// Is `p` within `margin` (in UV units) of the triangle `(a, b, c)`?
@@ -866,6 +1100,162 @@ mod tests {
     /// A mesh the unwrapper never touched has no UV1, so there is nothing to
     /// rasterise against. Snapshotting must refuse it — the bake then logs
     /// and skips that sub-mesh rather than producing a black lightmap.
+    /// The lattice's own geometry, on an atlas whose width does *not* divide
+    /// by the cell count (the normal case: `res` is a power of two): cells
+    /// are exactly the unwrapper's `⌊c·res/grid⌋` bounds, every lattice
+    /// point lies inside its own cell, a linear field interpolates exactly
+    /// within a cell (bilinear over an axis-aligned cell is exact for a
+    /// plane), a per-cell-constant field never bleeds across a cell edge,
+    /// missing corners renormalise, and all-missing is "evaluate exactly".
+    #[test]
+    fn the_cell_lattice_follows_the_unwrappers_cells_and_stays_inside_them() {
+        let (res, grid, step) = (64usize, 3usize, 4usize);
+        let lat = CellLattice::new(res, grid, step);
+        assert_eq!(
+            [
+                lat.cell_start(0),
+                lat.cell_start(1),
+                lat.cell_start(2),
+                lat.cell_start(3)
+            ],
+            [0, 21, 42, 64]
+        );
+        for t in 0..res {
+            let c = lat.cell_of(t);
+            assert!(
+                lat.cell_start(c) <= t && t < lat.cell_start(c + 1),
+                "texel {t} → cell {c}"
+            );
+        }
+        for li in 0..lat.points_total() {
+            let idx = lat.texel_of_point(li);
+            let (tx, ty) = (idx % res, idx / res);
+            let w = lat.width();
+            let (cx, cy) = ((li % w) / lat.per_side, (li / w) / lat.per_side);
+            assert_eq!(
+                (lat.cell_of(tx), lat.cell_of(ty)),
+                (cx, cy),
+                "point {li} left its cell"
+            );
+        }
+
+        // A linear field is reproduced exactly inside every cell.
+        let field = |tx: usize, ty: usize| (tx as f32 + 2.0 * ty as f32, Vec3::splat(ty as f32));
+        let values: Vec<Option<(f32, Vec3)>> = (0..lat.points_total())
+            .map(|li| {
+                let idx = lat.texel_of_point(li);
+                Some(field(idx % res, idx / res))
+            })
+            .collect();
+        for ty in 0..res {
+            for tx in 0..res {
+                let (ao, bounce) = lat.interpolate(&values, ty * res + tx).unwrap();
+                let (want_ao, want_b) = field(tx, ty);
+                assert!(
+                    (ao - want_ao).abs() < 1e-3,
+                    "({tx},{ty}): {ao} vs {want_ao}"
+                );
+                assert!((bounce - want_b).length() < 1e-3);
+            }
+        }
+
+        // A field constant per cell comes back unmixed at every texel —
+        // nothing is interpolated across a cell edge.
+        let cell_value = |tx: usize, ty: usize| (lat.cell_of(ty) * grid + lat.cell_of(tx)) as f32;
+        let per_cell: Vec<Option<(f32, Vec3)>> = (0..lat.points_total())
+            .map(|li| {
+                let idx = lat.texel_of_point(li);
+                Some((cell_value(idx % res, idx / res), Vec3::ZERO))
+            })
+            .collect();
+        for ty in 0..res {
+            for tx in 0..res {
+                let (v, _) = lat.interpolate(&per_cell, ty * res + tx).unwrap();
+                assert_eq!(v, cell_value(tx, ty), "({tx},{ty}) mixed cells");
+            }
+        }
+
+        // A missing corner is dropped and the rest renormalised; all four
+        // missing is "evaluate exactly".
+        let mut holes = values.clone();
+        let w = lat.width();
+        holes[w + 1] = None; // cell (0,0), point (1,1)
+        let (ao, _) = lat.interpolate(&holes, 2 * res + 2).unwrap();
+        assert!(ao.is_finite());
+        for j in 0..lat.per_side {
+            for i in 0..lat.per_side {
+                holes[j * w + i] = None;
+            }
+        }
+        assert!(lat.interpolate(&holes, 2 * res + 2).is_none());
+    }
+
+    /// On an open plane the lattice and the exact path must agree — AO is
+    /// 1 and bounce ~0 everywhere, so interpolation has nothing to smear —
+    /// and every covered texel must come out finite and lit. Guards the
+    /// index arithmetic between lattice points and atlas texels.
+    #[test]
+    fn lattice_shading_matches_exact_shading_on_a_plane() {
+        use crate::game::world::terrain::HeightmapData;
+        let mut hm = HeightmapData::new((0.25, 0.25));
+        for tx in -200..200 {
+            for tz in -200..200 {
+                hm.set_tile(tx, tz, -5.0);
+            }
+        }
+        let cache = BakeHeightCache::extract(&hm, -40.0, -40.0, 40.0, 40.0);
+        let bvh = TriangleBvh::build(Vec::new());
+        let env = crate::game::world::terrain::storage::EnvironmentData::default();
+        let lighting = BakeLighting::new(&env, Vec3::new(0.0, 1.0, 0.0), Vec::new());
+
+        let mesh = unwrapped_quad();
+        let res = 64;
+        let raster = rasterize_geometry(&mesh, &Mat4::IDENTITY, res, 2);
+        let shade = |step: u32| {
+            let config = BakeConfig {
+                cpu_lowfreq_downsample: step,
+                ao_rays: 4,
+                bounce_rays: 4,
+                ..BakeConfig::default()
+            };
+            bevy::tasks::block_on(shade_geometry(
+                &raster.geometry,
+                &raster.covered,
+                res,
+                grid_side(2) as usize,
+                &cache,
+                &bvh,
+                &config,
+                &lighting,
+            ))
+        };
+        let exact = shade(1);
+        let coarse = shade(4);
+        // Lattice points plus the exact fallbacks at cell edges (where the
+        // lattice corners sit in the gutter) must still be far fewer than
+        // one evaluation per covered texel.
+        assert!(
+            coarse.lattice_points * 2 < exact.lattice_points,
+            "{} vs {}",
+            coarse.lattice_points,
+            exact.lattice_points
+        );
+        let mut compared = 0;
+        for (idx, g) in raster.geometry.iter().enumerate() {
+            if g.is_none() {
+                continue;
+            }
+            let (a, b) = (exact.lightmap.texels[idx], coarse.lightmap.texels[idx]);
+            assert!(b.is_finite() && b.x > 0.0, "texel {idx} unlit: {b}");
+            assert!(
+                (a - b).length() < 0.02,
+                "texel {idx}: exact {a} vs lattice {b}"
+            );
+            compared += 1;
+        }
+        assert!(compared > 100);
+    }
+
     #[test]
     fn a_mesh_without_lightmap_uvs_cannot_be_snapshotted() {
         let mut mesh = Mesh::new(

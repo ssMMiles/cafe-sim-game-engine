@@ -76,9 +76,18 @@ reemitted = (sun_rgb * ndotl * sun_vis + Σ_lights ... + ambient_rgb) * albedo
 ```
 
 One function, called by the lightmap bounce walk, by the probe environment
-gather, and mirrored by hand in `compute_bounce` in the WGSL. Albedo is
-`terrain_albedo` or `scenery_albedo` — one grey number each, because the BVH
-carries triangles and not materials, so there is no colour bleed.
+gather, and mirrored by hand in `compute_bounce` in the WGSL. Albedo is a
+**colour**: a terrain hit reads the paint map's tile under it — the painted
+layers' bake albedos, blended, snapshotted into `BakeHeightCache`'s albedo
+grid at extraction (`with_paint`) and uploaded to the GPU bake as the same
+packed bytes (binding 6), so all four bakers quantise identically. Each
+layer's bake albedo is *derived*, never authored: the shader's own layer
+colour with the pattern replaced by its mean dark factor,
+`mix(tint, PATTERN_DARK, mean(smoothstep(0.05, 0.45, 1 − pattern)) × strength)`
+(`paint::layer_bake_albedo`), recomputed by `palette_sync` whenever the palette changes
+(terrain painting Phase 4, 2026-11-14; lightmaps v13, probes v14). Scenery
+stays one grey number (`scenery_albedo`) because the BVH carries triangles
+and not materials, so scenery contributes no colour bleed.
 
 Two things to know about it:
 
@@ -441,6 +450,7 @@ Inspector with nothing selected; saved in `world.meta` v6.
 | Too few / too many steps | `bands` |
 | Shadow edges are jagged | not the curve — check the lightmap's sampler is linear, and the atlas resolution (`mesh_texels_per_metre`) |
 | Interiors are dark and featureless | the bake, not the curve: place lights, and check `scenery_albedo` |
+| Bounce light has the wrong colour | the *paint*: terrain re-emits the painted layers' derived bake albedo (the shader's layer colour at the pattern's mean) |
 | A character looks pasted onto the floor | §6 — the two halves disagreeing |
 
 **Do not fix an exposure problem with the light intensities.** It is the
@@ -470,8 +480,9 @@ stability and currently unused.
 
 `terrain_resolution 1024`, `mesh_texels_per_metre 8`, `mesh_resolution_max
 2048`, `ao_rays 16`, `ao_radius 20.0`, `shadow_steps 64`, `ao_steps 32`,
-`bounce_rays 8`, `bounce_strength 1.0`, `terrain_albedo 0.5`,
-`scenery_albedo 0.5`, `bounce_count 1`, `cpu_lowfreq_downsample 4`,
+`bounce_rays 8`, `bounce_strength 1.0`,
+`scenery_albedo 0.5` (terrain albedo is per tile, from the paint map),
+`bounce_count 1`, `cpu_lowfreq_downsample 4`,
 `blur_radius 4`, `bake_radius Some(1)`, `probe_rays 48`.
 
 **The CPU terrain bake runs two passes.** AO and indirect bounce were ~95% of
@@ -622,9 +633,10 @@ has looked at them yet. They are five named constants at the top of
 
 - HDR headroom above `white` is stored (f16 EXR) and then clipped by the
   quantiser. The lightmap keeps the detail; the shader discards it.
-- `terrain_albedo` and `scenery_albedo` are single grey numbers, so indirect
-  light carries no colour from the surface it bounced off — only from the
-  lamp that lit it.
+- `scenery_albedo` is a single grey number, so indirect light off *scenery*
+  carries no colour from the surface it bounced off — only from the lamp
+  that lit it. Terrain does carry colour since painting Phase 4: pale sand
+  bounces more (and warmer) light than dark rock.
 - There is no GPU object bake (`docs/GPU_OBJECT_BAKE_PLAN.md`). Object
   bounce in particular runs per texel with no coarse-grid shortcut, which
   that document argues is the cheap speed-up nobody has taken.

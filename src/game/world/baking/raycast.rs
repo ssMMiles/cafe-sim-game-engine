@@ -25,6 +25,12 @@ use crate::game::world::terrain::HeightmapData;
 /// threads via `&BakeHeightCache` (which is `Send + Sync`).
 pub struct BakeHeightCache {
     data: Vec<f32>,
+    /// What each tile sends back as bounce light, packed linear RGB
+    /// (`pack_albedo`) on exactly the grid `data` uses. Filled from the
+    /// paint map by [`Self::with_paint`]; a bare [`Self::extract`] leaves
+    /// every tile on the neutral 0.5 grey the bakers assumed before
+    /// painting existed (and that unit tests still assume).
+    albedo: Vec<u32>,
     tile_min_x: i32,
     tile_min_z: i32,
     stride: usize,
@@ -68,6 +74,7 @@ impl BakeHeightCache {
         }
 
         Self {
+            albedo: vec![pack_albedo(Vec3::splat(0.5)); data.len()],
             data,
             tile_min_x,
             tile_min_z,
@@ -76,6 +83,84 @@ impl BakeHeightCache {
             max_height,
             tile_size,
         }
+    }
+
+    /// Fill the albedo grid from the paint map: each tile becomes its base
+    /// and overlay layers' bake albedos (palette-resolved, so removed slots
+    /// show their fallback), lerped by the tile's blend byte. Tiles outside
+    /// every loaded chunk read as the default sample — layer 0's albedo —
+    /// which matches what the renderer would show there after streaming.
+    ///
+    /// Chunk-major, not tile-major: a cache covers ~a million tiles and this
+    /// runs on the main thread (per object job on wasm), so one map lookup
+    /// per *chunk* and straight slice walks, never a per-tile `sample_at`.
+    pub fn with_paint(
+        mut self,
+        paint: &crate::game::world::terrain::paint::PaintmapData,
+        palette: &crate::game::world::terrain::paint::TerrainPalette,
+    ) -> Self {
+        use crate::game::world::terrain::paint::{
+            PAINT_SIZE, paint_base, paint_blend, paint_index, paint_overlay,
+        };
+        let albedos = palette.resolved_bake_albedos();
+        let layer = |id: u8| albedos[(id as usize).min(albedos.len() - 1)];
+        // Tiles no loaded chunk holds read as the default sample: layer 0,
+        // no overlay — which is also what streaming would show there.
+        self.albedo.fill(pack_albedo(layer(0)));
+
+        // Chunks sharing an edge tile store the same value, so overlap rows
+        // being written twice is harmless.
+        let cs = (PAINT_SIZE - 1) as i32;
+        let max_tx = self.tile_min_x + self.stride as i32 - 1;
+        let max_tz = self.tile_min_z + self.depth as i32 - 1;
+        for cy in (self.tile_min_z - cs).div_euclid(cs)..=max_tz.div_euclid(cs) {
+            for cx in (self.tile_min_x - cs).div_euclid(cs)..=max_tx.div_euclid(cs) {
+                let Some(samples) = paint.chunk_samples((cx, cy)) else {
+                    continue;
+                };
+                // The chunk's local tiles that fall inside the cache rect.
+                let lx0 = (self.tile_min_x - cx * cs).max(0);
+                let lx1 = (max_tx - cx * cs).min(cs);
+                let ly0 = (self.tile_min_z - cy * cs).max(0);
+                let ly1 = (max_tz - cy * cs).min(cs);
+                for lx in lx0..=lx1 {
+                    let tx = (cx * cs + lx - self.tile_min_x) as usize;
+                    for ly in ly0..=ly1 {
+                        let tz = (cy * cs + ly - self.tile_min_z) as usize;
+                        let sample = samples[paint_index(lx as usize, ly as usize)];
+                        let blend = paint_blend(sample) as f32 / 255.0;
+                        let albedo =
+                            layer(paint_base(sample)).lerp(layer(paint_overlay(sample)), blend);
+                        self.albedo[tz * self.stride + tx] = pack_albedo(albedo);
+                    }
+                }
+            }
+        }
+        self
+    }
+
+    /// Every tile on one albedo. Tests use it to switch bounce light off
+    /// (`Vec3::ZERO`) or pin it, the way the old scalar `terrain_albedo`
+    /// config knob did.
+    #[cfg(test)]
+    pub fn with_uniform_albedo(mut self, albedo: Vec3) -> Self {
+        self.albedo.fill(pack_albedo(albedo));
+        self
+    }
+
+    /// The bounce albedo of the terrain at a world position: the paint
+    /// map's tile under it (nearest tile — bounce light has no use for
+    /// bilinear paint). The GPU bake mirrors this exactly
+    /// (`terrain_albedo_at` in `lightmap_bake.wgsl`), decoding the same
+    /// packed bytes, so the two paths quantise identically.
+    #[inline]
+    pub fn albedo_at(&self, world_x: f32, world_z: f32) -> Vec3 {
+        let ix = (world_x / self.tile_size.0).floor() as i32 - self.tile_min_x;
+        let iz = (world_z / self.tile_size.1).floor() as i32 - self.tile_min_z;
+        if ix < 0 || iz < 0 || ix as usize >= self.stride || iz as usize >= self.depth {
+            return Vec3::splat(0.5);
+        }
+        unpack_albedo(self.albedo[iz as usize * self.stride + ix as usize])
     }
 
     /// True if `y` is above every tile in the cache, so no terrain sample at
@@ -130,9 +215,10 @@ impl BakeHeightCache {
         self.depth
     }
 
-    /// Consume the cache and return the raw `Vec<f32>` height data.
-    pub fn into_data(self) -> Vec<f32> {
-        self.data
+    /// Consume the cache and return the raw height and packed-albedo grids,
+    /// in that order — what the GPU bake uploads as its two terrain buffers.
+    pub fn into_parts(self) -> (Vec<f32>, Vec<u32>) {
+        (self.data, self.albedo)
     }
 
     #[inline]
@@ -176,6 +262,25 @@ impl BakeHeightCache {
         let slope = normal.y.acos();
         (normal, slope)
     }
+}
+
+/// Linear RGB → the byte-packed form the albedo grid stores (r in the low
+/// byte). 8 bits per channel is plenty for a bounce albedo, and the packed
+/// grid is uploaded to the GPU bake verbatim, so CPU and GPU read the same
+/// quantised values.
+#[inline]
+pub fn pack_albedo(albedo: Vec3) -> u32 {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    q(albedo.x) | (q(albedo.y) << 8) | (q(albedo.z) << 16)
+}
+
+#[inline]
+fn unpack_albedo(packed: u32) -> Vec3 {
+    Vec3::new(
+        (packed & 0xff) as f32,
+        ((packed >> 8) & 0xff) as f32,
+        ((packed >> 16) & 0xff) as f32,
+    ) / 255.0
 }
 
 // ============================================================================
@@ -374,7 +479,6 @@ pub fn compute_indirect_bounce(
     shadow_max_dist: f32,
     n_rays: u32,
     steps: u32,
-    terrain_albedo: f32,
     scenery_albedo: f32,
     bounce_count: u32,
     light_shadow_steps: impl Fn(f32) -> u32,
@@ -410,7 +514,9 @@ pub fn compute_indirect_bounce(
         let mut cur_pos = origin;
         let mut cur_mesh_pos = mesh_origin;
         let mut cur_dir = dir;
-        let mut throughput = 1.0_f32;
+        // A colour, not a scalar: pale sand passes more light down the path
+        // than dark rock, per channel (paint-aware albedo, painting Phase 4).
+        let mut throughput = Vec3::ONE;
 
         for b in 0..bounce_count {
             // Nearest terrain hit along the ray, by DDA.
@@ -443,7 +549,7 @@ pub fn compute_indirect_bounce(
                     // where the bilinear heightmap can read as above it and
                     // kill the sun ray outright.
                     let p = cur_mesh_pos + cur_dir * t + n * 0.02;
-                    (p + Vec3::Y * 0.5, p, n, scenery_albedo)
+                    (p + Vec3::Y * 0.5, p, n, Vec3::splat(scenery_albedo))
                 }
                 (None, Some((_, pos))) => {
                     let h = cache.sample_height(pos.x, pos.z);
@@ -454,7 +560,8 @@ pub fn compute_indirect_bounce(
                         Vec3::new(pos.x, h + 0.5, pos.z),
                         Vec3::new(pos.x, h + 0.02, pos.z),
                         n,
-                        terrain_albedo,
+                        // What the ground re-emits is what is painted there.
+                        cache.albedo_at(pos.x, pos.z),
                     )
                 }
                 // Escaped to the sky: nothing to re-emit.
@@ -660,6 +767,92 @@ mod indoor {
         BakeHeightCache::extract(&hm, -40.0, -40.0, 40.0, 40.0)
     }
 
+    /// The paint map is what terrain re-emits: a painted tile bounces its
+    /// layers' bake albedo (blended), an unloaded tile the default layer's,
+    /// and the packed bytes survive the round trip the GPU bake shares.
+    #[test]
+    fn the_albedo_grid_follows_the_paint() {
+        use crate::game::world::terrain::paint::{
+            ChunkPaint, PAINT_SIZE, PaintmapData, TerrainLayerData, TerrainPalette, paint_index,
+            paint_sample,
+        };
+
+        let mut palette = TerrainPalette::default();
+        palette.layers[0].bake_albedo = [0.1, 0.1, 0.1];
+        let mut red = TerrainLayerData::new("red", "textures/red.png");
+        red.bake_albedo = [0.8, 0.0, 0.0];
+        palette.add(red);
+
+        // Chunk (0, 0) painted red over local tiles x < 8, half-blended at
+        // x == 8, default elsewhere.
+        let mut samples = vec![paint_sample(0, 0, 0, 0); PAINT_SIZE * PAINT_SIZE];
+        for ly in 0..PAINT_SIZE {
+            for lx in 0..8 {
+                samples[paint_index(lx, ly)] = paint_sample(0, 1, 255, 0);
+            }
+            samples[paint_index(8, ly)] = paint_sample(0, 1, 128, 0);
+        }
+        let mut paint = PaintmapData::default();
+        paint.insert(
+            (0, 0),
+            ChunkPaint {
+                samples,
+                image: Handle::default(),
+            },
+        );
+
+        let cache = ground().with_paint(&paint, &palette);
+        let a = |wx: f32| cache.albedo_at(wx, 1.0);
+        assert!(
+            (a(0.5) - Vec3::new(0.8, 0.0, 0.0)).length() < 0.01,
+            "painted: {}",
+            a(0.5)
+        );
+        let half = Vec3::new(0.1, 0.1, 0.1).lerp(Vec3::new(0.8, 0.0, 0.0), 128.0 / 255.0);
+        assert!(
+            (a(8.0 * 0.25 + 0.1) - half).length() < 0.01,
+            "blended: {}",
+            a(2.1)
+        );
+        assert!(
+            (a(20.0) - Vec3::splat(0.1)).length() < 0.01,
+            "unpainted ground is layer 0: {}",
+            a(20.0)
+        );
+        // Beyond every loaded chunk the default sample is also layer 0.
+        assert!(
+            (a(-20.0) - Vec3::splat(0.1)).length() < 0.01,
+            "unloaded: {}",
+            a(-20.0)
+        );
+
+        // And the bounce picks it up: light landing on red ground comes back
+        // red. The receiver faces *down* (an object's underside) so its
+        // hemisphere rays actually reach the ground.
+        let lighting = sun_only(Vec3::Y);
+        let o = Vec3::new(1.0, 1.0, 1.0);
+        let bvh = TriangleBvh::build(Vec::new());
+        let bounce = compute_indirect_bounce(
+            o,
+            o,
+            Vec3::NEG_Y,
+            &cache,
+            &bvh,
+            &lighting,
+            10.0,
+            16,
+            64,
+            0.0,
+            1,
+            |_| 16,
+            3,
+        );
+        assert!(
+            bounce.x > bounce.y * 4.0 && bounce.x > 0.0,
+            "bounce off red paint must be red: {bounce}"
+        );
+    }
+
     /// Box-blur a square field, standing in for the bake's own blur pass.
     fn blur(field: &[f32], n: usize, r: usize) -> Vec<f32> {
         let mut out = vec![0.0; field.len()];
@@ -719,7 +912,6 @@ mod indoor {
                         rays,
                         64,
                         0.5,
-                        0.5,
                         1,
                         |_| 48,
                         seed,
@@ -774,7 +966,9 @@ mod indoor {
                 Vec3::new(5.0, 0.0, 6.0),
             ],
         ]);
-        let cache = ground();
+        // Terrain albedo comes from the cache now; zero it so this test
+        // isolates what the *wall* re-emits.
+        let cache = ground().with_uniform_albedo(Vec3::ZERO);
         let sun_dir = Vec3::new(-1.0, 0.5, 0.0).normalize();
         let o = Vec3::new(0.0, 1.0, 0.0);
         let n = Vec3::X;
@@ -791,7 +985,6 @@ mod indoor {
                 80.0,
                 16,
                 64,
-                0.0,
                 scenery_albedo,
                 1,
                 |_| 48,
@@ -862,7 +1055,6 @@ mod indoor {
                 16,
                 64,
                 0.5,
-                0.5,
                 1,
                 |_| 48,
                 11,
@@ -925,7 +1117,6 @@ mod indoor {
             80.0,
             16,
             64,
-            0.5,
             0.5,
             1,
             |_| 48,
@@ -1282,7 +1473,6 @@ mod cost {
                 bounce_rays,
                 shadow_steps,
                 0.5,
-                0.5,
                 1,
                 |_| 48,
                 i as u32,
@@ -1352,7 +1542,6 @@ mod cost {
                 reach,
                 bounce_rays,
                 shadow_steps,
-                0.5,
                 0.5,
                 1,
                 |_| 48,

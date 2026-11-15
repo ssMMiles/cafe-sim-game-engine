@@ -443,7 +443,7 @@ would each need the attribute and the 4× downsampled LODs would smear it).
 | **1 — Brush** ✅ | Paint mode with Paint / Fill / Erase, disc shows texture, eyedropper, stroke undo, save, web. | You can paint a world. |
 | **2 — Blends & layers** ✅ | Blend profiles (Hard, Height, Scatter, Stepped), per-layer tint / tiling / no-tile, Smooth / Jitter / Replace sub-tools, replace-everywhere, lock, delete-with-fallback. | Transitions look intentional; palette is a real workflow. |
 | **3 — Rules** ✅ | Rule stack UI with preview, Apply-rules command, auto flag + re-evaluation after sculpt, brush masks (slope / height / layer / noise), Auto sub-tool. | Sculpt a mountain and it textures itself; hand-paint on top. |
-| **4 — Lighting & polish** | Paint-aware bounce albedo in all bakers, debug views, export, `surface_at` for plugins, docs (`GRAPHICS.md`, `LIGHTING.md`, `CLAUDE.md`). | The whole thing is coherent with the rest of the engine. |
+| **4 — Lighting & polish** ✅ | Paint-aware bounce albedo in all bakers, debug views, export, `surface_at` for plugins, docs (`GRAPHICS.md`, `LIGHTING.md`, `CLAUDE.md`). | The whole thing is coherent with the rest of the engine. |
 | **Later** | Imported masks as rules; per-sample UV rotation / scale variation; triplanar on cliffs; material-boundary outlines; decals / splines (roads); holes (caves). | |
 
 Phases 0–1 are the minimum useful product and the point at which the
@@ -694,3 +694,60 @@ notes.
   because it was ten lines.
 - **Not yet**: imported greyscale masks as rules (later), paint-aware bake
   albedo and debug views (Phase 4).
+
+## 12. Phase 4 as built (2026-11-14)
+
+- **Bounce albedo** lives in the bake's terrain snapshot, not in the ray
+  code: `BakeHeightCache` (raycast.rs) gained a packed per-tile albedo grid
+  on exactly its height grid. `extract(...)` fills it with the neutral 0.5
+  grey the bakers always assumed (so every unit test is untouched);
+  `.with_paint(&PaintmapData, &TerrainPalette)` overwrites it from the paint
+  map — base and overlay layers' bake albedos through
+  `TerrainPalette::resolved_bake_albedos()` (removed slots → fallback, the
+  same redirect the shader applies), lerped by the tile's blend byte.
+  Nearest tile, never bilinear: bounce light has no use for sub-tile paint.
+  Tiles outside every loaded chunk read as the default sample (layer 0).
+  `.with_uniform_albedo(v)` is the test knob the old `terrain_albedo: 0.0`
+  configs became.
+- **All four bakers** go through it. `BakeLighting::reemitted` takes a
+  `Vec3` albedo and the bounce walk's throughput is a colour;
+  `compute_indirect_bounce` lost its `terrain_albedo` parameter and reads
+  `cache.albedo_at(hit)`; the probe gather's `terrain_radiance` likewise.
+  The GPU bake uploads the packed grid verbatim as binding 6 and
+  `terrain_albedo_at` in the WGSL decodes the same bytes, so CPU and GPU
+  quantise identically (`the_albedo_grid_follows_the_paint` covers the CPU
+  half end to end). `BakeConfig::terrain_albedo` is gone; `scenery_albedo`
+  stays one grey scalar — the BVH carries triangles, not materials.
+  Lighting-model change: lightmaps v13, probes v14 (old bakes are skipped
+  with a warning, as always).
+- **`bake_albedo` is derived, never authored** — a deliberate narrowing of
+  §4.2's "derived from the texture's average, overridable". `sync_palette`
+  measures each pattern's mean *dark factor* — `smoothstep(0.05, 0.45,
+  1 − pattern)`, what `layer_eval` in the shader mixes the tint towards
+  `PATTERN_DARK` by — when the array is rebuilt and writes
+  `mix(tint, PATTERN_DARK, factor × pattern_strength)`
+  (`paint::layer_bake_albedo`) into every layer's `bake_albedo` (through
+  `bypass_change_detection`: derived bookkeeping, not an edit, not
+  undoable). The field still lives in `world.meta`, so the bakers never
+  need textures in memory and a future override is a UI change only. No
+  format bump.
+- **Staleness.** Paint strokes, paint requests (fills, replace-everywhere,
+  apply-rules) *and sculpt strokes* now set `LightingState.stale` — the
+  plan said "as sculpting does", but sculpting never actually did.
+- **Debug views** (View menu): "Paint layer ids" draws flat golden-ratio
+  hue colours per resolved dominant layer; "Paint auto tiles" tints
+  rule-owned tiles magenta over the real shading. `TerrainDebugMode`
+  (editor resource, not persisted) → `TerrainShading.debug` on every
+  terrain material; both read the *nearest* paint tile so what is shown is
+  exactly one stored sample.
+- **World export ships no palette textures, on purpose.** §4.6 assumed
+  user-supplied textures; as built, the palette can only reference
+  manifest textures (`assets/textures/`, "Add to terrain palette" in the
+  Assets tab), which ship with the engine on every platform. Paint itself
+  travels inside the chunk files the zip already carries. If user texture
+  import ever lands, revisit.
+- **`surface_at` stays deferred** (§4.6 already said "later"): nothing
+  consumes it yet, and a plugin-facing API wants its own design pass —
+  `PaintmapData` is a host type, so the clean shape is an engine-api
+  resource the host keeps current, not a casual addition to this phase.
+

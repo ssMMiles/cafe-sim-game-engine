@@ -18,14 +18,18 @@ use super::paint::{MAX_LAYERS, TerrainPalette};
 pub struct TerrainShading {
     /// 1 = shade from the baked lightmap, 0 = flat unlit debug view (Shift+L).
     pub use_lightmap: u32,
-    pub _pad: Vec3,
+    /// A [`TerrainDebugMode`](crate::editor::lightmap_toggle::TerrainDebugMode)
+    /// as a byte: 0 = off, 1 = colour by layer id, 2 = highlight auto tiles.
+    pub debug: u32,
+    pub _pad: Vec2,
 }
 
 impl Default for TerrainShading {
     fn default() -> Self {
         Self {
             use_lightmap: 1,
-            _pad: Vec3::ZERO,
+            debug: 0,
+            _pad: Vec2::ZERO,
         }
     }
 }

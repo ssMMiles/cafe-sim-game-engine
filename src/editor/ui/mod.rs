@@ -197,6 +197,8 @@ pub struct Panels<'w, 's> {
     pub settings: ResMut<'w, UserSettings>,
     /// View-menu gizmo toggles (light markers).
     pub gizmo_store: ResMut<'w, GizmoConfigStore>,
+    /// View-menu terrain debug view (paint layers / auto tiles).
+    pub terrain_debug: ResMut<'w, crate::editor::lightmap_toggle::TerrainDebugMode>,
     pub edge_style: ResMut<'w, crate::game::gfx::post_process::EdgeStyle>,
     pub atmosphere: ResMut<'w, crate::game::gfx::atmosphere::AtmosphereStyle>,
     pub lod: ResMut<'w, crate::game::world::terrain::lod::TerrainLodSettings>,

@@ -36,7 +36,9 @@ var lightmap_sampler: sampler;
 struct TerrainShading {
     // 1 = shade from the baked lightmap, 0 = flat unlit debug view.
     use_lightmap: u32,
-    _pad: vec3<f32>,
+    // 0 = off, 1 = flat per-layer-id colours, 2 = highlight auto tiles.
+    debug: u32,
+    _pad: vec2<f32>,
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(104)
 var<uniform> terrain: TerrainShading;
@@ -355,6 +357,39 @@ fn painted_color(
         + sample_color(c.c11, c.c11.b, bw, xz, gx, gy) * w11;
 }
 
+// A distinct flat colour per layer id (golden-ratio hue walk), for the
+// layer-id debug view: tints can be near-identical between layers, ids never.
+fn debug_layer_color(id: u32) -> vec3<f32> {
+    let h = f32(id) * 0.618034;
+    return vec3<f32>(0.55) + 0.45 * cos(6.2831853 * (vec3<f32>(h) + vec3<f32>(0.0, 0.33, 0.67)));
+}
+
+// The debug overlays, both driven by the *nearest* paint tile so what is
+// shown is exactly one stored sample, crisp at tile edges. `shaded` is what
+// the fragment would otherwise output.
+fn debug_view(c: PaintCorners, shaded: vec3<f32>) -> vec3<f32> {
+    let fx = c.f.x > 0.5;
+    let fy = c.f.y > 0.5;
+    var tile = c.c00;
+    if (fx && fy) { tile = c.c11; } else if (fx) { tile = c.c10; } else if (fy) { tile = c.c01; }
+    if (terrain.debug == 1u) {
+        // Dominant layer of the tile, through the palette's removed-slot
+        // redirect, exactly as the real shading resolves it.
+        var id = u32(round(tile.r * 255.0));
+        if (tile.b >= 0.5) {
+            id = u32(round(tile.g * 255.0));
+        }
+        let shown = u32(palette.layers[min(id, palette.layer_count - 1u)].misc.x);
+        return debug_layer_color(shown);
+    }
+    // Auto tiles (owned by the paint rules): magenta over the real shading.
+    let auto_owned = (u32(round(tile.a * 255.0)) & 1u) != 0u;
+    if (auto_owned) {
+        return mix(shaded, vec3<f32>(1.0, 0.0, 1.0), 0.6);
+    }
+    return shaded;
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
     // Every derivative is taken here, in uniform control flow (see the
@@ -376,8 +411,15 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
         radiance = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).rgb;
     }
 
+    var shaded = base_color * toon_shade(radiance, scene.curve);
+    // Editor debug views (View menu). The branch tests a uniform, and every
+    // derivative this shader takes was already taken above it.
+    if (terrain.debug != 0u) {
+        shaded = debug_view(corners, shaded);
+    }
+
     var out: FragmentOutput;
-    out.color = vec4<f32>(base_color * toon_shade(radiance, scene.curve), 1.0);
+    out.color = vec4<f32>(shaded, 1.0);
     // The edge detector's normal target. Terrain is never double-sided, so
     // there is no front/back flip; the skirt normal was fixed up in the
     // vertex stage, where the mesh generator's zero normals come from.

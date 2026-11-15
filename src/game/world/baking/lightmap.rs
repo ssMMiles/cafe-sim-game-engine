@@ -73,7 +73,7 @@ use crate::game::world::terrain::storage::EnvironmentData;
 ///     as the terrain and probe bakes already did. Object texels sitting at
 ///     ground level — a building floor, a prop on a slope — were having the
 ///     sun and every local light killed on the DDA's first step.
-pub const LIGHTMAP_FORMAT_VERSION: u32 = 12;
+pub const LIGHTMAP_FORMAT_VERSION: u32 = 13;
 
 pub(crate) fn lightmap_file_name(stem: &str) -> String {
     format!("{stem}_lightmap.v{LIGHTMAP_FORMAT_VERSION}.exr")
@@ -375,7 +375,7 @@ impl BakeLighting {
         &self,
         world_pos: Vec3,
         normal: Vec3,
-        albedo: f32,
+        albedo: Vec3,
         sun_visibility: f32,
         light_visibility: impl FnMut(Vec3, f32) -> f32,
     ) -> Vec3 {

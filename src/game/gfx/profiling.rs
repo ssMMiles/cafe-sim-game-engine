@@ -95,8 +95,11 @@ impl GpuTimingSupport {
              spans need — so the list stays empty. Use the A/B measurement \
              below, or a GPU capture in Xcode."
         } else {
-            "This adapter has no timestamp queries, so per-pass GPU times \
-             aren't available. Use the A/B measurement below."
+            "No timestamp queries on this device (the app switches them off \
+             on Metal: Apple GPUs can't time inside a pass, and each query \
+             set there costs one of 32 counter buffers shared GPU-wide), so \
+             per-pass GPU times aren't available. Use the A/B measurement \
+             below."
         }
     }
 }

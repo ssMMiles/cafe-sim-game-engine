@@ -338,6 +338,7 @@ pub fn finalize_terrain_stroke(
     mut brush_hit: ResMut<TerrainBrushHit>,
     mut terrain: TerrainChunks,
     mut history: ResMut<History>,
+    mut lighting: ResMut<crate::editor::edits::LightingState>,
 ) {
     let painting = mouse_input.pressed(MouseButton::Left);
 
@@ -348,6 +349,10 @@ pub fn finalize_terrain_stroke(
         return;
     }
     brush_hit.was_painting = false;
+    // Reshaped ground invalidates its baked shadows, exactly like moving a
+    // placed object does (and like a paint stroke, since bounce albedo
+    // follows the paint).
+    lighting.stale = true;
 
     let pending: Vec<(i32, i32)> = brush_hit.pending_full_lod.drain().collect();
     for &chunk in &pending {

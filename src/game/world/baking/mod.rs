@@ -24,6 +24,7 @@ pub mod gpu;
 pub mod lightmap;
 pub mod object_lightmaps;
 pub mod objects;
+pub mod pacing;
 pub mod probes;
 pub mod raycast;
 pub mod terrain;
@@ -149,7 +150,9 @@ pub struct BakeConfig {
     /// Number of hemisphere rays for indirect lighting. Set to 0 to disable.
     pub bounce_rays: u32,
     /// Fraction of the light reaching a *scenery* surface that it bounces
-    /// on, the counterpart of [`BakeConfig::terrain_albedo`]. Scenery is
+    /// on. (Terrain has no such knob any more: what a terrain hit re-emits
+    /// is the painted layers' bake albedo, read from the paint map through
+    /// `BakeHeightCache::albedo_at` — painting Phase 4.) Scenery is
     /// every triangle in the bake BVH — placed objects and plugin level
     /// geometry — and it re-emits because otherwise an enclosed interior
     /// receives no indirect light at all: every bounce ray from inside a
@@ -159,8 +162,6 @@ pub struct BakeConfig {
     pub scenery_albedo: f32,
     /// Strength of the indirect bounce contribution. 0.0 = no bounce, 1.0 = natural.
     pub bounce_strength: f32,
-    /// Diffuse reflectance of the terrain surface used in bounce calculations.
-    pub terrain_albedo: f32,
     /// Number of light bounces to simulate per primary ray (1 = single bounce).
     pub bounce_count: u32,
     /// How many times coarser than the lightmap the **CPU** terrain bake
@@ -236,7 +237,6 @@ impl Default for BakeConfig {
             gpu_parallel_chunks: 2,
             bounce_rays: 8,
             bounce_strength: 1.0,
-            terrain_albedo: 0.5,
             scenery_albedo: 0.5,
             bounce_count: 1,
             cpu_lowfreq_downsample: 4,
@@ -337,6 +337,9 @@ pub struct BakeSceneQueries<'w, 's> {
     /// Shadow-caster candidates: every toon-shaded mesh in the world.
     /// `collect_occluder_triangles` keeps only the static ones.
     pub occluder_meshes: Query<'w, 's, OccluderMeshItem, With<MeshMaterial3d<ToonMaterial>>>,
+    /// The loaded chunks' paint, for the paint-aware bounce albedo. Inserted
+    /// by terrain bootstrap with the heightmap; `None` until a world loads.
+    pub paint: Option<Res<'w, crate::game::world::terrain::paint::PaintmapData>>,
     pub parents: Query<'w, 's, &'static ChildOf>,
     /// What marks a subtree as static scenery for shadow casting — and what
     /// un-marks it (`DynamicLit`: a placed entity a script moves).
@@ -475,6 +478,11 @@ fn run_bake(
         warn!("Bake skipped: world not loaded");
         return;
     };
+    // Inserted by terrain bootstrap with the heightmap; a bare default (no
+    // loaded chunks) just paints every bounce the default layer's albedo.
+    let default_paint = Default::default();
+    let paint = scene.paint.as_deref().unwrap_or(&default_paint);
+    let palette = &terrain_world.metadata.palette;
 
     let sun_dir = baked_sun_query
         .iter()
@@ -548,6 +556,7 @@ fn run_bake(
             &mut images,
             &lighting,
             &bvh,
+            paint,
         );
     }
 
@@ -571,7 +580,8 @@ fn run_bake(
                     chunk.chunk_x,
                     chunk.chunk_y,
                     config.ao_radius * 4.0,
-                );
+                )
+                .with_paint(paint, palette);
                 (chunk.chunk_x, chunk.chunk_y, cache)
             })
             .collect();
@@ -584,24 +594,25 @@ fn run_bake(
                 .map(|(cx, cy, _)| probes::chunk_probes_location(&terrain_world, *cx, *cy))
                 .collect();
             tasks.probes.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-                probe_jobs
-                    .into_iter()
-                    .zip(dests)
-                    .map(|((cx, cy, cache), dest)| {
-                        let grid = probes::bake_chunk_probes(
-                            &cache,
-                            cx,
-                            cy,
-                            &task_config,
-                            &task_lighting,
-                            &task_bvh,
-                        );
-                        if let Err(e) = probes::store_probes(&dest, &grid) {
-                            error!("Failed to save probes for chunk ({cx}, {cy}): {e}");
-                        }
-                        grid
-                    })
-                    .collect()
+                let mut grids = Vec::with_capacity(probe_jobs.len());
+                for ((cx, cy, cache), dest) in probe_jobs.into_iter().zip(dests) {
+                    let grid = probes::bake_chunk_probes(
+                        &cache,
+                        cx,
+                        cy,
+                        &task_config,
+                        &task_lighting,
+                        &task_bvh,
+                    );
+                    if let Err(e) = probes::store_probes(&dest, &grid) {
+                        error!("Failed to save probes for chunk ({cx}, {cy}): {e}");
+                    }
+                    grids.push(grid);
+                    // On wasm this task is the main thread; let a frame through
+                    // between chunks (`pacing::breathe`).
+                    pacing::breathe().await;
+                }
+                grids
             }));
         }
     }
@@ -617,7 +628,7 @@ fn run_bake(
         return;
     }
 
-    let jobs = objects::collect_object_bake_jobs(
+    let pass = objects::collect_object_bake_jobs(
         &mut commands,
         &heightmap,
         &terrain_world,
@@ -629,18 +640,19 @@ fn run_bake(
         &mut meshes,
         &mut toon_materials,
         &mut uv_cache,
+        paint,
     );
 
-    if jobs.is_empty() {
+    let Some(pass) = pass else {
         return;
-    }
+    };
 
-    let job_count = jobs.len();
+    let job_count = pass.jobs.len();
     let task_config = config.clone();
     let task_lighting = lighting.clone();
     let task_bvh = bvh.clone();
     tasks.objects.0 = Some(AsyncComputeTaskPool::get().spawn(async move {
-        objects::run_object_bake_jobs(jobs, &task_config, &task_lighting, &task_bvh)
+        objects::run_object_bake_jobs(pass, &task_config, &task_lighting, &task_bvh).await
     }));
     info!("Object bake dispatched: {job_count} sub-mesh(es) on the task pool");
 }
@@ -729,6 +741,8 @@ fn dispatch_gpu_terrain_bake(
         warn!("GPU terrain bake skipped: world not loaded");
         return;
     };
+    let default_paint = Default::default();
+    let paint = scene.paint.as_deref().unwrap_or(&default_paint);
 
     match chunk_registry {
         Some(registry) => {
@@ -743,6 +757,8 @@ fn dispatch_gpu_terrain_bake(
                 &mut gpu_queue,
                 &lighting,
                 &bvh,
+                paint,
+                &terrain_world.metadata.palette,
             );
         }
         None => {
@@ -760,6 +776,7 @@ fn dispatch_gpu_terrain_bake(
                 &mut images,
                 &lighting,
                 &bvh,
+                paint,
             );
         }
     }

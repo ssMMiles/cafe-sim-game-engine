@@ -368,6 +368,23 @@ impl TerrainPalette {
         }
     }
 
+    /// Every slot's bake albedo with removed slots resolved to their
+    /// fallback — what a bounce or probe ray uses for terrain it lands on.
+    /// Indexable directly by a paint sample's layer id.
+    pub fn resolved_bake_albedos(&self) -> [bevy::math::Vec3; MAX_LAYERS] {
+        let mut out = [bevy::math::Vec3::splat(0.5); MAX_LAYERS];
+        for (i, slot) in out.iter_mut().enumerate().take(self.layers.len()) {
+            let a = self.layers[self.resolve(i as u8) as usize].bake_albedo;
+            *slot = bevy::math::Vec3::from(a);
+        }
+        // Ids past the palette clamp to the last live layer, as the shader's
+        // sampler clamp does.
+        for i in self.layers.len()..MAX_LAYERS {
+            out[i] = out[self.layers.len().saturating_sub(1)];
+        }
+        out
+    }
+
     pub fn is_locked(&self, id: u8) -> bool {
         self.layers
             .get(id as usize)
@@ -651,6 +668,55 @@ pub fn placeholder_palette_array() -> Image {
 /// `textures[i]` is layer `i`'s image in any 8-bit RGBA format; anything
 /// else is converted first. A texture that can't be read becomes a flat
 /// white layer (no pattern) and is reported.
+/// The dark colour a pattern pulls a layer's tint towards where it is dark.
+/// Mirrors `PATTERN_DARK` in `terrain_toon.wesl`.
+pub const PATTERN_DARK: [f32; 3] = [0.02, 0.02, 0.02];
+
+/// How much of a pattern texture is "dark", on average, as the shader
+/// measures it: the mean over its texels of
+/// `smoothstep(0.05, 0.45, 1 − pattern)` (linear luminance), the factor
+/// `layer_eval` in `terrain_toon.wesl` mixes the tint towards
+/// [`PATTERN_DARK`] by (before scaling by the layer's pattern strength).
+/// Feeds [`layer_bake_albedo`].
+pub fn pattern_dark_factor(img: &Image) -> f32 {
+    let size = 32; // plenty for a mean; reuses the resize path's conversion
+    let pixels = resample_rgba8(img, size);
+    let srgb_to_linear = |b: u8| {
+        let v = b as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let smoothstep = |e0: f32, e1: f32, x: f32| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let mut sum = 0.0f32;
+    let (texels, _) = pixels.as_chunks::<4>();
+    for px in texels {
+        // Patterns are greyscale-ish; a plain channel mean is the luminance.
+        let pattern = (srgb_to_linear(px[0]) + srgb_to_linear(px[1]) + srgb_to_linear(px[2])) / 3.0;
+        sum += smoothstep(0.05, 0.45, 1.0 - pattern);
+    }
+    sum / (size * size) as f32
+}
+
+/// A layer's bake albedo: the colour the *screen* shows for it, averaged over
+/// its pattern — `mix(tint, PATTERN_DARK, dark_factor × pattern_strength)`,
+/// which is `layer_eval` in `terrain_toon.wesl` with the pattern replaced by
+/// its mean dark factor ([`pattern_dark_factor`]). What a bounce or probe ray
+/// landing on this layer re-emits.
+pub fn layer_bake_albedo(layer: &TerrainLayerData, dark_factor: f32) -> [f32; 3] {
+    let f = (dark_factor * layer.pattern_strength).clamp(0.0, 1.0);
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        out[c] = layer.tint[c] + (PATTERN_DARK[c] - layer.tint[c]) * f;
+    }
+    out
+}
+
 pub fn build_palette_array(textures: &[&Image], size: u32) -> Image {
     let size = size.clamp(1, 4096).next_power_of_two();
     let layers = textures.len().max(1) as u32;
@@ -831,6 +897,40 @@ mod tests {
             sample: 4,
         }]);
         assert_eq!(long.decode().len(), total);
+    }
+
+    /// The derived albedo is the shader's colour for the layer with the
+    /// pattern replaced by its mean: a white pattern leaves the tint alone, a
+    /// black one at full strength is `PATTERN_DARK`, strength 0 ignores it.
+    #[test]
+    fn bake_albedo_mirrors_the_shaders_layer_colour() {
+        let solid = |v: u8| {
+            Image::new_fill(
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                &[v, v, v, 255],
+                TextureFormat::Rgba8UnormSrgb,
+                bevy::asset::RenderAssetUsages::MAIN_WORLD,
+            )
+        };
+        assert!(pattern_dark_factor(&solid(255)).abs() < 1e-4);
+        assert!((pattern_dark_factor(&solid(0)) - 1.0).abs() < 1e-4);
+
+        let mut layer = TerrainLayerData::new("l", "x.png");
+        layer.tint = [0.8, 0.4, 0.2];
+        layer.pattern_strength = 1.0;
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(close(layer_bake_albedo(&layer, 0.0), layer.tint));
+        assert!(close(layer_bake_albedo(&layer, 1.0), PATTERN_DARK));
+        layer.pattern_strength = 0.0;
+        assert!(close(layer_bake_albedo(&layer, 1.0), layer.tint));
+        layer.pattern_strength = 0.5;
+        let half = layer_bake_albedo(&layer, 1.0);
+        assert!((half[0] - 0.41).abs() < 1e-4, "{half:?}");
     }
 
     #[test]

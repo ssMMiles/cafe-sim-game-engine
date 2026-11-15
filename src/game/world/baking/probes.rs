@@ -83,7 +83,7 @@ pub use engine_api::toon_material::{PROBE_CELL_SIZE, probe_cell_centre, probe_ce
 ///
 /// - 13: 1 m lattice (was 2 m). Numbered past the lightmap version it left so
 ///   the two are never confused for each other on disk.
-pub const PROBE_FORMAT_VERSION: u32 = 13;
+pub const PROBE_FORMAT_VERSION: u32 = 14;
 
 /// Normals the per-probe radiance function is sampled at before projection.
 const FIT_NORMALS: usize = 32;
@@ -416,7 +416,7 @@ impl ProbeContext<'_> {
     ///
     /// `dda` is the origin for the terrain march, lifted off the surface;
     /// `surface` is the point itself, for the BVH.
-    fn reemitted_at(&self, dda: Vec3, surface: Vec3, normal: Vec3, albedo: f32) -> Vec3 {
+    fn reemitted_at(&self, dda: Vec3, surface: Vec3, normal: Vec3, albedo: Vec3) -> Vec3 {
         let vis = raycast::cast_shadow_ray(
             dda,
             surface,
@@ -450,7 +450,8 @@ impl ProbeContext<'_> {
             ground + Vec3::Y * 0.5,
             ground + normal * 0.02,
             normal,
-            self.config.terrain_albedo,
+            // What the ground re-emits is what is painted there (Phase 4).
+            self.cache.albedo_at(q.x, q.z),
         )
     }
 
@@ -469,7 +470,12 @@ impl ProbeContext<'_> {
         // Lift the terrain march as a terrain hit does: a wall's base sits
         // at ground level, where the bilinear heightmap can read as above it
         // and kill the ray outright.
-        self.reemitted_at(q + Vec3::Y * 0.5, q, normal, self.config.scenery_albedo)
+        self.reemitted_at(
+            q + Vec3::Y * 0.5,
+            q,
+            normal,
+            Vec3::splat(self.config.scenery_albedo),
+        )
     }
 
     /// Nearest terrain hit along `dir` within `reach`, marching from `p`.
@@ -1079,7 +1085,8 @@ mod tests {
         // and crucially not cancelled by the sun, which is why the sun is
         // kept out of the L1 coefficients.
         let got_down = eval(Vec3::NEG_Y);
-        let ground = (lighting.sun_rgb * sun_dir.y + lighting.ambient_rgb) * config.terrain_albedo;
+        // The bare cache's uniform default albedo, exactly the old scalar.
+        let ground = (lighting.sun_rgb * sun_dir.y + lighting.ambient_rgb) * 0.5;
         assert!(got_down.x > 0.0 && got_down.x < got_up.x, "down {got_down}");
         assert!(
             (got_down - ground).abs().max_element() < 0.15,
@@ -1156,14 +1163,21 @@ mod tests {
         // negative tail (an artefact the reconstruction exists to remove).
         // Bake once more with no bounce to separate them.
         let no_bounce = BakeConfig {
-            terrain_albedo: 0.0,
             scenery_albedo: 0.0,
             ..config.clone()
         };
-        let without_nb = bake_chunk_probes(&cache, 0, 0, &no_bounce, &dark, &bvh)
+        let cache_nb = BakeHeightCache::extract(
+            &hm,
+            -reach,
+            -reach,
+            CHUNK_WORLD_SIZE + reach,
+            CHUNK_WORLD_SIZE + reach,
+        )
+        .with_uniform_albedo(Vec3::ZERO);
+        let without_nb = bake_chunk_probes(&cache_nb, 0, 0, &no_bounce, &dark, &bvh)
             .get(5, 1, 5)
             .unwrap();
-        let with_nb = bake_chunk_probes(&cache, 0, 0, &no_bounce, &lit, &bvh)
+        let with_nb = bake_chunk_probes(&cache_nb, 0, 0, &no_bounce, &lit, &bvh)
             .get(5, 1, 5)
             .unwrap();
         let away_nb = with_nb.eval_l1(Vec3::NEG_X) - without_nb.eval_l1(Vec3::NEG_X);

@@ -147,7 +147,6 @@ pub struct BakeUniformsData {
     pub cache_tile_min_z: i32,
     pub bounce_rays: u32,
     pub bounce_strength: f32,
-    pub terrain_albedo: f32,
     pub scenery_albedo: f32,
     pub bounce_count: u32,
     /// Starting row of this dispatch strip. Set per-strip by `dispatch_strip`.
@@ -173,6 +172,7 @@ pub struct BakeUniformsData {
     /// paths the moment `BakeConfig::max_light_shadow_steps` changed.
     pub max_light_shadow_steps: u32,
     pub _pad2: u32,
+    pub _pad3: u32,
 }
 
 // ============================================================================
@@ -209,6 +209,9 @@ pub struct GpuBakeChunkJob {
     pub strip_uniforms: Vec<BakeUniformsData>,
     /// Flat heightmap tile values covering chunk + ray-reach border (shared across strips).
     pub heightmap_bytes: Vec<f32>,
+    /// The paint-derived bounce albedo per cache tile, packed linear RGB
+    /// (`raycast::pack_albedo`), on the same grid as `heightmap_bytes`.
+    pub albedo_bytes: Vec<u32>,
     /// Scene BVH, uploaded verbatim (shared across strips and chunks).
     pub bvh: Arc<TriangleBvh>,
     /// Placed point/spot lights, uploaded verbatim (shared across strips).
@@ -239,6 +242,7 @@ struct GpuBakeQueueEntry {
     grid: ChunkBakeGrid,
     uniforms_data: BakeUniformsData,
     heightmap_bytes: Vec<f32>,
+    albedo_bytes: Vec<u32>,
     /// Scene BVH, uploaded verbatim.
     bvh: Arc<TriangleBvh>,
     /// Placed point/spot lights, uploaded verbatim.
@@ -281,6 +285,7 @@ struct BakeInFlightStrip {
 /// Shared GPU buffers for a chunk, kept alive until all its strips have dispatched.
 struct ChunkSharedBuffers {
     _heightmap_buf: Buffer,
+    _albedo_buf: Buffer,
     _bvh_nodes_buf: Buffer,
     _bvh_tris_buf: Buffer,
     _lights_buf: Buffer,
@@ -422,6 +427,8 @@ pub fn enqueue_terrain_bake_jobs(
     queue: &mut GpuBakeQueue,
     lighting: &BakeLighting,
     bvh: &Arc<TriangleBvh>,
+    paint: &crate::game::world::terrain::paint::PaintmapData,
+    palette: &crate::game::world::terrain::paint::TerrainPalette,
 ) {
     // Clear processed set so results from a prior bake don't block this one,
     // and discard any leftover entries from an interrupted previous bake.
@@ -440,7 +447,8 @@ pub fn enqueue_terrain_bake_jobs(
             continue;
         }
 
-        let cache = extract_bake_cache(heightmap, grid, chunk.chunk_x, chunk.chunk_y, ray_reach);
+        let cache = extract_bake_cache(heightmap, grid, chunk.chunk_x, chunk.chunk_y, ray_reach)
+            .with_paint(paint, palette);
 
         let uniforms_data = BakeUniformsData {
             cache_min_x: cache.cache_min_x(),
@@ -463,7 +471,6 @@ pub fn enqueue_terrain_bake_jobs(
             cache_tile_min_z: cache.tile_min_z(),
             bounce_rays: config.bounce_rays,
             bounce_strength: config.bounce_strength,
-            terrain_albedo: config.terrain_albedo,
             scenery_albedo: config.scenery_albedo,
             bounce_count: config.bounce_count,
             row_offset: 0,
@@ -479,14 +486,17 @@ pub fn enqueue_terrain_bake_jobs(
             margin: grid.margin as u32,
             max_light_shadow_steps: config.max_light_shadow_steps.max(4),
             _pad2: 0,
+            _pad3: 0,
         };
 
+        let (heights, albedo) = cache.into_parts();
         queue.pending.push_back(GpuBakeQueueEntry {
             chunk_x: chunk.chunk_x,
             chunk_y: chunk.chunk_y,
             grid,
             uniforms_data,
-            heightmap_bytes: cache.into_data(),
+            heightmap_bytes: heights,
+            albedo_bytes: albedo,
             bvh: bvh.clone(),
             material_handle: material_handle.id(),
             dest: terrain_lightmap_location(terrain_world, chunk.chunk_x, chunk.chunk_y),
@@ -544,6 +554,7 @@ fn dispatch_chunk(
         strip_rows,
         strip_uniforms,
         heightmap_bytes: entry.heightmap_bytes,
+        albedo_bytes: entry.albedo_bytes,
         bvh: entry.bvh,
         lights: entry.lights,
         out_handle,
@@ -649,6 +660,8 @@ fn init_gpu_bake_pipeline(
                 binding_types::storage_buffer_read_only_sized(false, None),
                 // binding 5 – scene BVH triangles, read-only storage
                 binding_types::storage_buffer_read_only_sized(false, None),
+                // binding 6 – packed terrain bounce albedo per cache tile
+                binding_types::storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -702,6 +715,13 @@ fn prepare_gpu_bake_jobs(
         let heightmap_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("bake_heightmap"),
             contents: bytemuck::cast_slice(&chunk_job.heightmap_bytes),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+
+        // The paint-derived bounce albedo, on the heightmap's grid.
+        let albedo_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("bake_albedo"),
+            contents: bytemuck::cast_slice(&chunk_job.albedo_bytes),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
 
@@ -760,6 +780,7 @@ fn prepare_gpu_bake_jobs(
                     bvh_nodes_buf.as_entire_buffer_binding(),
                     lights_buf.as_entire_buffer_binding(),
                     bvh_tris_buf.as_entire_buffer_binding(),
+                    albedo_buf.as_entire_buffer_binding(),
                 )),
             );
 
@@ -774,6 +795,7 @@ fn prepare_gpu_bake_jobs(
         // Keep shared buffers alive until after dispatch.
         in_flight._shared.push(ChunkSharedBuffers {
             _heightmap_buf: heightmap_buf,
+            _albedo_buf: albedo_buf,
             _bvh_nodes_buf: bvh_nodes_buf,
             _bvh_tris_buf: bvh_tris_buf,
             _lights_buf: lights_buf,

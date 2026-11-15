@@ -59,8 +59,8 @@ struct BakeUniforms {
     // Indirect lighting parameters.
     bounce_rays: u32,
     bounce_strength: f32,
-    terrain_albedo: f32,
     // Fraction of the light reaching a scenery surface that it bounces on.
+    // (Terrain reads its own per-tile colour from the `albedo` binding.)
     scenery_albedo: f32,
     bounce_count: u32,
     // Starting row of this dispatch strip within the full lightmap.
@@ -85,6 +85,7 @@ struct BakeUniforms {
     // Clamp on a local light's shadow-ray step count (BakeConfig::max_light_shadow_steps).
     max_light_shadow_steps: u32,
     _pad2: u32,
+    _pad3: u32,
 }
 
 /// Must match `BvhNode` in `baking/bvh.rs`: 32 bytes.
@@ -146,6 +147,14 @@ var<storage, read> lights: array<BakedLight>;
 
 @group(0) @binding(5)
 var<storage, read> bvh_tris: array<BvhTriangle>;
+
+// What each terrain tile sends back as bounce light: packed linear RGB
+// (r in the low byte), one u32 per tile on exactly the heightmap cache's
+// grid. Built CPU-side from the paint map and the palette's bake albedos
+// (`BakeHeightCache::with_paint`), so the GPU and CPU bakes decode the
+// same quantised bytes.
+@group(0) @binding(6)
+var<storage, read> albedo: array<u32>;
 
 // Hits closer than this are the ray's own surface. Mirrors bvh::RAY_EPSILON.
 const RAY_EPSILON: f32 = 0.001;
@@ -257,6 +266,23 @@ fn sample_tile(tx: i32, tz: i32) -> f32 {
         return 0.0;
     }
     return heightmap[uz * u.cache_stride + ux];
+}
+
+/// The terrain's bounce albedo at world position (wx, wz): the paint map's
+/// tile under it, nearest tile. Mirrors `BakeHeightCache::albedo_at`;
+/// out-of-cache tiles read the same neutral 0.5 grey.
+fn terrain_albedo_at(wx: f32, wz: f32) -> vec3<f32> {
+    let lx = i32(floor(wx / u.tile_size_x)) - u.cache_tile_min_x;
+    let lz = i32(floor(wz / u.tile_size_z)) - u.cache_tile_min_z;
+    if lx < 0 || lz < 0 || u32(lx) >= u.cache_stride || u32(lz) >= u.cache_depth {
+        return vec3<f32>(0.5);
+    }
+    let packed = albedo[u32(lz) * u.cache_stride + u32(lx)];
+    return vec3<f32>(
+        f32(packed & 0xffu),
+        f32((packed >> 8u) & 0xffu),
+        f32((packed >> 16u) & 0xffu),
+    ) / 255.0;
 }
 
 /// Bilinearly interpolate world height at world position (wx, wz).
@@ -654,8 +680,9 @@ fn hemisphere_dir(seed: u32, n_total: u32, normal: vec3<f32>, tf: TangentFrame, 
 /// Multi-bounce indirect lighting: cast `bounce_rays` hemisphere rays from
 /// origin and follow each path through up to `bounce_count` terrain reflections.
 ///
-/// Throughput is multiplied by `terrain_albedo` at each bounce so successive
-/// bounces contribute diminishing amounts.
+/// Throughput is multiplied by the hit's albedo at each bounce — a colour,
+/// read from the paint map for terrain hits — so successive bounces
+/// contribute diminishing amounts in the painted ground's own colour.
 ///
 /// `texel_seed` is a per-texel hash used to rotate the hemisphere sample azimuth
 /// and decorrelate the structured golden-ratio pattern across texels, preventing
@@ -686,7 +713,7 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
         var cur_pos      = origin;
         var cur_mesh_pos = mesh_origin;
         var cur_dir      = dir0;
-        var throughput   = 1.0;
+        var throughput   = vec3<f32>(1.0);
 
         for (var b = 0u; b < u.bounce_count; b = b + 1u) {
             // Nearest terrain hit along the ray, by DDA.
@@ -716,7 +743,7 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
             var hit_pos:      vec3<f32>;
             var hit_mesh_pos: vec3<f32>;
             var hn:           vec3<f32>;
-            var albedo:       f32;
+            var hit_albedo:   vec3<f32>;
             if sc.hit {
                 // Lift the terrain march off the surface as a terrain hit
                 // does: a wall's base sits at ground level, where the
@@ -725,7 +752,7 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
                 hit_pos      = p + vec3<f32>(0.0, 0.5, 0.0);
                 hit_mesh_pos = p;
                 hn           = sc.normal;
-                albedo       = u.scenery_albedo;
+                hit_albedo   = vec3<f32>(u.scenery_albedo);
             } else if terrain_t >= 0.0 {
                 let h        = world_height(terrain_pos.x, terrain_pos.z);
                 // 0.5 clears the step size (~1.25 units) so the next bounce
@@ -733,7 +760,7 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
                 hit_pos      = vec3<f32>(terrain_pos.x, h + 0.5, terrain_pos.z);
                 hit_mesh_pos = vec3<f32>(terrain_pos.x, h + 0.02, terrain_pos.z);
                 hn           = world_normal(terrain_pos.x, terrain_pos.z);
-                albedo       = u.terrain_albedo;
+                hit_albedo   = terrain_albedo_at(terrain_pos.x, terrain_pos.z);
             } else {
                 // Escaped to the sky: nothing to re-emit.
                 break;
@@ -754,8 +781,8 @@ fn compute_bounce(origin: vec3<f32>, mesh_origin: vec3<f32>, normal: vec3<f32>, 
                         + ambient;
             // No cur_cos_w — it cancels with the PDF for cosine-weighted
             // hemisphere sampling.
-            accum = accum + direct * (throughput * albedo);
-            throughput = throughput * albedo;
+            accum = accum + direct * (throughput * hit_albedo);
+            throughput = throughput * hit_albedo;
 
             // Resample direction at hit point using a proper per-bounce hash
             // rather than a cyclic seed shift — avoids correlated directions.

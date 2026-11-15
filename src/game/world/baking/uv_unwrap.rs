@@ -153,7 +153,7 @@ pub fn cell_texels(res: u32, tri_count: u32) -> u32 {
 }
 
 /// Number of cells per atlas side for `tri_count` triangles.
-fn grid_side(tri_count: u32) -> u32 {
+pub fn grid_side(tri_count: u32) -> u32 {
     (tri_count as f64).sqrt().ceil().max(1.0) as u32
 }
 

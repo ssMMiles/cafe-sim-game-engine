@@ -34,6 +34,29 @@ mod ui;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+/// wgpu features the app refuses even when the adapter offers them.
+///
+/// `TIMESTAMP_QUERY` on Metal — natively on macOS, and in the browser, where
+/// Chrome's Dawn sits on Metal too. Every timestamp query set there is one
+/// `MTLCounterSampleBuffer`, and Metal allows **32 live ones per GPU**,
+/// shared across processes. Bevy's `RenderDiagnosticsPlugin` allocates a
+/// query set per frame it has in flight with no cap, so any submission that
+/// keeps the GPU busy for a few seconds (a lightmap bake) lets the CPU race
+/// ahead until allocation fails — and wgpu reports that as `DeviceLost`,
+/// killing the app (2026-11-15; a browser bake in another tab made the
+/// native app die sooner). Without the feature the recorder creates no
+/// query sets and falls back to its CPU encode timings on its own, which is
+/// all Metal could ever show anyway: per-pass GPU times need
+/// `TIMESTAMP_QUERY_INSIDE_PASSES`, which Metal lacks. Vulkan and DX12 keep
+/// the real thing.
+fn disabled_wgpu_features() -> Option<bevy::render::settings::WgpuFeatures> {
+    if cfg!(any(target_os = "macos", target_arch = "wasm32")) {
+        Some(bevy::render::settings::WgpuFeatures::TIMESTAMP_QUERY)
+    } else {
+        None
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
 pub fn run() {
     #[cfg(feature = "profiling")]
@@ -88,7 +111,15 @@ pub fn run() {
             // installed when it is present, so the gizmo render plugin goes
             // too; `scene_pass::gizmos` draws them instead.
             .disable::<bevy::pbr::PbrPlugin>()
-            .disable::<bevy::gizmos_render::GizmoRenderPlugin>(),
+            .disable::<bevy::gizmos_render::GizmoRenderPlugin>()
+            .set(bevy::render::RenderPlugin {
+                render_creation: bevy::render::settings::WgpuSettings {
+                    disabled_features: disabled_wgpu_features(),
+                    ..default()
+                }
+                .into(),
+                ..default()
+            }),
     );
     // With `PbrPlugin` went the glTF extension handler that gave every
     // spawned primitive a `StandardMaterial`; ours gives it a `GltfSurface`
@@ -99,7 +130,8 @@ pub fn run() {
         // Per-pass GPU timings, surfaced in the editor (inspector → nothing
         // selected → GPU timings). Bevy only adds this itself under
         // `tracing-tracy`; it costs two timestamps per recorded span and falls
-        // back to CPU encode times where `TIMESTAMP_QUERY` is unavailable.
+        // back to CPU encode times where `TIMESTAMP_QUERY` is unavailable —
+        // which `disabled_wgpu_features` makes deliberately so on Metal.
         .add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin)
         .add_plugins(PhysicsPlugins::default())
         .add_plugins(storage::StoragePlugin)

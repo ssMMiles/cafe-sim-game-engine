@@ -468,6 +468,7 @@ pub fn finalize_paint_stroke(
     mut state: ResMut<PaintToolState>,
     paintmap: Option<Res<PaintmapData>>,
     mut history: ResMut<History>,
+    mut lighting: ResMut<crate::editor::edits::LightingState>,
 ) {
     if mouse.pressed(MouseButton::Left) || !state.was_painting {
         return;
@@ -490,6 +491,9 @@ pub fn finalize_paint_stroke(
         .collect();
     if !chunks.is_empty() {
         history.push(format!("{label} terrain"), vec![Change::Paint { chunks }]);
+        // A tile's layer changes its bake albedo, so the baked bounce light
+        // no longer matches what is painted.
+        lighting.stale = true;
     }
 }
 
@@ -531,10 +535,13 @@ pub fn apply_paint_requests(
     mut images: ResMut<Assets<Image>>,
     registry: Option<ResMut<TerrainChunkRegistry>>,
     mut history: ResMut<History>,
+    mut lighting: ResMut<crate::editor::edits::LightingState>,
 ) {
     let Some(request) = state.request.take() else {
         return;
     };
+    // Every request repaints tiles, which changes what the ground bounces.
+    lighting.stale = true;
     let (Some(mut terrain_world), Some(mut paintmap), Some(mut registry), Some(heightmap)) =
         (terrain_world, paintmap, registry, heightmap)
     else {

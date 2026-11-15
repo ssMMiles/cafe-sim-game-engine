@@ -32,7 +32,9 @@ pub fn bake_terrain_lightmaps(
     images: &mut Assets<Image>,
     lighting: &BakeLighting,
     bvh: &TriangleBvh,
+    paint: &crate::game::world::terrain::paint::PaintmapData,
 ) {
+    let palette = &terrain_world.metadata.palette;
     let grid = ChunkBakeGrid::new(config);
     // Maximum horizontal distance any ray can travel.
     let ray_reach = config.ao_radius * 4.0;
@@ -44,7 +46,8 @@ pub fn bake_terrain_lightmaps(
         // A flat heightmap cache covering the chunk + full ray reach in
         // every direction. This replaces per-step HashMap lookups with direct
         // Vec indexing, giving a large speedup in the parallel hot loop.
-        let cache = extract_bake_cache(heightmap, grid, chunk.chunk_x, chunk.chunk_y, ray_reach);
+        let cache = extract_bake_cache(heightmap, grid, chunk.chunk_x, chunk.chunk_y, ray_reach)
+            .with_paint(paint, palette);
 
         let lightmap = bake_chunk(
             &cache,
@@ -189,7 +192,6 @@ pub fn bake_chunk(
                 config.ao_radius * 4.0,
                 config.bounce_rays,
                 config.shadow_steps,
-                config.terrain_albedo,
                 config.scenery_albedo,
                 config.bounce_count,
                 |dist| config.light_shadow_steps(dist),

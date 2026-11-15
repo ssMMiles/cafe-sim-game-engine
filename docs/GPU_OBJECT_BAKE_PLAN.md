@@ -5,6 +5,8 @@ now runs on `AsyncComputeTaskPool`. Stage 2 (the GPU path itself) is **not
 started, and the measurements argue against it** — see "What measuring
 actually showed" below, and "Re-measured after scenery re-emission" for the
 current numbers and a cheaper lever that should be pulled first.
+**The cheaper lever was pulled on 2026-11-15** — see "Per-cell lattice, shared
+cache, and the wasm main thread" at the end.
 
 ## Where the time actually goes
 
@@ -379,3 +381,42 @@ Smaller things worth doing before 5, if the bake ever needs to be faster:
   overlap heavily — wasted work and memory in `collect_object_bake_jobs`.
 - Apply results per sub-mesh instead of all at the end, so a big bake pops in
   progressively rather than in one go.
+
+## Per-cell lattice, shared cache, and the wasm main thread (2026-11-15)
+
+Done, in `objects.rs`:
+
+- **AO and bounce on a per-cell coarse lattice** (`CellLattice`,
+  `shade_geometry`): every atlas cell gets lattice points at local offsets
+  `0, n, 2n, …` and its last texel (`n = cpu_lowfreq_downsample`, default 4),
+  AO + bounce are evaluated there, and each texel bilinearly interpolates
+  the four lattice points *of its own cell* — never across a cell boundary,
+  because the neighbouring cell holds an unrelated triangle. Lattice points
+  outside the triangle's shaded margin have no geometry and are skipped; a
+  texel whose four corners are all missing is evaluated exactly, as are
+  cells too small for two lattice steps. Sun shadow and local-light shadows
+  stay per texel. `BakeStats` now reports the lattice point count and the
+  ray estimate uses it. On the figures above (AO + bounce ≈ 98 % of the
+  cost) this is roughly `n²` fewer hemisphere evaluations, ~10× net.
+- **One `BakeHeightCache` per pass**, not per object (`ObjectBakePass`):
+  the union of every job's bounds plus ray reach, extracted and
+  paint-filled once. The per-object caches overlapped almost entirely, and
+  since Phase 4 of terrain painting each carried a packed albedo grid as
+  well as heights.
+- **The wasm main thread.** On wasm `AsyncComputeTaskPool` is
+  `spawn_local`: the task runs on the main thread's *microtask* queue, which
+  the browser drains before it paints, so a bake that never awaited was a
+  frozen tab for its whole duration. `run_object_bake_jobs` is now `async`
+  and awaits `pacing::breathe()` — a `setTimeout(0)` macrotask on wasm, a
+  no-op natively — after every band of lattice points (`LATTICE_BAND`,
+  2048) and texels (`TEXEL_BAND`, 65 536) and between stages; the probe
+  task yields between chunks. The bake takes the same total time on wasm
+  (one thread either way) but the tab stays responsive, which is the
+  difference between "slow" and "broken". Native is unaffected: the awaits
+  resolve immediately on a worker thread.
+
+Still open, in order of value: the probe bake's per-chunk work is a single
+synchronous call and so still blocks a wasm frame for the whole chunk;
+results could be applied per sub-mesh rather than at the end; and stage 2
+remains not recommended on the current numbers.
+

@@ -142,6 +142,29 @@ pub fn menu_bar(ui: &mut egui::Ui, panels: &mut Panels) {
             let lights = &mut panels.gizmo_store.config_mut::<LightGizmos>().0.enabled;
             ui.checkbox(lights, "Light gizmos\tF8");
             ui.separator();
+            // Terrain paint debug views: mutually exclusive, so plain
+            // checkboxes that clear each other.
+            {
+                use crate::editor::lightmap_toggle::TerrainDebugMode;
+                let mode = &mut *panels.terrain_debug;
+                let mut layers = *mode == TerrainDebugMode::Layers;
+                if ui.checkbox(&mut layers, "Paint layer ids").changed() {
+                    *mode = if layers {
+                        TerrainDebugMode::Layers
+                    } else {
+                        TerrainDebugMode::Off
+                    };
+                }
+                let mut auto = *mode == TerrainDebugMode::AutoTiles;
+                if ui.checkbox(&mut auto, "Paint auto tiles").changed() {
+                    *mode = if auto {
+                        TerrainDebugMode::AutoTiles
+                    } else {
+                        TerrainDebugMode::Off
+                    };
+                }
+            }
+            ui.separator();
             if ui.button("Reset layout").clicked() {
                 panels.menu.reset_layout = true;
                 ui.close();

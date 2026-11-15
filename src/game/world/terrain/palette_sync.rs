@@ -14,7 +14,7 @@ use bevy::{asset::LoadState, prelude::*};
 use super::{
     bootstrap::TerrainRenderAssets,
     material::{TerrainMaterial, TerrainPaletteGpu},
-    paint::build_palette_array,
+    paint::{build_palette_array, layer_bake_albedo, pattern_dark_factor},
     storage::TerrainWorld,
 };
 
@@ -29,17 +29,21 @@ pub struct PaletteTextures {
     pending: bool,
     /// Paths already reported as failed, so the warning fires once each.
     failed: Vec<String>,
+    /// Each source pattern's mean dark factor (`paint::pattern_dark_factor`),
+    /// measured when the array was last rebuilt; drives the derived
+    /// per-layer `bake_albedo`.
+    dark_factors: Vec<f32>,
 }
 
 pub fn sync_palette(
-    terrain_world: Option<Res<TerrainWorld>>,
+    terrain_world: Option<ResMut<TerrainWorld>>,
     render_assets: Option<Res<TerrainRenderAssets>>,
     asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut state: ResMut<PaletteTextures>,
 ) {
-    let (Some(terrain_world), Some(render_assets)) = (terrain_world, render_assets) else {
+    let (Some(mut terrain_world), Some(render_assets)) = (terrain_world, render_assets) else {
         // Between worlds: forget the old request so the next world starts
         // clean (its handles may well be the same paths, which is fine).
         if !state.sources.is_empty() {
@@ -47,13 +51,20 @@ pub fn sync_palette(
         }
         return;
     };
-    let palette = &terrain_world.metadata.palette;
-
     // ── Textures: request loads when the layer list changes ──────────────
-    let wanted: Vec<&str> = palette.layers.iter().map(|l| l.texture.as_str()).collect();
+    let wanted: Vec<String> = terrain_world
+        .metadata
+        .palette
+        .layers
+        .iter()
+        .map(|l| l.texture.clone())
+        .collect();
     let same_sources = state.sources.len() == wanted.len()
         && state.sources.iter().zip(&wanted).all(|((p, _), w)| p == w);
-    if !same_sources || state.size != palette.texture_size || render_assets.is_added() {
+    if !same_sources
+        || state.size != terrain_world.metadata.palette.texture_size
+        || render_assets.is_added()
+    {
         state.sources = wanted
             .iter()
             .map(|path| {
@@ -66,7 +77,7 @@ pub fn sync_palette(
                 (path.to_string(), handle)
             })
             .collect();
-        state.size = palette.texture_size;
+        state.size = terrain_world.metadata.palette.texture_size;
         state.pending = true;
     }
 
@@ -99,14 +110,16 @@ pub fn sync_palette(
                 bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                 bevy::asset::RenderAssetUsages::MAIN_WORLD,
             );
-            let array = {
+            let (array, factors) = {
                 let sources: Vec<&Image> = state
                     .sources
                     .iter()
                     .map(|(_, h)| images.get(h).unwrap_or(&flat))
                     .collect();
-                build_palette_array(&sources, state.size)
+                let factors = sources.iter().map(|img| pattern_dark_factor(img)).collect();
+                (build_palette_array(&sources, state.size), factors)
             };
+            state.dark_factors = factors;
             let array = images.add(array);
             for (_, mat) in materials.iter_mut() {
                 mat.layers = array.clone();
@@ -120,9 +133,32 @@ pub fn sync_palette(
         }
     }
 
+    // ── Bake albedo: derived, never authored ──────────────────────────────
+    //
+    // What a bounce or probe ray should see where a layer is painted is the
+    // colour the *screen* shows there: the shader's own layer colour with the
+    // pattern replaced by its mean dark factor (`paint::layer_bake_albedo`).
+    // Recomputed whenever the palette changes (a tint drag) or the patterns
+    // finish loading; written through `bypass_change_detection` because it is
+    // derived bookkeeping — not an edit, not undoable, and it must not
+    // retrigger this system or the uniform sync below. Shift+S persists it
+    // with the palette, so the bakers never need the textures in memory.
+    {
+        let world = terrain_world.bypass_change_detection();
+        for (i, layer) in world.metadata.palette.layers.iter_mut().enumerate() {
+            let Some(factor) = state.dark_factors.get(i).copied() else {
+                break; // array not built yet this world; keep saved values
+            };
+            let derived = layer_bake_albedo(layer, factor);
+            if layer.bake_albedo != derived {
+                layer.bake_albedo = derived;
+            }
+        }
+    }
+
     // ── Uniform: follow every palette edit ───────────────────────────────
     if terrain_world.is_changed() || render_assets.is_added() {
-        let gpu = TerrainPaletteGpu::from_palette(palette);
+        let gpu = TerrainPaletteGpu::from_palette(&terrain_world.metadata.palette);
         let base_differs = materials
             .get(&render_assets.material)
             .is_none_or(|m| m.palette != gpu);

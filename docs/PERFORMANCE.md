@@ -134,11 +134,22 @@ named "edge detection" and "atmosphere").
 **This list is empty on macOS, by design of the hardware.** Bevy writes its
 timestamps *inside* the render pass, which needs
 `TIMESTAMP_QUERY_INSIDE_PASSES`. Apple GPUs sample counters at stage
-boundaries only, so Metal reports `TIMESTAMP_QUERY` (enough for wgpu to
-create a query set) but not the inside-passes variant — and because a query
-set exists, bevy's recorder never falls back to its CPU timings either.
-Nothing is reported at all. `GpuTimingSupport` detects this and the panel
-says so instead of showing an empty table.
+boundaries only, so Metal offers `TIMESTAMP_QUERY` (enough for wgpu to
+create a query set) but not the inside-passes variant. `GpuTimingSupport`
+detects this and the panel says so instead of showing an empty table.
+
+**And since 2026-11-15 the app refuses `TIMESTAMP_QUERY` on Metal
+altogether** (`disabled_wgpu_features` in `src/lib.rs`: macOS natively, and
+wasm, where Chrome's Dawn sits on Metal). On Metal every timestamp query set
+is one `MTLCounterSampleBuffer`, of which the GPU allows **32 live, shared
+across processes**; bevy's `DiagnosticsRecorder` allocates a fresh query set
+for every frame it has in flight with no cap, so a submission that keeps the
+GPU busy for seconds (a lightmap bake) let the CPU race ahead until
+allocation failed — which wgpu reports as `DeviceLost`, killing the app (a
+browser bake running in another tab made the native app die sooner, since the
+budget is shared). With the feature withheld the recorder creates no query
+sets and falls back to its CPU encode timings on its own — the only thing
+Metal was ever going to give us anyway.
 
 On Windows and Linux (DX12, Vulkan) this is the precise answer. On macOS,
 use the breakdown and the A/B, or take a GPU capture in Xcode for a real
