@@ -90,6 +90,12 @@ debug = false
 
 # Deploy artifacts only (`tools/web.sh release`, CI): fat LTO + one codegen
 # unit. Slow by design — never iterate on this profile.
+# CI's `wasm-pack build --release` runs wasm-opt with these; keep them in
+# step with `tools/web.sh release`. -Oz: size. --strip-debug: drop the
+# function-name section (~half the file; dev/profile builds keep it).
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz", "--strip-debug", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+
 [profile.release]
 lto = true
 codegen-units = 1

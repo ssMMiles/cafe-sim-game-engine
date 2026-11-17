@@ -3,14 +3,21 @@
 #
 #   tools/web.sh            dev:     web-dev profile (thin LTO)      → target/web
 #   tools/web.sh profile    + bevy spans for tools/web-trace.mjs    → target/web-profile
-#   tools/web.sh release    deploy artifact (fat LTO, cgu=1)        → target/web-release
+#   tools/web.sh release    deploy artifact (fat LTO, cgu=1, then
+#                           wasm-opt -Oz, function names stripped) → target/web-release
 #
 # Each mode has its own target directory because `web-profile` changes bevy's
 # feature set and `release` is a different profile; keeping them apart keeps
 # every mode's incremental build warm (docs/BUILD_TIMES.md §4). Replaces
 # `wasm-pack` locally: same two steps (cargo build + wasm-bindgen) without the
-# forced release profile or the wasm-opt pass. Set WASM_OPT=1 to run wasm-opt
-# on a release build. CI still uses wasm-pack (.github/workflows).
+# forced release profile. Only `release` runs wasm-opt; CI still uses
+# wasm-pack (.github/workflows), which gets the same flags from
+# `[package.metadata.wasm-pack.profile.release]` in Cargo.toml.
+#
+# dev/profile keep the `name` section (function names: ~half the file, but
+# it's what makes browser stack traces and tools/web-trace.mjs readable).
+# release drops it — `wasm-opt` without `-g` discards it, `--strip-debug`
+# makes that explicit — and optimises for size with -Oz.
 #
 # Needs `wasm-bindgen` at the version pinned in Cargo.lock:
 #   cargo install wasm-bindgen-cli --version <that version>
@@ -40,7 +47,11 @@ cargo build --target wasm32-unknown-unknown --profile "$profile" $features --tar
 wasm="$dir/wasm32-unknown-unknown/$profile/game_engine_lib.wasm"
 wasm-bindgen --target web --out-dir pkg --out-name game_engine_lib "$wasm"
 
-if [[ "$mode" == release && "${WASM_OPT:-0}" == 1 ]]; then
-  wasm-opt -O --enable-bulk-memory --enable-nontrapping-float-to-int -o pkg/game_engine_lib_bg.wasm pkg/game_engine_lib_bg.wasm
+out=pkg/game_engine_lib_bg.wasm
+if [[ "$mode" == release ]]; then
+  before=$(wc -c < "$out")
+  # Keep in step with [package.metadata.wasm-pack.profile.release] (CI).
+  wasm-opt -Oz --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int -o "$out" "$out"
+  echo "wasm-opt: $before -> $(wc -c < "$out") bytes"
 fi
-ls -la pkg/game_engine_lib_bg.wasm
+ls -la "$out"
