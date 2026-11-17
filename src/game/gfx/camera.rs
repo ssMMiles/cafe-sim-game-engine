@@ -26,8 +26,12 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-pub const RENDER_TEXTURE_WIDTH: u32 = 1920;
-pub const RENDER_TEXTURE_HEIGHT: u32 = 1080;
+/// What the render target is sized to before any window has been measured —
+/// the first frame of `setup_camera` if the primary window is somehow missing,
+/// and nothing else. Gameplay sizes the target to the window's *physical*
+/// pixels ([`gameplay_target_size`]) and the editor to its viewport tab, so
+/// this is a fallback, not a resolution.
+pub const FALLBACK_TARGET_SIZE: UVec2 = UVec2::new(1920, 1080);
 const CAMERA_CLEARANCE: f32 = 0.5; // Min camera height above terrain in FloorBased mode
 const EYE_HEIGHT: f32 = 1.7; // Camera offset above player origin in first-person
 const FOV_FIRST_PERSON: f32 = PI / 2.5; // ~72 degrees
@@ -41,16 +45,50 @@ pub struct RenderTextureSprite;
 /// The image the 3D camera renders into. The editor shows it inside an egui
 /// tab (and resizes it to fit); gameplay presents it via the full-window
 /// sprite.
+///
+/// **It is always the size it is displayed at, in physical pixels** — the
+/// window's in gameplay ([`resize_render_texture_sprite`]), the viewport tab's
+/// in the editor (`editor::camera::sync_render_target`). It was a fixed
+/// 1920×1080 with a nearest sampler until 2026-11-17, which point-sampled the
+/// 3D view up (or down) to whatever the window was: on a HiDPI display that
+/// re-quantised every pixel and was by far the largest aliasing source in the
+/// image, ahead of anything MSAA or FXAA could do about it.
 #[derive(Resource, Clone)]
 pub struct GameRenderTarget(pub Handle<Image>);
 
-pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>) {
+/// The size gameplay wants the render target at: the window's physical
+/// pixels, so the presentation sprite maps it 1:1 to the screen.
+pub fn gameplay_target_size(window: &Window) -> UVec2 {
+    UVec2::new(window.physical_width(), window.physical_height()).max(UVec2::ONE)
+}
+
+/// Resize `handle` to `size` unless it is already that size.
+///
+/// The `get` before the `get_mut` is load-bearing: `get_mut` flags the asset
+/// modified, which re-uploads the whole texture and (via
+/// [`refresh_sprite_materials_after_image_change`]) rebuilds the sprite
+/// material — every frame, if we asked for it every frame.
+pub fn resize_render_target(images: &mut Assets<Image>, handle: &Handle<Image>, size: UVec2) {
+    let size = size.max(UVec2::ONE);
+    if images.get(handle).is_some_and(|img| img.size() != size)
+        && let Some(mut image) = images.get_mut(handle)
+    {
+        image.resize(Extent3d {
+            width: size.x,
+            height: size.y,
+            ..default()
+        });
+    }
+}
+
+pub fn setup_camera(commands: &mut Commands, images: &mut Assets<Image>, target_size: UVec2) {
     let initial_transform = Transform::default();
     let (yaw, pitch, _) = initial_transform.rotation.to_euler(EulerRot::YXZ);
 
+    let target_size = target_size.max(UVec2::ONE);
     let size = Extent3d {
-        width: RENDER_TEXTURE_WIDTH,
-        height: RENDER_TEXTURE_HEIGHT,
+        width: target_size.x,
+        height: target_size.y,
         ..default()
     };
 
@@ -67,7 +105,12 @@ pub fn setup_camera(commands: &mut Commands, images: &mut ResMut<Assets<Image>>)
                 | TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         },
-        sampler: ImageSampler::nearest(), // For pixelated look
+        // Linear, not nearest. The target is presented at its own size, so
+        // the filter only matters for the frame or two a resize is in
+        // flight — but the app default is `ImagePlugin::default_nearest()`,
+        // so leaving the sampler alone would inherit the pixel-art filter
+        // this target deliberately no longer wants.
+        sampler: ImageSampler::linear(),
         ..default()
     };
 
@@ -326,14 +369,28 @@ pub fn camera_follow(
     }
 }
 
+/// Keep the render target the size of the window, in physical pixels, and the
+/// presentation sprite the size of the window in the logical units the
+/// `Camera2d` works in. Together those map one target texel to one screen
+/// pixel, which is the whole point: no resample between the 3D image and the
+/// display.
+///
+/// Gameplay only — in `EditorMode::Editor` the target belongs to the viewport
+/// tab and `editor::camera::sync_render_target` owns its size.
 pub fn resize_render_texture_sprite(
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut sprite_query: Query<&mut Sprite, With<RenderTextureSprite>>,
+    target: Option<Res<GameRenderTarget>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
-    if let Ok(window) = window_query.single()
-        && let Ok(mut sprite) = sprite_query.single_mut()
-    {
+    let Ok(window) = window_query.single() else {
+        return;
+    };
+    if let Ok(mut sprite) = sprite_query.single_mut() {
         sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
+    }
+    if let Some(target) = target {
+        resize_render_target(&mut images, &target.0, gameplay_target_size(window));
     }
 }
 

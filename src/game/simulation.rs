@@ -1,10 +1,10 @@
 use avian3d::prelude::*;
-use bevy::window::CursorOptions;
+use bevy::window::{CursorOptions, PrimaryWindow};
 use bevy::{log, prelude::*};
 
 use super::physics::{CHAR_HEIGHT, CHAR_RADIUS};
 use crate::editor::EditorMode;
-use crate::game::gfx::camera::setup_camera;
+use crate::game::gfx::camera::{FALLBACK_TARGET_SIZE, gameplay_target_size, setup_camera};
 use crate::game::gltf_loading::{ConvertToToon, DynamicLit};
 use crate::game::world::objects::PlacedObjectRegistry;
 use crate::game::world::streaming::StreamingState;
@@ -24,6 +24,7 @@ pub fn setup(
     asset_server: Res<AssetServer>,
     mut cursor_options: Single<&mut CursorOptions>,
     mode: Res<State<EditorMode>>,
+    window: Option<Single<&Window, With<PrimaryWindow>>>,
 ) {
     log::info!("Setting up the simulation environment");
 
@@ -65,7 +66,13 @@ pub fn setup(
         Transform::from_translation(Vec3::Y * CHAR_HEIGHT * 0.5),
     ));
 
-    setup_camera(&mut commands, &mut images);
+    // The target is sized to the window from the start, so the first frame
+    // after it appears is already 1:1 rather than a 1080p image stretched to
+    // whatever the window happens to be.
+    let target_size = window
+        .as_deref()
+        .map_or(FALLBACK_TARGET_SIZE, |w| gameplay_target_size(w));
+    setup_camera(&mut commands, &mut images, target_size);
     commands.insert_resource(SimulationConfig::default());
 
     // Setup the game world

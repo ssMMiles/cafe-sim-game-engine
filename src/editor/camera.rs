@@ -13,15 +13,13 @@
 //! release so the pointer lands where the drag began.
 
 use bevy::input::mouse::MouseMotion;
-use bevy::render::render_resource::Extent3d;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy::{log, prelude::*};
 
 use super::input::{ScrollMod, scroll_modifier, scroll_notches};
 use super::picking::ViewportInput;
 use crate::game::gfx::camera::{
-    GameRenderTarget, PlayerCamera, RENDER_TEXTURE_HEIGHT, RENDER_TEXTURE_WIDTH,
-    RenderTextureSprite,
+    GameRenderTarget, PlayerCamera, RenderTextureSprite, gameplay_target_size, resize_render_target,
 };
 use crate::settings::UserSettings;
 use engine_api::Player;
@@ -235,45 +233,27 @@ pub fn sync_render_target(
         return;
     }
 
-    // Compare through `get` first: `get_mut` flags the asset modified and
-    // would re-upload the whole texture every frame.
-    if images
-        .get(&target.0)
-        .is_some_and(|img| img.size() != wanted)
-        && let Some(mut image) = images.get_mut(&target.0)
-    {
-        log::debug!("Viewport render target -> {}x{}", wanted.x, wanted.y);
-        image.resize(Extent3d {
-            width: wanted.x,
-            height: wanted.y,
-            ..default()
-        });
-    }
+    log::debug!("Viewport render target -> {}x{}", wanted.x, wanted.y);
+    resize_render_target(&mut images, &target.0, wanted);
 }
 
-/// `OnExit(EditorMode::Editor)`: gameplay presents the fixed-size texture via
-/// the full-window sprite again.
+/// `OnExit(EditorMode::Editor)`: gameplay presents the texture through the
+/// full-window sprite again, at the window's own physical size.
+///
+/// `resize_render_texture_sprite` would do the resize on its next run anyway;
+/// doing it here as well means the handover never shows a frame of the
+/// viewport tab's size stretched over the window.
 pub fn restore_render_target(
     target: Option<Res<GameRenderTarget>>,
+    window: Query<&Window, With<PrimaryWindow>>,
     mut images: ResMut<Assets<Image>>,
     mut sprite: Query<&mut Visibility, With<RenderTextureSprite>>,
 ) {
     for mut vis in sprite.iter_mut() {
         *vis = Visibility::Inherited;
     }
-    let Some(target) = target else {
+    let (Some(target), Ok(window)) = (target, window.single()) else {
         return;
     };
-    let gameplay_size = UVec2::new(RENDER_TEXTURE_WIDTH, RENDER_TEXTURE_HEIGHT);
-    if images
-        .get(&target.0)
-        .is_some_and(|img| img.size() != gameplay_size)
-        && let Some(mut image) = images.get_mut(&target.0)
-    {
-        image.resize(Extent3d {
-            width: RENDER_TEXTURE_WIDTH,
-            height: RENDER_TEXTURE_HEIGHT,
-            ..default()
-        });
-    }
+    resize_render_target(&mut images, &target.0, gameplay_target_size(window));
 }

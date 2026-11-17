@@ -265,8 +265,11 @@ editor at 0.5 without any shader work.
 
 **Mode transitions.** `OnEnter(EditorMode::Editor)`: hide
 `RenderTextureSprite`. `OnExit(EditorMode::Editor)`: resize the image back
-to `RENDER_TEXTURE_WIDTH × HEIGHT`, show the sprite. `resize_render_texture_sprite`
-gains `run_if(in_state(EditorMode::Gameplay))`.
+to the window's physical size, show the sprite. `resize_render_texture_sprite`
+gains `run_if(in_state(EditorMode::Gameplay))` and owns the gameplay size.
+(It resized to a fixed `RENDER_TEXTURE_WIDTH × HEIGHT` until 2026-11-17;
+gameplay now follows the window the way the viewport tab always did —
+`docs/GRAPHICS.md` §4.)
 
 ### 4.4 Cursor and fly camera (`camera.rs`)
 

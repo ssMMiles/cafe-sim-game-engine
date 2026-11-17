@@ -58,7 +58,7 @@ MAIN WORLD (Update / PostUpdate)
   editor: egui pass (EguiPrimaryContextPass), gizmos
         │ extract
         ▼
-RENDER WORLD, gameplay Camera3d → GameRenderTarget (Rgba16Float, MSAA ×4)
+RENDER WORLD, gameplay Camera3d → GameRenderTarget (Rgba16Float, MSAA ×4, window-sized)
   probe uploads  write_texture into the 4 volume textures   (RenderSystems::PrepareResources)
   Core3d:
     Prepass        depth + world normals    (every opaque mesh; sky dome writes normals, no depth)
@@ -84,8 +84,8 @@ prepass.
 
 | Camera | Where | Target | Layers | Notable components |
 |--------|-------|--------|--------|--------------------|
-| Gameplay `Camera3d` (`PlayerCamera`) | `src/game/gfx/camera.rs:84-127`, spawned `OnEnter(InGame)` | `GameRenderTarget` image | 0 | `Hdr`, `Msaa::Sample4` (default), `DepthPrepass`, `NormalPrepass`, `Tonemapping::Linear`, `Fxaa`, `EdgeDetectionSettings`, `AtmosphereSettings` |
-| Presentation `Camera2d` | `camera.rs:140-155` | window | 1 | `PrimaryEguiContext`, `IsDefaultUiCamera`, `Fxaa` |
+| Gameplay `Camera3d` (`PlayerCamera`) | `src/game/gfx/camera.rs`, spawned `OnEnter(InGame)` | `GameRenderTarget` image | 0 | `Hdr`, `Msaa::Sample4` (bevy's default — `Camera` requires `Msaa`), `DepthPrepass`, `NormalPrepass`, `Tonemapping::Linear`, `Fxaa`, `EdgeDetectionSettings`, `AtmosphereSettings` |
+| Presentation `Camera2d` | `camera.rs` | window | 1 | `PrimaryEguiContext`, `IsDefaultUiCamera`, `Msaa::Off` (no `Fxaa`: it only blits an already-antialiased image) |
 | Main-menu `Camera2d` | `src/menu/mod.rs:58` | window | 0 (default) | despawned on leaving the menu |
 | Editor thumbnail rig | `src/editor/thumbnails.rs:186-221` | 128 px `Rgba8UnormSrgb` per job | 7 | `is_active: false` until a job; `Tonemapping::Linear`; own `DirectionalLight` (12 000 lux) |
 | cafe-sim thumbnails | `plugins/cafe-sim/src/thumbnails.rs:68-90` | 256² `Bgra8UnormSrgb` each | 8 + i | default tonemapping (see §17) |
@@ -114,17 +114,43 @@ what streaming, the probe window and the bake centre on.
 
 ## 4. Render target and presentation
 
-`GameRenderTarget` (`camera.rs:46-79`):
-- 1920×1080 `Rgba16Float`, usage `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT`.
-- **Nearest sampler.** It is presented, not sampled by materials. The
-  nearest filter is a deliberate pixel look (memory.md notes the user wants
-  to revisit how it re-quantises on HiDPI).
+`GameRenderTarget` (`src/game/gfx/camera.rs`):
+- `Rgba16Float`, usage `TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT`.
+- **Always the size it is displayed at, in physical pixels**, so nothing
+  resamples between the 3D image and the screen.
+- **Linear sampler**, set explicitly: the app default is
+  `ImagePlugin::default_nearest()`, so leaving it alone would inherit the
+  pixel-art filter. At 1:1 the filter never fires; it only covers the frame
+  or two a resize is in flight.
+
+Until 2026-11-17 it was a fixed 1920×1080 with a *nearest* sampler,
+point-sampled up to the window by the presentation sprite. On a HiDPI
+window that re-quantised every pixel and was the largest aliasing source in
+the image — bigger than anything MSAA or FXAA could answer — and it
+stretched a 16:9 image over a window of any other aspect ratio. The
+`FALLBACK_TARGET_SIZE` constant is all that is left of it: the size used if
+the primary window can't be read at spawn.
 
 | | Gameplay | Editor |
 |---|---|---|
-| Size | 1920×1080 fixed | the viewport tab's physical pixel size, after it holds for 2 egui passes (`sync_render_target`, `src/editor/camera.rs:208-252`) |
-| Shown by | `Sprite` on layer 1, `custom_size` = window logical size every frame (`resize_render_texture_sprite`) | `egui::Image` of the texture (bevy_egui binds float textures and does its own linear→sRGB, so the colours match) |
-| Switch | `OnExit(EditorMode::Editor)` → `restore_render_target` (sprite visible, back to 1080p) | `sync_render_target` hides the sprite each frame |
+| Size | the window's physical pixel size, every frame (`resize_render_texture_sprite`) | the viewport tab's physical pixel size, after it holds for 2 egui passes (`sync_render_target`, `src/editor/camera.rs`) |
+| Shown by | `Sprite` on layer 1, `custom_size` = window logical size every frame — logical for the sprite, physical for the texture, which is what makes it 1:1 | `egui::Image` of the texture (bevy_egui binds float textures and does its own linear→sRGB, so the colours match) |
+| Switch | `OnExit(EditorMode::Editor)` → `restore_render_target` (sprite visible, resized to the window) | `sync_render_target` hides the sprite each frame |
+
+Both paths resize through `camera::resize_render_target`, which compares via
+`Assets::get` before `get_mut`: `get_mut` flags the asset modified, which
+re-uploads the texture and rebuilds the sprite material
+(`refresh_sprite_materials_after_image_change`).
+
+**Consequences of the target following the window.** Everything priced per
+pixel — the MSAA ×4 attachments, the prepass depth copy, the three
+fullscreen post passes — now scales with the window. On a Retina display
+that is roughly 2.8× the pixels of the old 1080p target. The edge pass's
+`thickness` is in *pixels*, so outlines read finer on a HiDPI window, and
+its `grazing_bias` term measures a per-pixel slope, so the same scene finds
+slightly more grazing edges at higher resolution; `EdgeStyle` may want
+retuning. The editor viewport always worked this way, so this makes
+gameplay match it rather than introducing the behaviour.
 
 egui is configured with `UiRenderOrder::BevyUiAboveEgui` (`src/editor/ui/mod.rs:74-77`).
 
@@ -657,9 +683,9 @@ Each item was read from the code; none was observed on screen.
    `tonemapping_luts` isn't compiled in. Bevy logs an error when it
    specialises that method without the LUTs. Whether these LDR cameras hit
    that path is unconfirmed.
-9. **The gameplay image is a fixed 1920×1080 with a nearest sampler**,
-   stretched to the window. On a window of a different size or aspect
-   ratio, that re-quantises pixels (deliberate; flagged for a revisit).
+9. ~~**The gameplay image is a fixed 1920×1080 with a nearest sampler**,
+   stretched to the window.~~ **Fixed 2026-11-17**: the target is the
+   window's physical size with a linear sampler (§4).
 10. **The depth prepass is read by the outline and atmosphere passes
     only** — the toon shaders never sample depth. Turning both off skips
     both passes but still pays for the prepass itself.

@@ -66,9 +66,9 @@ the sky is skipped automatically, since nothing was "drawn" there.
    - Draw the outlines.
    - Add haze with distance, and light shafts from the sun if they're on.
    - Smooth jagged edges (FXAA).
-4. **Show it.** In play mode the picture is a fixed 1920×1080 image
-   stretched to the window. In the editor it's resized to fit the viewport
-   panel and shown inside the editor UI.
+4. **Show it.** The picture is drawn at exactly the size it will be shown
+   at — the window in play mode, the viewport panel in the editor — so
+   nothing is stretched or re-sampled on the way to the screen.
 
 ## What's deliberately *not* there
 
