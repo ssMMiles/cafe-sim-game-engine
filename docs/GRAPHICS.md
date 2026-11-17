@@ -64,7 +64,7 @@ RENDER WORLD, gameplay Camera3d → GameRenderTarget (Rgba16Float, MSAA ×4, win
     Prepass        depth + world normals    (every opaque mesh; sky dome writes normals, no depth)
     MainPass       opaque: terrain, toon objects, sky dome, StandardMaterial bits
                    transparent: blob shadows, placement preview, brush disc, gizmos
-    PostProcess    tonemapping (Linear) → edge detection → atmosphere → FXAA
+    PostProcess    tonemapping (Linear) → edge detection (per MSAA sample) → atmosphere
     upscaling
         ▼
 RENDER WORLD, Camera2d → window
@@ -84,8 +84,8 @@ prepass.
 
 | Camera | Where | Target | Layers | Notable components |
 |--------|-------|--------|--------|--------------------|
-| Gameplay `Camera3d` (`PlayerCamera`) | `src/game/gfx/camera.rs`, spawned `OnEnter(InGame)` | `GameRenderTarget` image | 0 | `Hdr`, `Msaa::Sample4` (bevy's default — `Camera` requires `Msaa`), `DepthPrepass`, `NormalPrepass`, `Tonemapping::Linear`, `Fxaa`, `EdgeDetectionSettings`, `AtmosphereSettings` |
-| Presentation `Camera2d` | `camera.rs` | window | 1 | `PrimaryEguiContext`, `IsDefaultUiCamera`, `Msaa::Off` (no `Fxaa`: it only blits an already-antialiased image) |
+| Gameplay `Camera3d` (`PlayerCamera`) | `src/game/gfx/camera.rs`, spawned `OnEnter(InGame)` | `GameRenderTarget` image | 0 | `Hdr`, `Msaa::Sample4` (bevy's default — `Camera` requires `Msaa`), `DepthPrepass`, `NormalPrepass`, `Tonemapping::Linear`, `EdgeDetectionSettings`, `AtmosphereSettings` (no `Fxaa` since 2026-11-17) |
+| Presentation `Camera2d` | `camera.rs` | window | 1 | `PrimaryEguiContext`, `IsDefaultUiCamera`, `Msaa::Off` (it only blits an already-antialiased image) |
 | Main-menu `Camera2d` | `src/menu/mod.rs:58` | window | 0 (default) | despawned on leaving the menu |
 | Editor thumbnail rig | `src/editor/thumbnails.rs:186-221` | 128 px `Rgba8UnormSrgb` per job | 7 | `is_active: false` until a job; `Tonemapping::Linear`; own `DirectionalLight` (12 000 lux) |
 | cafe-sim thumbnails | `plugins/cafe-sim/src/thumbnails.rs:68-90` | 256² `Bgra8UnormSrgb` each | 8 + i | default tonemapping (see §17) |
@@ -442,20 +442,24 @@ There are no shadow maps and no clustered lights.
    `Tonemapping::None` is a full passthrough since 0.20, so never use it here.
 2. **Edge detection.** Relative second difference of prepass depth, plus the
    crease angle between prepass normals. Its own doc is
-   [`EDGE_DETECTION.md`](EDGE_DETECTION.md). `.after(tonemapping).before(fxaa)`.
+   [`EDGE_DETECTION.md`](EDGE_DETECTION.md). `.after(tonemapping)`. Evaluated
+   once per MSAA sample of the prepass textures and averaged — running after
+   the colour resolve, that is the only antialiasing the lines can get, and
+   what let FXAA go.
 3. **Atmosphere.** Distance fog, then god rays, from the depth prepass.
    Its own doc is [`ATMOSPHERE.md`](ATMOSPHERE.md). Ordered after the edge
    pass through the `PostProcessPass` set, so outlines fog with the
    geometry they trace; skipped entirely when both effects are off.
-4. **`fxaa`.** Bevy defaults (High/High); it also smooths the outlines.
-5. Then `upscaling` to the target.
+4. Then `upscaling` to the target.
 
-The presentation `Camera2d` runs its own Linear tonemapping and FXAA over
-the sprite and UI.
+The presentation `Camera2d` runs its own Linear tonemapping over the sprite
+and UI (`Msaa::Off`, no FXAA).
 
-**Not present:** bloom, SSAO, SSR, TAA, SMAA, colour grading overrides,
-environment maps, skybox, and shadow maps. `bevy_post_process` and
-`tonemapping_luts` aren't compiled in (`Cargo.toml:7-37`).
+**Not present:** FXAA (removed 2026-11-17 — MSAA covers geometry, the edge
+pass antialiases its own lines, and all FXAA added was a blur over texture
+detail), bloom, SSAO, SSR, TAA, SMAA, colour grading overrides, environment
+maps, skybox, and shadow maps. `bevy_anti_alias`, `bevy_post_process` and
+`tonemapping_luts` aren't compiled in (`Cargo.toml`).
 
 ---
 
@@ -464,7 +468,7 @@ environment maps, skybox, and shadow maps. `bevy_post_process` and
 - **Sky dome** (§5.3).
 - **Distance fog and god rays** are one fullscreen pass of our own,
   `gfx::atmosphere`, driven from the depth prepass and ordered
-  `.after(edge detection).before(fxaa)` through the `PostProcessPass` set.
+  `.after(edge detection)` through the `PostProcessPass` set.
   Fog is Beer–Lambert with an optional exponential height profile, a sun
   tint and optional quantisation into flat bands; god rays march the depth
   buffer towards the sun's screen position. Both are switched on
@@ -494,7 +498,7 @@ environment maps, skybox, and shadow maps. `bevy_post_process` and
 | Asset thumbnails | the offscreen rig on layer 7: renders until a readback shows the subject (CLAUDE.md, *Assets Browser*) |
 
 Gizmo groups render on layer 0 through the gameplay camera, so they pass
-through the edge pass and FXAA like everything else. They aren't in the
+through the edge pass like everything else. They aren't in the
 prepass, so they never get outlines.
 
 ---

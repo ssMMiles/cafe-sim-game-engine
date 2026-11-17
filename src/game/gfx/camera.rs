@@ -8,7 +8,6 @@ use crate::{
     settings::{CameraView, InputLock, MovementMode, UserSettings, setting_ranges},
 };
 use bevy::{
-    anti_alias::fxaa::Fxaa,
     // `Hdr` moved from `bevy_render::view` to `bevy_camera` in Bevy 0.19 —
     // it is a camera property, not a view one.
     camera::{Hdr, RenderTarget, visibility::RenderLayers},
@@ -143,7 +142,10 @@ pub fn setup_camera(commands: &mut Commands, images: &mut Assets<Image>, target_
             // renders — from `EdgeStyle` and `AtmosphereStyle`.
             EdgeDetectionSettings::default(),
             crate::game::gfx::atmosphere::AtmosphereSettings::default(),
-            Fxaa::default(),
+            // No FXAA (removed 2026-11-17, with the whole `bevy_anti_alias`
+            // feature). Geometry is antialiased by the default `Msaa::Sample4`
+            // and the outlines by the edge pass's own per-sample evaluation
+            // (`post_process.rs`), so all FXAA did was blur texture detail.
         ))
         .insert((
             // HDR intermediate render target: the toon bands are quantised

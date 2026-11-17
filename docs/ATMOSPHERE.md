@@ -15,7 +15,7 @@ own, and with both off the pass doesn't run at all.
 ## 1. Where it runs, and why it is a post-process
 
 ```
-main pass → tonemapping → edge detection → ATMOSPHERE → FXAA
+main pass → tonemapping → edge detection → ATMOSPHERE → upscaling
 ```
 
 Fog is in-scattered light along the view ray. All it needs is the

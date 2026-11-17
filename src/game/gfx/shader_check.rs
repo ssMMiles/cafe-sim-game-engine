@@ -37,6 +37,7 @@ const MESH_VERTEX: &str = include_str!("../../../assets/shaders/scene/mesh_verte
 const SKY: &str = include_str!("../../../assets/shaders/sky_dome.wesl");
 const UNLIT: &str = include_str!("../../../assets/shaders/unlit.wesl");
 const GIZMO_LINES: &str = include_str!("../../../assets/shaders/gizmos/lines.wesl");
+const EDGE: &str = include_str!("../../../assets/shaders/edge_detection_post.wesl");
 
 /// bevy_render's `view.wesl`, cut down to the fields our shaders read (the
 /// scene pass: `clip_from_world`; the gizmo shader: the clip/view matrices
@@ -64,8 +65,18 @@ fn affine3_to_square(affine: mat3x4<f32>) -> mat4x4<f32> {
 /// the runtime resolver from the pipeline's `ShaderDefVal::UInt`s. The value
 /// is 3 under bevy's mesh pipeline (toon) and 1 under ours (terrain,
 /// `scene_pass::pipeline`); which one it is changes nothing a compile can
-/// check, so the stub picks one.
-const CONSTANTS: &str = "const MATERIAL_BIND_GROUP = 3;\n";
+/// check, so the stub picks one. `MSAA_SAMPLES` is the edge pass's loop
+/// bound (any positive value compiles the same).
+const CONSTANTS: &str = "const MATERIAL_BIND_GROUP = 3;\nconst MSAA_SAMPLES = 4;\n";
+
+/// bevy_core_pipeline's `fullscreen_vertex_shader.wesl`, cut to the output
+/// struct the post-process fragments take.
+const FULLSCREEN_VERTEX: &str = "
+struct FullscreenVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+";
 
 struct Stubs;
 
@@ -82,8 +93,10 @@ impl Resolver for Stubs {
             "package::shaders::sky_dome" => SKY,
             "package::shaders::unlit" => UNLIT,
             "package::shaders::gizmos::lines" => GIZMO_LINES,
+            "package::shaders::edge_detection_post" => EDGE,
             "bevy_render::maths" => RENDER_MATHS,
             "bevy_render::view" => RENDER_VIEW,
+            "bevy_core_pipeline::fullscreen_vertex_shader" => FULLSCREEN_VERTEX,
             "constants" => CONSTANTS,
             other => {
                 return Err(ResolveError::ModuleNotFound(
@@ -97,7 +110,9 @@ impl Resolver for Stubs {
 }
 
 /// Compile `module` with `defs` on (everything else off) and validate it.
-fn check(module: &str, defs: &[&str]) -> Result<String, String> {
+/// `pub(crate)`: `post_process`'s struct-layout test compiles the edge shader
+/// through this to get real WGSL out of the WESL.
+pub(crate) fn check(module: &str, defs: &[&str]) -> Result<String, String> {
     let mut options = CompileOptions {
         imports: true,
         condcomp: true,
@@ -208,6 +223,14 @@ fn gizmo_lines_compile_for_every_variant() {
 fn terrain_scene_pass_shaders_compile() {
     check_all("shaders::scene::terrain_vertex", &[], &[]);
     check_all("shaders::terrain_toon", &[], &[NORMAL_TARGET]);
+}
+
+/// The edge pass: `MULTISAMPLED` switches the prepass texture declarations
+/// (and the loads) between the MSAA and the single-sampled layout; the loop
+/// bound `constants::MSAA_SAMPLES` comes from the stub above.
+#[test]
+fn edge_detection_compiles_multisampled_and_not() {
+    check_all("shaders::edge_detection_post", &[], &["MULTISAMPLED"]);
 }
 
 /// The harness itself: a shader that is wrong must fail, or the tests above

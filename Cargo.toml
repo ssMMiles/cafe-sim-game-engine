@@ -18,8 +18,10 @@ bevy = { version = "0.20", default-features = false, features = [
     # unregistered component type (Transform was the first). Auto-registration
     # covers bevy's own types; dropping it would mean registering them by hand.
     "reflect_auto_register",
-    # rendering: pbr + the pieces the camera uses (Fxaa, volumetric/distance fog)
-    "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_light", "bevy_anti_alias",
+    # rendering. No bevy_anti_alias since 2026-11-17: FXAA is gone (MSAA +
+    # the edge pass's own per-sample AA replaced it), and nothing else used
+    # the crate.
+    "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_light",
     "bevy_gltf", "gltf_animation", "bevy_scene",
     # the gameplay render-target sprite, gizmos, player-facing bevy_ui
     "bevy_sprite_render", "bevy_gizmos_render",

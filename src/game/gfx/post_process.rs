@@ -24,7 +24,6 @@
 //! derives the camera's [`EdgeDetectionSettings`] uniform from it.
 
 use bevy::{
-    anti_alias::fxaa::fxaa,
     core_pipeline::{
         Core3d, Core3dSystems, FullscreenShader, prepass::ViewPrepassTextures,
         tonemapping::tonemapping,
@@ -41,13 +40,15 @@ use bevy::{
         },
         render_resource::{
             binding_types::{
-                texture_2d, texture_2d_multisampled, texture_depth_2d_multisampled, uniform_buffer,
+                texture_2d, texture_2d_multisampled, texture_depth_2d,
+                texture_depth_2d_multisampled, uniform_buffer,
             },
             *,
         },
         renderer::{RenderContext, ViewQuery},
         view::{ExtractedView, ViewTarget},
     },
+    shader::ShaderDefVal,
 };
 
 use serde::{Deserialize, Serialize};
@@ -78,14 +79,15 @@ impl Plugin for EdgeDetectionPlugin {
             )
             .add_systems(
                 Core3d,
-                // Before FXAA, so the lines are antialiased with the rest of
-                // the image; both only said `.after(tonemapping)` before,
-                // which left their order to the scheduler.
+                // The order against the atmosphere pass is the
+                // `PostProcessPass` set (edges first, so outlines fog with the
+                // geometry they trace). There is no FXAA after either of them
+                // any more: the lines antialias themselves by evaluating the
+                // edge test per MSAA sample (see the shader).
                 edge_detection_pass
                     .in_set(Core3dSystems::PostProcess)
                     .in_set(super::PostProcessPass::EdgeDetection)
-                    .after(tonemapping)
-                    .before(fxaa),
+                    .after(tonemapping),
             );
     }
 }
@@ -96,16 +98,39 @@ impl Plugin for EdgeDetectionPlugin {
 
 #[derive(Resource)]
 struct EdgeDetectionPipeline {
-    layout: BindGroupLayoutDescriptor,
+    /// Two layouts because the prepass textures are multisampled exactly when
+    /// the view's MSAA is on, and the binding type must agree. The pass picks
+    /// by the view's `Msaa` ([`EdgeDetectionPipeline::layout`]), the
+    /// specializer by the key's sample count — the same number, so the
+    /// pipeline and the bind group can't disagree.
+    layout_multisampled: BindGroupLayoutDescriptor,
+    layout_single_sampled: BindGroupLayoutDescriptor,
     variants: Variants<RenderPipeline, EdgeDetectionSpecializer>,
 }
 
-struct EdgeDetectionSpecializer;
+impl EdgeDetectionPipeline {
+    fn layout(&self, msaa_samples: u32) -> &BindGroupLayoutDescriptor {
+        if msaa_samples > 1 {
+            &self.layout_multisampled
+        } else {
+            &self.layout_single_sampled
+        }
+    }
+}
 
-/// The only thing that varies between views: the format we render into.
+struct EdgeDetectionSpecializer {
+    layout_multisampled: BindGroupLayoutDescriptor,
+    layout_single_sampled: BindGroupLayoutDescriptor,
+}
+
+/// What varies between views: the format we render into, and the MSAA sample
+/// count of the prepass textures. The shader evaluates the edge test once per
+/// sample and averages — run after the colour resolve, that averaging is the
+/// only antialiasing the outlines get (`docs/EDGE_DETECTION.md` §AA).
 #[derive(PartialEq, Eq, Hash, Clone, Copy, SpecializerKey)]
 struct EdgeDetectionKey {
     target_format: TextureFormat,
+    msaa_samples: u32,
 }
 
 impl Specializer<RenderPipeline> for EdgeDetectionSpecializer {
@@ -116,7 +141,13 @@ impl Specializer<RenderPipeline> for EdgeDetectionSpecializer {
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        descriptor.fragment_mut()?.set_target(
+        descriptor.layout = vec![if key.msaa_samples > 1 {
+            self.layout_multisampled.clone()
+        } else {
+            self.layout_single_sampled.clone()
+        }];
+        let fragment = descriptor.fragment_mut()?;
+        fragment.set_target(
             0,
             ColorTargetState {
                 format: key.target_format,
@@ -124,6 +155,16 @@ impl Specializer<RenderPipeline> for EdgeDetectionSpecializer {
                 write_mask: ColorWrites::ALL,
             },
         );
+        // `MSAA_SAMPLES` is the shader's loop bound (a `constants::` entry);
+        // `MULTISAMPLED` switches the texture declarations, since WebGPU wants
+        // the binding type to match the actual textures.
+        fragment.shader_defs.push(ShaderDefVal::UInt(
+            "MSAA_SAMPLES".into(),
+            key.msaa_samples.max(1),
+        ));
+        if key.msaa_samples > 1 {
+            fragment.shader_defs.push("MULTISAMPLED".into());
+        }
         Ok(key)
     }
 }
@@ -138,28 +179,47 @@ fn init_edge_detection_pipeline(
     asset_server: Res<AssetServer>,
     fullscreen_shader: Res<FullscreenShader>,
 ) {
-    let layout_entries = BindGroupLayoutEntries::sequential(
-        ShaderStages::FRAGMENT,
-        (
-            // Every texture is read with `textureLoad` at the pixel, so no
-            // sampler. The prepass bindings are multisampled because the
-            // camera keeps the default `Msaa::Sample4`; turning MSAA off would
-            // need a second layout.
-            texture_2d(TextureSampleType::Float { filterable: true }), // Screen texture
-            texture_depth_2d_multisampled(),                           // Depth prepass
-            texture_2d_multisampled(TextureSampleType::Float { filterable: false }), // Normal prepass
-            uniform_buffer::<EdgeDetectionSettings>(true),
-        ),
-    );
+    // Every texture is read with `textureLoad` at the pixel, so no sampler.
+    // The prepass bindings' sampledness follows the view's MSAA; one layout
+    // for each case.
+    let layout_for = |multisampled: bool| {
+        let depth = if multisampled {
+            texture_depth_2d_multisampled()
+        } else {
+            texture_depth_2d()
+        };
+        let normal = if multisampled {
+            texture_2d_multisampled(TextureSampleType::Float { filterable: false })
+        } else {
+            texture_2d(TextureSampleType::Float { filterable: false })
+        };
+        let entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }), // Screen texture
+                depth,                                                     // Depth prepass
+                normal,                                                    // Normal prepass
+                uniform_buffer::<EdgeDetectionSettings>(true),
+            ),
+        );
+        BindGroupLayoutDescriptor::new(
+            if multisampled {
+                "edge_detection_bind_group_layout_msaa"
+            } else {
+                "edge_detection_bind_group_layout"
+            },
+            &entries,
+        )
+    };
+    let layout_multisampled = layout_for(true);
+    let layout_single_sampled = layout_for(false);
 
-    let layout =
-        BindGroupLayoutDescriptor::new("edge_detection_bind_group_layout", &layout_entries);
-
-    // The target format here is a placeholder: `EdgeDetectionSpecializer`
-    // overwrites it per view from `ExtractedView::target_format`.
+    // The layout and target format here are placeholders:
+    // `EdgeDetectionSpecializer` overwrites both per view, from the view's
+    // `Msaa` and `ExtractedView::target_format`.
     let descriptor = RenderPipelineDescriptor {
         label: Some("edge_detection_pipeline".into()),
-        layout: vec![layout.clone()],
+        layout: vec![layout_multisampled.clone()],
         vertex: fullscreen_shader.to_vertex_state(),
         fragment: Some(FragmentState {
             shader: asset_server.load(SHADER_ASSET_PATH),
@@ -174,19 +234,30 @@ fn init_edge_detection_pipeline(
     };
 
     commands.insert_resource(EdgeDetectionPipeline {
-        layout,
-        variants: Variants::new(EdgeDetectionSpecializer, descriptor),
+        layout_multisampled: layout_multisampled.clone(),
+        layout_single_sampled: layout_single_sampled.clone(),
+        variants: Variants::new(
+            EdgeDetectionSpecializer {
+                layout_multisampled,
+                layout_single_sampled,
+            },
+            descriptor,
+        ),
     });
 }
 
-/// Specialize the pipeline for each view's target format once per frame.
+/// Specialize the pipeline for each view's target format and MSAA sample
+/// count once per frame.
 fn prepare_edge_detection_pipelines(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
     mut pipeline: ResMut<EdgeDetectionPipeline>,
-    views: Query<(Entity, &ExtractedView, Has<EdgeDetectionSettings>), With<ExtractedCamera>>,
+    views: Query<
+        (Entity, &ExtractedView, &Msaa, Has<EdgeDetectionSettings>),
+        With<ExtractedCamera>,
+    >,
 ) -> Result<(), BevyError> {
-    for (entity, view, has_settings) in &views {
+    for (entity, view, msaa, has_settings) in &views {
         if !has_settings {
             // The settings component can be removed at runtime; don't leave a
             // stale pipeline id behind on the view.
@@ -198,6 +269,7 @@ fn prepare_edge_detection_pipelines(
             &pipeline_cache,
             EdgeDetectionKey {
                 target_format: view.target_format,
+                msaa_samples: msaa.samples(),
             },
         )?;
         commands.entity(entity).insert(EdgeDetectionPipelineId(id));
@@ -217,13 +289,15 @@ fn edge_detection_pass(
         &DynamicUniformIndex<EdgeDetectionSettings>,
         &ViewPrepassTextures,
         &EdgeDetectionPipelineId,
+        &Msaa,
     )>,
     pipeline: Res<EdgeDetectionPipeline>,
     pipeline_cache: Res<PipelineCache>,
     settings_uniforms: Res<ComponentUniforms<EdgeDetectionSettings>>,
     mut ctx: RenderContext,
 ) {
-    let (view_target, settings, settings_index, prepass_textures, pipeline_id) = view.into_inner();
+    let (view_target, settings, settings_index, prepass_textures, pipeline_id, msaa) =
+        view.into_inner();
 
     // Must come before `post_process_write()`, which swaps the ping-pong
     // buffers whether or not we draw.
@@ -248,7 +322,7 @@ fn edge_detection_pass(
 
     let bind_group = ctx.render_device().create_bind_group(
         "edge_detection_bind_group",
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
+        &pipeline_cache.get_bind_group_layout(pipeline.layout(msaa.samples())),
         &BindGroupEntries::sequential((
             post_process.source,
             depth_view,
@@ -416,38 +490,21 @@ mod tests {
     use super::*;
     use bevy::render::render_resource::ShaderType;
 
-    const SHADER_SRC: &str = include_str!("../../../assets/shaders/edge_detection_post.wesl");
-
-    /// The shader as plain WGSL: its one import replaced by the struct it
-    /// names (bevy_core_pipeline's fullscreen vertex output).
-    fn shader_as_wgsl() -> String {
-        const IMPORT: &str =
-            "import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;";
-        assert!(SHADER_SRC.contains(IMPORT), "the shader's import changed");
-        SHADER_SRC.replace(
-            IMPORT,
-            "struct FullscreenVertexOutput { @builtin(position) position: vec4<f32>, \
-             @location(0) uv: vec2<f32> }",
-        )
-    }
-
-    #[test]
-    fn edge_shader_validates() {
-        let src = shader_as_wgsl();
-        let module = naga::front::wgsl::parse_str(&src)
-            .unwrap_or_else(|e| panic!("edge shader failed to parse: {}", e.emit_to_string(&src)));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("edge shader failed validation: {e:?}"));
-    }
+    // The shader itself (both the multisampled and the single-sampled
+    // variant) is compiled and naga-validated by
+    // `shader_check::edge_detection_compiles_multisampled_and_not`, which runs
+    // the real WESL pipeline — the plain-WGSL parse that used to live here
+    // stopped working when the shader gained `@if` branches.
 
     /// Every field past a mismatch would be read from the wrong offset.
     #[test]
     fn edge_settings_match_the_shader_struct() {
-        let module = naga::front::wgsl::parse_str(&shader_as_wgsl()).unwrap();
+        let wgsl = crate::game::gfx::shader_check::check(
+            "shaders::edge_detection_post",
+            &["MULTISAMPLED"],
+        )
+        .expect("edge shader should compile");
+        let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
         let (_, ty) = module
             .types
             .iter()

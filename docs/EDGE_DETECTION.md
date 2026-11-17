@@ -16,21 +16,34 @@ the surface is or *which way it faces*.
 ## 1. Where it runs
 
 ```
-Prepass (depth + normals) → main pass → tonemapping → edge detection → FXAA → upscaling
+Scene pass (colour + depth + normals, MSAA) → tonemapping → edge detection → atmosphere → upscaling
 ```
 
 The pass is a `Core3d` system in `Core3dSystems::PostProcess`,
-`.after(tonemapping).before(fxaa)`. It runs before FXAA so the lines get
-antialiased like the rest of the image. Until 2026-11-04 it only said
-`.after(tonemapping)`, which FXAA also says, so the scheduler picked their
-order.
+`.after(tonemapping)` and before the atmosphere through the
+`PostProcessPass` set. There is no FXAA after it any more (removed
+2026-11-17): MSAA antialiases the geometry in the scene pass, and the lines
+antialias themselves (below), so all FXAA added was a blur over texture
+detail.
 
 The camera (`game/gfx/camera.rs`) carries `DepthPrepass`, `NormalPrepass`
-and `EdgeDetectionSettings`, and keeps bevy's default `Msaa::Sample4`. The
-prepass textures are therefore multisampled. The bind group layout
-hard-codes that, and the shader reads sample 0. Every pixel reads the same
-sample position, so this doesn't distort anything below. Turning MSAA off
-would need a non-multisampled layout variant.
+and `EdgeDetectionSettings`, and keeps bevy's default `Msaa::Sample4`, so
+the prepass textures are multisampled.
+
+**The lines are antialiased by evaluating the edge test per MSAA sample**
+and averaging the results. This pass runs after the colour MSAA resolve, so
+the geometry's own MSAA cannot touch a line drawn here — read at one sample
+and hard-thresholded, outlines came out quantised to whole pixels (the
+jagged staircase FXAA used to paper over). Each sample index sits at the
+same sub-pixel offset in every pixel, so each iteration of the loop traces
+the same line shifted by a fraction of a pixel, and the average is N+1
+coverage levels across it at N× MSAA — the same information MSAA gives a
+polygon edge. The pipeline is specialized on the view's sample count
+(`MSAA_SAMPLES`, the shader's loop bound) and carries a single-sampled
+layout variant (`MULTISAMPLED` off) for a view without MSAA, where the loop
+runs once and the look is the pre-2026-11-17 one. Cost: the pass's texture
+loads scale with the sample count (~18 → ~72 loads/px at 4×); the A/B bench
+prices it.
 
 ## 2. The inputs
 
@@ -125,7 +138,10 @@ for the cases where they don't (§5).
 
 `softness` gives a band around the threshold, so an edge that hovers near it
 (a crease of exactly `crease_angle`, a depth step that grows as you walk
-away) fades instead of flickering. The fade uses the *nearest* depth in the
+away) fades instead of flickering — tonal softness, distinct from the
+geometric antialiasing, which is the per-sample average (§1): the whole
+block above runs once per MSAA sample and `edge × fade` is averaged before
+the colour mix. The fade uses the *nearest* depth in the
 neighbourhood, so a silhouette against the sky (depth 0, "infinitely far")
 fades with the object and not with the sky.
 
@@ -195,8 +211,10 @@ explain "edges not picked up, especially from above or at certain angles":
    edges, and it is shared across a 2×2 pixel quad. A legitimate weak edge
    next to a strong one was faded to ~60%, depending on quad alignment, so
    lines shimmered as the camera moved. Now there's a fixed band around the
-   threshold, and FXAA does the geometric antialiasing.
-4. **FXAA and the edge pass had no defined order** (§1).
+   threshold, and the geometric antialiasing is the per-sample evaluation
+   (§1; it was FXAA until 2026-11-17).
+4. **FXAA and the edge pass had no defined order.** Fixed 2026-11-04 with
+   an explicit `.before(fxaa)`; moot since 2026-11-17 — FXAA is gone.
 
 Also: at the screen border the old kernel clamped samples onto the centre
 pixel. Harmless for a first difference, but it would have made the new

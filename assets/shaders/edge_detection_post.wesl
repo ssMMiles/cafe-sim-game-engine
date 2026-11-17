@@ -1,5 +1,15 @@
 // Outline post-process: draws a line wherever the depth or normal prepass
 // breaks. docs/EDGE_DETECTION.md explains every term and knob.
+//
+// The edge test runs once per MSAA sample of the prepass textures and the
+// results are averaged (`constants::MSAA_SAMPLES`, set by the pipeline from
+// the view's `Msaa`). This pass runs *after* the colour MSAA resolve, so that
+// averaging is the only antialiasing an outline can get: each sample index
+// sits at the same sub-pixel offset in every pixel, so each iteration traces
+// the same line shifted by a fraction of a pixel, and the average is N+1
+// coverage levels along it instead of a hard one-pixel staircase. (FXAA used
+// to paper over that staircase — and blur everything else with it; removed
+// 2026-11-17.)
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
@@ -20,20 +30,40 @@ struct EdgeSettings {
 }
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
+// The prepass textures are multisampled exactly when the view's MSAA is on;
+// the pipeline sets `MULTISAMPLED` (and the matching bind group layout) from
+// the same sample count.
+@if(MULTISAMPLED)
 @group(0) @binding(1) var depth_texture: texture_depth_multisampled_2d;
+@else
+@group(0) @binding(1) var depth_texture: texture_depth_2d;
+@if(MULTISAMPLED)
 @group(0) @binding(2) var normal_texture: texture_multisampled_2d<f32>;
+@else
+@group(0) @binding(2) var normal_texture: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> settings: EdgeSettings;
 
-// Sample 0 of the multisampled prepass. Every pixel reads the same sample
-// position, so the offset is uniform across the screen and the plane
-// property below still holds.
-fn load_depth(pixel: vec2<i32>) -> f32 {
+// The third `textureLoad` argument is the sample index on a multisampled
+// texture and the mip level otherwise, so the single-sampled variant ignores
+// `index` (the loop runs once). Every pixel reads the same index, so each
+// iteration's offsets are uniform across the screen and the plane property of
+// `depth_strength` below still holds per sample.
+fn load_depth(pixel: vec2<i32>, index: i32) -> f32 {
+@if(MULTISAMPLED) {
+    return textureLoad(depth_texture, pixel, index);
+} @else {
     return textureLoad(depth_texture, pixel, 0);
 }
+}
 
-fn load_normal(pixel: vec2<i32>) -> vec3<f32> {
+fn load_normal(pixel: vec2<i32>, index: i32) -> vec3<f32> {
     // Prepass normals are world space, packed from [-1, 1] to [0, 1].
-    let packed = textureLoad(normal_texture, pixel, 0).xyz;
+    var packed: vec3<f32>;
+@if(MULTISAMPLED) {
+    packed = textureLoad(normal_texture, pixel, index).xyz;
+} @else {
+    packed = textureLoad(normal_texture, pixel, 0).xyz;
+}
     return normalize(packed * 2.0 - vec3<f32>(1.0));
 }
 
@@ -63,15 +93,11 @@ fn in_bounds(pixel: vec2<i32>, dims: vec2<i32>) -> bool {
     return all(pixel >= vec2<i32>(0)) && all(pixel < dims);
 }
 
-@fragment
-fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let dims = vec2<i32>(textureDimensions(screen_texture));
-    let pixel = vec2<i32>(in.position.xy);
-    let base = textureLoad(screen_texture, pixel, 0);
-
-    let radius = max(1, i32(round(settings.thickness)));
-    let c = load_depth(pixel);
-    let n = load_normal(pixel);
+// One MSAA sample's edge amount at this pixel: the thresholded strength,
+// softened, and faded with distance.
+fn sample_amount(pixel: vec2<i32>, dims: vec2<i32>, radius: i32, index: i32) -> f32 {
+    let c = load_depth(pixel, index);
+    let n = load_normal(pixel, index);
 
     // The four lines through the pixel: horizontal, vertical, both diagonals.
     var axes = array<vec2<i32>, 4>(
@@ -94,24 +120,24 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         // would degenerate into a first difference, which is non-zero on
         // every sloped plane — so that line is skipped there instead.
         if (a_ok && b_ok) {
-            let a = load_depth(pa);
-            let b = load_depth(pb);
+            let a = load_depth(pa, index);
+            let b = load_depth(pb, index);
             strength = max(strength, depth_strength(a, c, b));
             nearest = max(nearest, max(a, b));
         }
 
         // Crease: angle between neighbouring normals, as 1 − cos.
         if (a_ok) {
-            strength = max(strength, (1.0 - dot(n, load_normal(pa))) / settings.normal_threshold);
+            strength = max(strength, (1.0 - dot(n, load_normal(pa, index))) / settings.normal_threshold);
         }
         if (b_ok) {
-            strength = max(strength, (1.0 - dot(n, load_normal(pb))) / settings.normal_threshold);
+            strength = max(strength, (1.0 - dot(n, load_normal(pb, index))) / settings.normal_threshold);
         }
     }
 
     // A soft band around the threshold so an edge that hovers near it fades
-    // in and out instead of popping. Geometric antialiasing is FXAA's job:
-    // this pass runs before it.
+    // in and out instead of popping. This is tonal softness; the geometric
+    // antialiasing is the per-sample average in `fragment`.
     let soft = max(settings.softness, 1e-3);
     let edge = smoothstep(1.0 - soft, 1.0 + soft, strength);
 
@@ -121,6 +147,23 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let distance = settings.near / max(nearest, 1e-9);
     let fade = 1.0 - smoothstep(settings.fade_start, settings.fade_end, distance);
 
-    let amount = edge * fade * settings.edge_color.a;
+    return edge * fade;
+}
+
+@fragment
+fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(screen_texture));
+    let pixel = vec2<i32>(in.position.xy);
+    let base = textureLoad(screen_texture, pixel, 0);
+
+    let radius = max(1, i32(round(settings.thickness)));
+
+    var coverage = 0.0;
+    for (var s = 0; s < constants::MSAA_SAMPLES; s++) {
+        coverage += sample_amount(pixel, dims, radius, s);
+    }
+    coverage = coverage / f32(constants::MSAA_SAMPLES);
+
+    let amount = coverage * settings.edge_color.a;
     return vec4<f32>(mix(base.rgb, settings.edge_color.rgb, amount), base.a);
 }

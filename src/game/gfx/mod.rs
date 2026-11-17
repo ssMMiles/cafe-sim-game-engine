@@ -38,9 +38,10 @@ pub enum GfxSet {
 pub struct GfxPlugin;
 
 /// Ordering for our own `Core3d` post-process passes. Both sit inside
-/// `Core3dSystems::PostProcess`, after `tonemapping` and before `fxaa`;
-/// this fixes their order against each other without either module having
-/// to expose its pass or pipeline types.
+/// `Core3dSystems::PostProcess`, after `tonemapping` (they are the last
+/// passes before upscaling — FXAA is gone); this fixes their order against
+/// each other without either module having to expose its pass or pipeline
+/// types.
 ///
 /// Edges are drawn first so the atmosphere fogs the outlines along with the
 /// geometry they trace.

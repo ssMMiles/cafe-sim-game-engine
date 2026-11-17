@@ -65,7 +65,6 @@ the sky is skipped automatically, since nothing was "drawn" there.
      the toon curve already decided the brightness).
    - Draw the outlines.
    - Add haze with distance, and light shafts from the sun if they're on.
-   - Smooth jagged edges (FXAA).
 4. **Show it.** The picture is drawn at exactly the size it will be shown
    at — the window in play mode, the viewport panel in the editor — so
    nothing is stretched or re-sampled on the way to the screen.

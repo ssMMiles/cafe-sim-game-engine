@@ -14,8 +14,10 @@
 //! depth — is excluded for free, which is what we want since `SkyColors`
 //! already carries the horizon.
 //!
-//! Pass order is `.after(edge_detection_pass).before(fxaa)`, so outlines are
-//! laid down first and then fogged along with the geometry they trace.
+//! Pass order is `.after(edge_detection_pass)` (the `PostProcessPass` set),
+//! so outlines are laid down first and then fogged along with the geometry
+//! they trace. Nothing runs after this pass any more — FXAA was removed
+//! 2026-11-17 (MSAA covers geometry, the edge pass antialiases its own lines).
 //!
 //! [`AtmosphereStyle`] is the single source of the look (editor: inspector →
 //! nothing selected → Fog / God rays, persisted per user in
@@ -24,7 +26,6 @@
 //! The model and every knob: `docs/ATMOSPHERE.md`.
 
 use bevy::{
-    anti_alias::fxaa::fxaa,
     core_pipeline::{
         Core3d, Core3dSystems, FullscreenShader, prepass::ViewPrepassTextures,
         tonemapping::tonemapping,
@@ -91,8 +92,7 @@ impl Plugin for AtmospherePlugin {
                     .in_set(Core3dSystems::PostProcess)
                     .in_set(PostProcessPass::Atmosphere)
                     .after(PostProcessPass::EdgeDetection)
-                    .after(tonemapping)
-                    .before(fxaa),
+                    .after(tonemapping),
             );
     }
 }

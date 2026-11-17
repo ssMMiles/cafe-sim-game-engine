@@ -73,7 +73,7 @@ bevy (or near-bevy) rebuild to apply, so batch them and measure once.
 | bevy `picking` → `sprite_picking` | via 2d/3d | `ui_picking` is used (`Hovered`/`Pressed` on bevy_ui buttons) and so is `mesh_picking`: the editor's picker, placement and brush rays are `MeshRayCast`s. Only the sprite backend is dead. | keep `bevy_picking`, `ui_picking`, `mesh_picking`; drop `sprite_picking` |
 | bevy `ktx2`, `zstd_rust` (via `3d_api`) | default | No `.ktx2` assets (assets are gltf/glb/png). `ruzstd` in graph. | drop |
 | bevy `smaa_luts`, `tonemapping_luts` | via `3d_api` | We use `Tonemapping::Linear` and no SMAA. These are embedded binary blobs (cheap compile) but `tonemapping_luts` also drags `ktx2`+`zstd` back in. | drop with the above |
-| bevy `bevy_anti_alias`, `bevy_post_process` | via `3d_bevy_render` | The camera (`gfx/camera.rs`) uses `Fxaa` (anti_alias) plus `DistanceFog`/`VolumetricFog` (pbr, not post_process). So `bevy_anti_alias` **stays**; `bevy_post_process` (bloom, DoF, motion blur, …) has no user — `dof::prepare_depth_of_field_pipelines` ran every frame in the web trace for nothing. | drop `bevy_post_process` only |
+| bevy `bevy_anti_alias`, `bevy_post_process` | via `3d_bevy_render` | **Both dropped.** `bevy_anti_alias` existed for `Fxaa`, which was removed 2026-11-17 (MSAA + the edge pass's per-sample AA replaced it); `bevy_post_process` (bloom, DoF, motion blur, …) never had a user — `dof::prepare_depth_of_field_pipelines` ran every frame in the web trace for nothing. | done |
 | bevy `morph`, `morph_animation` | via `3d_api` | No morph targets. `gltf_animation` **is** used (`AnimationGraph`). | drop morph |
 | bevy `reflect_auto_register` | via `default_app` | **Required.** Tried dropping it: `bevy_world_serialization`'s scene spawner panics on the first unregistered component (`Transform`) when a glTF scene spawns. | keep |
 | bevy `x11`, `wayland`, `custom_cursor` | default | Linux-only / unused. No cost on macOS but noise. | drop |
@@ -103,7 +103,6 @@ bevy = { version = "0.20", default-features = false, features = [
     "bevy_ui", "bevy_ui_render", "bevy_ui_widgets", "bevy_text", "default_font",
     "bevy_picking", "ui_picking",
     "bevy_gizmos", "bevy_gizmos_render",
-    "bevy_anti_alias",                            # Fxaa on the camera
     "png", "jpeg",
     "web", "webgpu",
     "debug",                                      # system names in spans / wgpu labels
