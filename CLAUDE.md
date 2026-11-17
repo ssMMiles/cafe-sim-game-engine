@@ -72,6 +72,7 @@ docs/                   # Design docs (LEVEL_SAVE_DESIGN.md — level save syste
                         #   (SCENE_PASS_BASELINE.md: how to measure it, and the tables);
                         #   EDGE_DETECTION.md — outline post-process: the maths, knobs, symptoms;
                         #   ATMOSPHERE.md — fog + god rays post-process;
+                        #   TRANSPARENCY_PLAN.md — lit transparent surfaces (cafe windows), draft under review;
                         #   PERFORMANCE.md — the editor's Performance panel: frame vs work time, vsync/cap, A/B, GPU timers;
                         #   WORLD_SHARING.md — zip bundles native → browser; BUILD_TIMES.md — why builds are slow
                         #   and a ranked, unmeasured list of trims/profile/flag changes to try)
