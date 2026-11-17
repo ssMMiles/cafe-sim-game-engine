@@ -333,3 +333,108 @@ starts. Nothing in this plan needs to change for it.
 - Data sanity test: every `Drink` has ≥ 2 steps (once phase 4 lands), the weights are positive and
   every band lies inside 0..1.
 - Feel is tested by playing: you run the game and I adjust the numbers.
+
+## 11. The look (2026-11-15)
+
+Drawing moved out of `drink_station.rs` into **`brew_overlay.rs`**; the station keeps the session,
+the input loop and the three nodes it has to find (`CursorSurface`, the two buttons). The overlay
+is a full-screen flex root (so the panel centres at any height) holding a dark-roast panel with a
+caramel border, a menu-board header plate, the meters, the status/verdict lines and chunky buttons.
+One palette, `brew_overlay::look`.
+
+Each `MeterLayout` carries a **`Prop`** — what the meter *is* in the cafe: `Gauge`, `Mug`,
+`PourCup`, `Scoop`, `FrothJug`, `Jug`, `Strip`, `Bowl`, `LatteCup` (or `Plain`). A presentation
+hint only; the games set it with `.dressed_as(..)` and never read it. The overlay turns it into a `Dress` (border,
+background or gradient, radius, fill and needle colours) for the *track* and hangs decorations off
+a frame **outside** the track — a mug's handle, a scoop's rod, a thermometer's bulb, a cup's saucer —
+so the 0..1 geometry the game reads is exactly the track node and never moves. Everything is plain
+nodes: borders, radii, `BackgroundGradient`, `BoxShadow`, `TextShadow`; no images. Decorations are
+earlier *siblings* of the track (siblings paint in order); a `GlobalZIndex` on them would lift them
+out of the panel's stacking context and bury them under it, which is exactly what happened first.
+
+### Animation (2026-11-16)
+
+`MeterReading` carries a second 0..1 quantity, **`extra`**, next to `value` and the drifting
+`zone`: how hard the pour is flowing, how much foam has been made, how mixed the bowl is. It is
+what the overlay animates with, and it is deliberately *continuous* — a pour fades in and out
+rather than a stream snapping on. The animated `Part` kinds all read it:
+
+| Part | Driven by | Draws |
+|------|-----------|-------|
+| `Tilt { degrees }` | `extra` | The jug tipping as the pour builds, righting itself as it dies |
+| `Stream { base_px }` | `extra` + a clock | A stream that thickens with the flow, with two detuned sines over it so a steady pour still looks alive; hidden at no flow |
+| `Swirl { turns_per_sec, angle }` | `value`, integrated | The bowl's liquid going round at the stirring speed — a translucent `ConicGradient` on a rotated node, so the bowl's own shading still reads under it |
+| `Froth { from }` | `value` + `extra` | Froth standing on the milk: `value` is its top, `extra` mixes it from thin grey to stiff white |
+| `Pip { index, of }` | `extra` | One pip of a row, lit as the quantity passes it |
+| `Spill { at }` | `value` | Froth running over the rim and down the outside, once it reaches `at` |
+
+Rotation is `UiTransform` (bevy 0.17+ gives every node a `Rot2`), so no node is reparented or
+resized to animate. Parts that accumulate (the swirl's angle) keep their state in the component,
+so the sync system takes `&mut MeterPart`; colour writes compare first, because bevy_ui is
+retained and every write re-extracts the node.
+
+**Froth is one jug, not two bars** (the player's call: an arbitrary bar said nothing). The milk
+sits in the bottom, the froth stands on it up to `temp`, the drifting green band is where that top
+should sit, and `scald` is the jug's **rim** — reach it and the froth goes over the side, which is
+the same failure the model always had, now shown as a spill instead of a needle in a red zone. The
+foam made so far is the froth's own density plus a row of pips under the jug.
+
+**Font:** `ui::FONT_PATH` is the one slot. `None` keeps bevy's default (Fira Mono, a 96-glyph ASCII
+subset); set it to an OFL `.ttf` under `assets/cafe-sim/fonts/` and `UiTheme::load` picks it up
+for every panel that uses `theme.text(size)`.
+
+## 12. The brew lab: running the minigames on their own
+
+`plugins/cafe-sim/src/lab.rs` + `examples/brew_lab.rs`, built and run by **`tools/brew-lab.sh`**.
+It stands the overlay up in an app of its own — no cafe, no shell, no save slots — because the
+overlay needs very little: `ActiveMenu::Brew`, `BrewSession`, `GamePaused`, `UiTheme`, a machine
+entity to tag and one frame's input.
+
+```sh
+tools/brew-lab.sh --game froth                 # play one minigame in a window
+tools/brew-lab.sh --drink Latte                # play a whole recipe
+tools/brew-lab.sh --game trace \
+  --script plugins/cafe-sim/lab-scripts/trace-heart.lab \
+  --shots /tmp/shots --shot-every 10           # headless, scripted, writes PNGs
+```
+
+`--game <name>` builds a one-step recipe from **the first real recipe that plays that minigame**,
+so the lab always shows the shipping tuning rather than a second set of numbers that could drift.
+`--drink <name>` plays a catalog recipe start to finish.
+
+**Scripted runs are headless.** There is no window at all: the camera renders to an image and
+screenshots copy from that, so nothing depends on a surface being on screen (a covered window stops
+presenting on macOS) and nothing steals focus. The clock is pinned to a fixed step (`--dt`), so a
+run plays the same regardless of frame rate.
+
+**Input is synthesised, not injected as events.** Bevy only maintains `RelativeCursorPosition` for
+cameras rendering to a *window* (`bevy_ui::focus`), and that component is how the minigames measure
+the cursor — so feeding winit or picking events would still need a real window. Instead
+`apply_lab_input` writes the three things the overlay actually reads — `RelativeCursorPosition`,
+`Hovered` and `Pressed`, plus the two `ButtonInput` resources — onto the nodes directly, hit-testing
+with the same `ComputedNode` helpers `ui_focus_system` uses. It runs in `Update` ahead of the brew
+systems, so the "no cursor" that the real focus system writes in `PreUpdate` is overwritten before
+anything reads it. `Hovered` is an immutable component, so a change is an insert, and only ever on
+a change — otherwise every button re-styles every frame.
+
+Script format (`plugins/cafe-sim/lab-scripts/*.lab`), one `<frame>: <command>` a line:
+
+| Command | Does |
+|---------|------|
+| `cursor <x> <y>` / `cursor off` | Cursor at 0..1 of the cursor surface, y up |
+| `cursor_to <x> <y> over <n>` | Slide there over n frames — how a trace is drawn |
+| `point confirm` / `point cancel` | Aim at a button; they sit outside the cursor surface, so surface coordinates cannot reach them |
+| `press [n]` / `release` | Mouse down, optionally released after n frames |
+| `key enter` / `key space` | Tap a key for one frame |
+| `shot [name]` | Screenshot now, to `<name>.png` |
+| `quit` | End the run |
+
+**What a scripted run cannot pin down** is the per-attempt jitter: `MinigameState::new` rolls each
+band from the thread RNG, which nothing here can seed. Layout, colour and timing repeat exactly; a
+target band's position does not. That is fine for looking at the UI and wrong for asserting scores.
+
+The harness is behind cafe-sim's `lab` feature, so none of it is carried in the shipped plugin. It
+adds no dependency and no bevy feature, so switching it on rebuilds that one crate. The build goes
+through the **workspace** (`cargo build --workspace --example brew_lab`) because building the
+package alone resolves fewer bevy features — from the engine's other dependencies — and would
+rebuild bevy into `target/` from scratch. `docs/BUILD_TIMES.md` §4.

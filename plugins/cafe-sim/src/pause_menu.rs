@@ -14,7 +14,7 @@ use engine_api::{AppState, PluginFiles};
 use crate::balance::DayStartBalance;
 use crate::main_menu::CafePhase;
 use crate::menus::ActiveMenu;
-use crate::placement::{CafePiece, PlacedCell};
+use crate::placement::{CafePiece, PlacedCell, PlacedTurn};
 use crate::saves;
 use crate::shop_overview::ShopState;
 use crate::spawn::SpawnOwnedCommands;
@@ -122,7 +122,7 @@ pub fn handle_pause_buttons(
     day_start: Res<DayStartBalance>,
     time: Res<GameTime>,
     staff: Res<Staff>,
-    pieces_q: Query<(&PlacedCell, &CafePiece)>,
+    pieces_q: Query<(&PlacedCell, &PlacedTurn, &CafePiece)>,
     mut files: ResMut<PluginFiles>,
 ) {
     for action in &pressed {
@@ -156,12 +156,13 @@ fn save_active_slot(
     day_start: &DayStartBalance,
     time: &GameTime,
     staff: &Staff,
-    pieces_q: &Query<(&PlacedCell, &CafePiece)>,
+    pieces_q: &Query<(&PlacedCell, &PlacedTurn, &CafePiece)>,
 ) {
     let CafePhase::Playing { slot } = *phase else {
         return;
     };
-    let pieces: Vec<(PlacedCell, CafePiece)> = pieces_q.iter().map(|(c, p)| (*c, *p)).collect();
+    let pieces: Vec<(PlacedCell, PlacedTurn, CafePiece)> =
+        pieces_q.iter().map(|(c, t, p)| (*c, *t, *p)).collect();
     let file = saves::capture_state(shop, day_start, time, staff, &pieces);
     match saves::save_slot(files, slot, &file) {
         Ok(()) => info!("Saved cafe-sim slot {slot}"),

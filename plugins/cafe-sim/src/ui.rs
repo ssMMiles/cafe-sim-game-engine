@@ -12,9 +12,18 @@ use bevy::{
 
 use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 
+/// The display font every cafe-sim panel asks for, under `assets/`. `None`
+/// keeps bevy's default (Fira Mono, a 96-glyph ASCII subset — which is why
+/// player-facing text has to stay ASCII). Drop an OFL `.ttf` into
+/// `assets/cafe-sim/fonts/` and name it here; nothing else changes.
+pub const FONT_PATH: Option<&str> = None;
+
 #[derive(Resource, Clone)]
 #[allow(dead_code)]
 pub struct UiTheme {
+    /// [`FONT_PATH`] loaded, or the default handle (bevy's built-in font).
+    pub font: Handle<Font>,
+
     pub bg_overlay: Color,
     pub bg_panel: Color,
     pub bg_surface: Color,
@@ -48,9 +57,30 @@ pub struct UiTheme {
     pub btn_border: f32,
 }
 
+impl UiTheme {
+    /// The theme with [`FONT_PATH`] loaded (nothing to load keeps the default).
+    pub fn load(asset_server: &AssetServer) -> Self {
+        let mut theme = Self::default();
+        if let Some(path) = FONT_PATH {
+            theme.font = asset_server.load(path);
+        }
+        theme
+    }
+
+    /// A [`TextFont`] in the theme's font.
+    pub fn text(&self, size: f32) -> TextFont {
+        TextFont {
+            font: self.font.clone().into(),
+            font_size: FontSize::Px(size),
+            ..default()
+        }
+    }
+}
+
 impl Default for UiTheme {
     fn default() -> Self {
         Self {
+            font: Handle::default(),
             bg_overlay: Color::srgba(0.04, 0.06, 0.09, 0.85),
             bg_panel: Color::srgba(0.09, 0.11, 0.14, 0.82),
             bg_surface: Color::srgb(0.14, 0.17, 0.21),

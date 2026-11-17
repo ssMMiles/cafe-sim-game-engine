@@ -11,7 +11,7 @@ use std::f32::consts::TAU;
 
 use rand::RngExt;
 
-use super::{MeterLayout, MeterReading, MeterZone, MinigameInput, Outcome, shifted};
+use super::{MeterLayout, MeterReading, MeterZone, MinigameInput, Outcome, Prop, shifted};
 
 #[derive(Debug, Clone, Copy)]
 pub struct FrothParams {
@@ -73,22 +73,24 @@ impl FrothState {
         }
     }
 
+    /// One jug, not two bars: the froth rises with the heat, the green ring
+    /// is where it should sit, and the rim at `scald` is what it spills over.
+    /// The foam made so far shows in how dense the froth draws (plus pips).
     pub fn meters(&self, p: &FrothParams) -> Vec<MeterLayout> {
         vec![
             // The good band moves, so it comes with the reading instead.
-            MeterLayout::bar(true, true, "heat").with_zone(p.scald, 1.0, MeterZone::Bad),
-            MeterLayout::bar(false, true, "foam"),
+            MeterLayout::bar(true, true, "froth")
+                .dressed_as(Prop::FrothJug)
+                .with_zone(p.scald, 1.0, MeterZone::Bad),
         ]
     }
 
     pub fn readings(&self, p: &FrothParams) -> Vec<MeterReading> {
-        vec![
-            MeterReading {
-                value: self.temp,
-                zone: Some(self.current_band(p)),
-            },
-            self.foam.into(),
-        ]
+        vec![MeterReading {
+            value: self.temp,
+            zone: Some(self.current_band(p)),
+            extra: self.foam,
+        }]
     }
 
     /// Where the band is now: still until the milk first reaches it, then

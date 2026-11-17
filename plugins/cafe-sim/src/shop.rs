@@ -8,7 +8,8 @@ use crate::spawn::{SpawnOwnedCommands, WithChildOwned};
 use crate::thumbnails::PieceThumbnails;
 
 const CARD_W: f32 = 140.0;
-const CARD_H: f32 = 140.0;
+/// A square thumbnail plus the label under it.
+const CARD_H: f32 = 176.0;
 const CARD_GAP: f32 = 8.0;
 const CATEGORY_GAP: f32 = 16.0;
 
@@ -178,11 +179,12 @@ pub fn sync_shop_ui(
                 .id();
             commands.entity(row).add_child(card);
 
+            // Square, like the render it shows: `Stretch` would otherwise
+            // squash a 256x256 thumbnail into whatever the label leaves.
             let mut swatch_cmd = commands.spawn_owned((Node {
                 width: Val::Percent(100.0),
-                flex_grow: 1.0,
-                flex_shrink: 1.0,
-                min_height: Val::Px(0.0),
+                aspect_ratio: Some(1.0),
+                flex_shrink: 0.0,
                 overflow: Overflow::clip(),
                 ..default()
             },));

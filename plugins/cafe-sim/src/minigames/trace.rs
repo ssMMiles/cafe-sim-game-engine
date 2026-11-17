@@ -11,7 +11,7 @@
 
 use bevy::math::Vec2;
 
-use super::{Grade, MeterLayout, MeterShape, MinigameInput, Outcome, TrailPoint};
+use super::{Grade, MeterLayout, MeterShape, MinigameInput, Outcome, Prop, TrailPoint};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TraceParams {
@@ -66,8 +66,9 @@ impl TraceState {
                 zones: Vec::new(),
                 cursor: true,
                 caption: "pour",
+                prop: Prop::LatteCup,
             },
-            MeterLayout::bar(true, true, "milk"),
+            MeterLayout::bar(true, true, "milk").dressed_as(Prop::Jug),
         ]
     }
 

@@ -114,7 +114,7 @@ const PULL_SHOT: Step = Step {
     }),
 };
 
-const STEAM_HINT: &str = "Hold to heat, let go to cool. The green band drifts - keep the needle in it until the foam is full";
+const STEAM_HINT: &str = "Hold to steam, let go to settle. Keep the froth in the drifting green ring - over the rim it spills";
 
 const STEAM_MILK: FrothParams = FrothParams {
     heat_rate: 0.45,

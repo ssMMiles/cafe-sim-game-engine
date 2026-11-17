@@ -15,8 +15,8 @@ use crate::PLUGIN_NAME;
 use crate::balance::{Balance, DayStartBalance};
 use crate::cafe::CafeOpen;
 use crate::catalog;
-use crate::grid::CafeAnchor;
-use crate::placement::{CafePiece, GridOccupancy, PlacedCell, spawn_piece};
+use crate::grid::{CafeAnchor, Footprint, Turn};
+use crate::placement::{CafePiece, GridOccupancy, PlacedCell, PlacedTurn, spawn_piece};
 use crate::shop_overview::ShopState;
 use crate::staff::{Staff, StaffMember};
 use crate::time::{DAY_START_HOUR, GameTime};
@@ -27,7 +27,7 @@ use crate::time::{DAY_START_HOUR, GameTime};
 
 /// Bump on any incompatible change to [`CafeSaveFile`] so older saves are
 /// rejected with a clear error rather than silently mis-deserializing.
-pub const SAVE_VERSION: u32 = 3;
+pub const SAVE_VERSION: u32 = 4;
 
 pub const SLOT_COUNT: u8 = 4;
 
@@ -52,10 +52,13 @@ pub struct CafeSaveFile {
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy)]
 pub struct PlacedPieceRecord {
+    /// Minimum corner of the piece's footprint.
     pub cell_x: i32,
     pub cell_z: i32,
     pub category_idx: u8,
     pub piece_idx: u8,
+    /// [`Turn`] index (v4).
+    pub turn: u8,
 }
 
 // ----------------------------------------------------------------------------
@@ -98,15 +101,16 @@ pub fn capture_state(
     day_start: &DayStartBalance,
     time: &GameTime,
     staff: &Staff,
-    pieces: &[(PlacedCell, CafePiece)],
+    pieces: &[(PlacedCell, PlacedTurn, CafePiece)],
 ) -> CafeSaveFile {
     let pieces = pieces
         .iter()
-        .map(|(cell, piece)| PlacedPieceRecord {
+        .map(|(cell, turn, piece)| PlacedPieceRecord {
             cell_x: cell.0,
             cell_z: cell.1,
             category_idx: piece.category_idx,
             piece_idx: piece.piece_idx,
+            turn: turn.0.index(),
         })
         .collect();
 
@@ -153,25 +157,31 @@ pub fn apply_save(
             );
             continue;
         };
-        if !anchor.contains((rec.cell_x, rec.cell_z)) {
+        let turn = Turn::from_index(rec.turn).unwrap_or_default();
+        let footprint = Footprint::at(
+            (rec.cell_x, rec.cell_z),
+            piece.footprint(),
+            piece.facing.then(turn),
+        );
+        if !footprint.inside(anchor) {
             // The grid is measured from whatever shell this level has, so a
             // save made in a roomier cafe can name cells this one doesn't
             // have. Dropping the piece beats placing it outside the walls.
             warn!(
-                "save references cell ({}, {}), outside this cafe's {}x{} floor — skipping \
-                 piece '{}'",
+                "save puts '{}' at ({}, {}) {:?}, outside this cafe's {}x{} floor — skipping",
+                piece.name,
                 rec.cell_x,
                 rec.cell_z,
+                footprint.size,
                 anchor.width(),
                 anchor.depth(),
-                piece.name
             );
             continue;
         }
-        if occupancy.0.contains_key(&(rec.cell_x, rec.cell_z)) {
+        if !occupancy.is_free(&footprint) {
             warn!(
-                "save references already-occupied cell ({}, {}) — skipping piece '{}'",
-                rec.cell_x, rec.cell_z, piece.name
+                "save overlaps '{}' at ({}, {}) with another piece — skipping",
+                piece.name, rec.cell_x, rec.cell_z
             );
             continue;
         }
@@ -181,6 +191,7 @@ pub fn apply_save(
             piece,
             (rec.category_idx, rec.piece_idx),
             (rec.cell_x, rec.cell_z),
+            turn,
             occupancy,
             anchor,
         );

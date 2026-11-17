@@ -1,0 +1,27 @@
+# Pour a heart: press the gold dot, then follow the path.
+# Generated from HEART in drinks.rs.
+5: cursor 0.500 0.684
+8: press
+12: cursor_to 0.501 0.696 over 4
+16: cursor_to 0.536 0.773 over 4
+20: cursor_to 0.638 0.845 over 4
+24: cursor_to 0.776 0.833 over 4
+28: cursor_to 0.876 0.730 over 4
+32: cursor_to 0.876 0.587 over 4
+36: cursor_to 0.776 0.449 over 4
+40: cursor_to 0.638 0.328 over 4
+44: cursor_to 0.536 0.223 over 4
+48: cursor_to 0.501 0.157 over 4
+52: cursor_to 0.499 0.157 over 4
+56: cursor_to 0.464 0.223 over 4
+60: cursor_to 0.362 0.328 over 4
+64: cursor_to 0.224 0.449 over 4
+68: cursor_to 0.124 0.587 over 4
+72: cursor_to 0.124 0.730 over 4
+76: cursor_to 0.224 0.833 over 4
+80: cursor_to 0.362 0.845 over 4
+84: cursor_to 0.464 0.773 over 4
+88: cursor_to 0.499 0.696 over 4
+94: release
+96: shot traced
+132: quit

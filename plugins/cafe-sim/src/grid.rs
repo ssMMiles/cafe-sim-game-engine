@@ -29,7 +29,7 @@
 
 use bevy::prelude::*;
 
-use crate::placement::PlacementSelection;
+use crate::placement::{PlacementCursor, PlacementSelection};
 
 /// Side of one placement cell, in the shell's local units.
 pub const CELL_SIZE: f32 = 1.0;
@@ -53,6 +53,110 @@ pub const DEFAULT_DEPTH: i32 = 12;
 
 /// How far beyond the grid's front (+Z) edge the entrance line sits, in cells.
 const DOOR_MARGIN: f32 = 1.0;
+
+/// A quarter turn of a placed piece about the floor normal. Saves store the
+/// index, so the order is part of the save format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Turn {
+    #[default]
+    None,
+    Quarter,
+    Half,
+    ThreeQuarters,
+}
+
+impl Turn {
+    pub const ALL: [Turn; 4] = [Turn::None, Turn::Quarter, Turn::Half, Turn::ThreeQuarters];
+
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_index(i: u8) -> Option<Self> {
+        Self::ALL.get(i as usize).copied()
+    }
+
+    /// The next quarter turn clockwise, seen from above.
+    pub fn next(self) -> Self {
+        Self::ALL[(self.index() as usize + 1) % 4]
+    }
+
+    /// This turn followed by `other`.
+    pub fn then(self, other: Turn) -> Self {
+        Self::ALL[(self.index() as usize + other.index() as usize) % 4]
+    }
+
+    /// Clockwise from above is a negative rotation about +Y.
+    pub fn radians(self) -> f32 {
+        -(self.index() as f32) * std::f32::consts::FRAC_PI_2
+    }
+
+    pub fn rotation(self) -> Quat {
+        Quat::from_rotation_y(self.radians())
+    }
+
+    /// A footprint's `(x, z)` extent after this turn: a quarter turn swaps
+    /// the axes.
+    pub fn apply(self, size: (i32, i32)) -> (i32, i32) {
+        match self {
+            Turn::None | Turn::Half => size,
+            Turn::Quarter | Turn::ThreeQuarters => (size.1, size.0),
+        }
+    }
+}
+
+/// The cells a placed piece covers: an axis-aligned block of them from
+/// `origin` (the minimum corner, which is what a save stores) spanning `size`
+/// cells along X and Z, already turned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Footprint {
+    pub origin: (i32, i32),
+    pub size: (i32, i32),
+}
+
+impl Footprint {
+    /// A piece of unturned extent `size`, turned by `turn`, placed so that the
+    /// cell under the cursor is its middle (the lower-middle one when the
+    /// extent is even).
+    pub fn around(hovered: (i32, i32), size: (i32, i32), turn: Turn) -> Self {
+        let size = turn.apply(size);
+        Self {
+            origin: (hovered.0 - (size.0 - 1) / 2, hovered.1 - (size.1 - 1) / 2),
+            size,
+        }
+    }
+
+    /// A piece of unturned extent `size` with its minimum corner at `origin`
+    /// — how saves and spawned pieces describe themselves.
+    pub fn at(origin: (i32, i32), size: (i32, i32), turn: Turn) -> Self {
+        Self {
+            origin,
+            size: turn.apply(size),
+        }
+    }
+
+    pub fn cells(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        (0..self.size.0).flat_map(move |dx| {
+            (0..self.size.1).map(move |dz| (self.origin.0 + dx, self.origin.1 + dz))
+        })
+    }
+
+    /// Every cell is on the floor.
+    pub fn inside(&self, anchor: &CafeAnchor) -> bool {
+        self.cells().all(|c| anchor.contains(c))
+    }
+
+    /// Shell-local centre of the whole footprint, on the floor surface —
+    /// where the piece's mesh stands.
+    pub fn centre_local(&self, anchor: &CafeAnchor) -> Vec3 {
+        let lo = anchor.cell_local(self.origin.0, self.origin.1);
+        let hi = anchor.cell_local(
+            self.origin.0 + self.size.0 - 1,
+            self.origin.1 + self.size.1 - 1,
+        );
+        (lo + hi) * 0.5
+    }
+}
 
 /// The grid laid out on a shell's floor, in shell-local units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -315,10 +419,36 @@ pub fn step_along_floor(
 pub fn draw_floor_grid(
     mut gizmos: Gizmos,
     selection: Res<PlacementSelection>,
+    cursor: Res<PlacementCursor>,
     anchor: Res<CafeAnchor>,
 ) {
     if selection.piece.is_none() {
         return;
+    }
+
+    // The cells the piece would take: green where it fits, red where it
+    // doesn't (off the floor or over something).
+    if let Some(fp) = cursor.footprint {
+        let color = if cursor.accepted {
+            Color::srgba(0.45, 0.95, 0.5, 0.9)
+        } else {
+            Color::srgba(1.0, 0.35, 0.3, 0.9)
+        };
+        let lift = Vec3::Y * 0.02;
+        let corner =
+            |i: i32, j: i32| anchor.to_world(anchor.cell_local(i, j) + lift - cell_centre_bias());
+        let (x0, z0) = fp.origin;
+        let (x1, z1) = (x0 + fp.size.0, z0 + fp.size.1);
+        gizmos.linestrip(
+            [
+                corner(x0, z0),
+                corner(x1, z0),
+                corner(x1, z1),
+                corner(x0, z1),
+                corner(x0, z0),
+            ],
+            color,
+        );
     }
 
     let color = Color::srgba(0.35, 0.6, 1.0, 0.7);
@@ -540,5 +670,45 @@ mod tests {
             );
         }
         assert!((pos - target).length() <= 0.1, "never arrived: {pos:?}");
+    }
+
+    #[test]
+    fn a_quarter_turn_swaps_a_footprints_axes_and_a_half_turn_keeps_them() {
+        assert_eq!(Turn::None.apply((3, 1)), (3, 1));
+        assert_eq!(Turn::Quarter.apply((3, 1)), (1, 3));
+        assert_eq!(Turn::Half.apply((3, 1)), (3, 1));
+        assert_eq!(Turn::ThreeQuarters.apply((3, 1)), (1, 3));
+        assert_eq!(Turn::ThreeQuarters.next(), Turn::None);
+        assert_eq!(Turn::Half.then(Turn::Quarter), Turn::ThreeQuarters);
+        assert_eq!(Turn::Half.then(Turn::Half), Turn::None);
+        for turn in Turn::ALL {
+            assert_eq!(Turn::from_index(turn.index()), Some(turn));
+        }
+    }
+
+    #[test]
+    fn a_three_long_piece_is_placed_around_the_hovered_cell() {
+        let fp = Footprint::around((5, 4), (3, 1), Turn::None);
+        assert_eq!(fp.origin, (4, 4));
+        assert_eq!(fp.cells().collect::<Vec<_>>(), vec![(4, 4), (5, 4), (6, 4)]);
+
+        let turned = Footprint::around((5, 4), (3, 1), Turn::Quarter);
+        assert_eq!(
+            turned.cells().collect::<Vec<_>>(),
+            vec![(5, 3), (5, 4), (5, 5)]
+        );
+
+        // An even extent puts the cursor on the lower-middle cell.
+        assert_eq!(Footprint::around((5, 4), (2, 1), Turn::None).origin, (5, 4));
+    }
+
+    #[test]
+    fn a_footprints_centre_is_the_middle_of_its_cells_and_it_knows_the_edge() {
+        let anchor = CafeAnchor::detached(GlobalTransform::IDENTITY, cafe_floor());
+        let fp = Footprint::at((4, 4), (3, 1), Turn::None);
+        assert_eq!(fp.centre_local(&anchor), anchor.cell_local(5, 4));
+        assert!(fp.inside(&anchor));
+        assert!(!Footprint::at((18, 0), (3, 1), Turn::None).inside(&anchor));
+        assert!(Footprint::at((18, 0), (3, 1), Turn::Quarter).inside(&anchor));
     }
 }

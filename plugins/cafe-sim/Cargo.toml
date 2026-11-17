@@ -16,6 +16,11 @@ crate-type = ["dylib", "rlib"]
 # named exports of two plugins would collide.
 default = ["dynamic"]
 dynamic = ["bevy/dynamic_linking"]
+# The standalone minigame/UI harness (`examples/brew_lab.rs`, `src/lab.rs`).
+# Off by default so none of it is carried in the shipped plugin; the
+# `tools/brew-lab.sh` turns it on. Adds no dependency and no bevy feature,
+# so switching it on rebuilds this crate alone.
+lab = []
 
 [dependencies]
 engine-api = { path = "../../crates/engine-api" }
@@ -23,3 +28,10 @@ bevy = { workspace = true }
 # Same line as bevy_math/glam, so the graph has one `rand`.
 rand = "0.10"
 rkyv = { version = "0.8", features = ["bytecheck"] }
+
+# Built through the workspace (`tools/brew-lab.sh`) so bevy resolves the same
+# feature set as the engine; building this package alone resolves fewer and
+# rebuilds bevy from scratch. docs/BUILD_TIMES.md §4.
+[[example]]
+name = "brew_lab"
+required-features = ["lab"]

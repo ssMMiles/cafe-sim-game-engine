@@ -8,7 +8,7 @@ use std::f32::consts::PI;
 
 use bevy::math::Vec2;
 
-use super::{MeterLayout, MeterReading, MeterShape, MeterZone, MinigameInput, Outcome};
+use super::{MeterLayout, MeterReading, MeterShape, MeterZone, MinigameInput, Outcome, Prop};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StirParams {
@@ -78,8 +78,10 @@ impl StirState {
                 zones: Vec::new(),
                 cursor: true,
                 caption: "whisk",
+                prop: Prop::Bowl,
             },
             MeterLayout::bar(true, true, "speed")
+                .dressed_as(Prop::Gauge)
                 .with_zone(lo, hi, MeterZone::Good)
                 .with_zone(hi, 1.0, MeterZone::Bad),
             MeterLayout::bar(true, true, "mixed"),
@@ -89,10 +91,20 @@ impl StirState {
 
     pub fn readings(&self, p: &StirParams) -> Vec<MeterReading> {
         let speed = self.speed / (SPEED_SCALE * p.safe_speed);
-        [0.0, speed, self.mixed, self.slosh]
-            .into_iter()
-            .map(MeterReading::from)
-            .collect()
+        // The bowl itself turns at the stirring speed and thickens as it
+        // mixes; the bars beside it are the numbers.
+        let bowl = MeterReading {
+            value: speed,
+            zone: None,
+            extra: self.mixed,
+        };
+        let mut out = vec![bowl];
+        out.extend(
+            [speed, self.mixed, self.slosh]
+                .into_iter()
+                .map(MeterReading::from),
+        );
+        out
     }
 
     /// What to do now, and how it's going.

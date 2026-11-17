@@ -2,7 +2,7 @@
 //! The needle accelerates the longer you hold, so the band takes judgement,
 //! not just reflexes. Hitting the cap ends the step with nothing.
 
-use super::{MeterLayout, MeterZone, MinigameInput, Outcome, shifted};
+use super::{MeterLayout, MeterZone, MinigameInput, Outcome, Prop, shifted};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PressureParams {
@@ -44,6 +44,7 @@ impl PressureState {
 
     pub fn meter(&self, p: &PressureParams) -> MeterLayout {
         MeterLayout::bar(true, true, "pressure")
+            .dressed_as(Prop::Gauge)
             .with_zone(self.band.0, self.band.1, MeterZone::Good)
             .with_zone(p.cap, 1.0, MeterZone::Bad)
     }

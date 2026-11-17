@@ -14,6 +14,7 @@ use engine_api::{
 };
 
 mod balance;
+mod brew_overlay;
 mod cafe;
 mod cafe_scene;
 mod catalog;
@@ -24,6 +25,10 @@ mod delivery;
 mod drink_station;
 mod drinks;
 mod grid;
+// The standalone minigame/UI harness (`examples/brew_lab.rs`). Behind a
+// feature so it is not carried in the shipped plugin.
+#[cfg(feature = "lab")]
+pub mod lab;
 mod main_menu;
 mod menus;
 mod minigames;
@@ -44,6 +49,7 @@ mod ui;
 use balance::{
     Balance, DayStartBalance, spawn_balance_hud, tick_balance_popups, update_balance_text,
 };
+use brew_overlay::sync_brew_overlay;
 use cafe::{CafeOpen, enforce_closing_time};
 use cafe_scene::{CafeShell, CafeSpawnPoint, player_start, sync_cafe_anchor};
 use coffee_menu::{
@@ -62,8 +68,7 @@ use delivery::{
     tick_served_timer,
 };
 use drink_station::{
-    BrewSession, end_brew_session_when_closed, handle_brew_cancel, sync_brew_overlay,
-    tick_brew_session,
+    BrewSession, end_brew_session_when_closed, handle_brew_cancel, tick_brew_session,
 };
 use grid::{CafeAnchor, draw_floor_grid};
 use main_menu::{
@@ -73,8 +78,9 @@ use main_menu::{
 use menus::{ActiveMenu, close_menus_when_paused};
 use pause_menu::{GamePaused, handle_pause_buttons, sync_pause_menu_ui, toggle_pause_on_escape};
 use placement::{
-    GridOccupancy, PlacementSelection, PreviewEntity, apply_paint_when_loaded, cancel_placement,
-    handle_place_click, manage_placement_hint, sync_preview, update_preview_transform,
+    GridOccupancy, PlacementCursor, PlacementSelection, PreviewEntity, apply_paint_when_loaded,
+    cancel_placement, handle_place_click, manage_placement_hint, rotate_placement, sync_preview,
+    update_preview_transform,
 };
 use saves::SlotMetadataCache;
 use shading::ProbeLitColors;
@@ -138,12 +144,14 @@ impl DynamicPlugin for CafeSimPlugin {
         world.insert_resource(ShopState::default());
         world.insert_resource(CafeOpen::default());
         world.insert_resource(PlacementSelection::default());
+        world.insert_resource(PlacementCursor::default());
         world.insert_resource(GridOccupancy::default());
         world.insert_resource(PreviewEntity::default());
         world.insert_resource(Balance::default());
         world.insert_resource(DayStartBalance::default());
         world.insert_resource(GameTime::default());
-        world.insert_resource(UiTheme::default());
+        let theme = UiTheme::load(world.resource::<AssetServer>());
+        world.insert_resource(theme);
         world.insert_resource(CustomerSpawnTimer::default());
         world.insert_resource(Staff::default());
         world.insert_resource(HireCandidates::default());
@@ -222,6 +230,7 @@ impl DynamicPlugin for CafeSimPlugin {
                         handle_job_option_click,
                         handle_pause_buttons,
                         cancel_placement,
+                        rotate_placement,
                     )
                         .chain(),
                     // Menu/state syncs — depend on the click handlers above
@@ -255,10 +264,15 @@ impl DynamicPlugin for CafeSimPlugin {
                     sync_preview,
                     apply_paint_when_loaded,
                     (propagate_thumbnail_layers, settle_thumbnail_cameras),
-                    update_preview_transform,
-                    handle_place_click,
+                    // The preview decides where the piece lands this frame;
+                    // the click and the floor outline both read that.
+                    (
+                        update_preview_transform,
+                        handle_place_click,
+                        draw_floor_grid,
+                    )
+                        .chain(),
                     manage_placement_hint,
-                    draw_floor_grid,
                     update_balance_text,
                     advance_game_time,
                     enforce_closing_time,

@@ -1,7 +1,7 @@
 //! Extraction window (steeping tea, pulling a shot): a bar fills on its own,
 //! click to stop it inside the green. Letting it run out over-extracts.
 
-use super::{MeterLayout, MeterZone, MinigameInput, Outcome, band_score, shifted};
+use super::{MeterLayout, MeterZone, MinigameInput, Outcome, Prop, band_score, shifted};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SteepParams {
@@ -29,11 +29,9 @@ impl SteepState {
     }
 
     pub fn meter(&self) -> MeterLayout {
-        MeterLayout::bar(false, false, "time").with_zone(
-            self.window.0,
-            self.window.1,
-            MeterZone::Good,
-        )
+        MeterLayout::bar(false, false, "time")
+            .dressed_as(Prop::Strip)
+            .with_zone(self.window.0, self.window.1, MeterZone::Good)
     }
 
     pub fn update(&mut self, p: &SteepParams, input: &MinigameInput) -> Outcome {

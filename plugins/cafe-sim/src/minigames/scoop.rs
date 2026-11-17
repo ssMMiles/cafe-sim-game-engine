@@ -13,7 +13,7 @@
 
 use rand::RngExt;
 
-use super::{MeterLayout, MeterZone, MinigameInput, Outcome, band_score, shifted};
+use super::{MeterLayout, MeterZone, MinigameInput, Outcome, Prop, band_score, shifted};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScoopParams {
@@ -87,12 +87,10 @@ impl ScoopState {
 
     pub fn meters(&self) -> Vec<MeterLayout> {
         vec![
-            MeterLayout::bar(true, true, "cup").with_zone(
-                self.band.0,
-                self.band.1,
-                MeterZone::Good,
-            ),
-            MeterLayout::bar(true, true, "scoop"),
+            MeterLayout::bar(true, true, "cup")
+                .dressed_as(Prop::Mug)
+                .with_zone(self.band.0, self.band.1, MeterZone::Good),
+            MeterLayout::bar(true, true, "scoop").dressed_as(Prop::Scoop),
         ]
     }
 

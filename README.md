@@ -20,7 +20,7 @@ To build for web (into `pkg/`; needs `cargo install wasm-bindgen-cli` at the ver
 ```
 tools/web.sh            # iterate: web-dev profile, thin LTO
 tools/web.sh profile    # with bevy spans, for tools/web-trace.mjs
-tools/web.sh release    # deploy artifact: fat LTO (WASM_OPT=1 to also run wasm-opt)
+tools/web.sh release    # deploy artifact: fat LTO + wasm-opt -Oz, function names stripped
 ```
 
 Benchmarks (the `#[ignore]`d tests): `cargo perf <name> -- --ignored --nocapture`.

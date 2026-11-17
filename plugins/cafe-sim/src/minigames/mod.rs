@@ -138,6 +138,33 @@ pub enum MeterShape {
     Canvas { path: &'static [Vec2] },
 }
 
+/// What a meter *is*, in the cafe: the overlay dresses it accordingly. A
+/// presentation hint only — the game's numbers never depend on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Prop {
+    /// An unadorned track.
+    #[default]
+    Plain,
+    /// A pressure gauge on the machine (brushed metal, red needle).
+    Gauge,
+    /// A cup filling up, handle on the side.
+    Mug,
+    /// A scoop on a handle, filling with grounds.
+    Scoop,
+    /// A cup being poured into, jug and all.
+    PourCup,
+    /// A steaming jug: milk, the froth rising over it, a rim it can spill over.
+    FrothJug,
+    /// A steel milk jug.
+    Jug,
+    /// A horizontal strip shading from pale to strong — a steep timer.
+    Strip,
+    /// A round bowl to whisk in.
+    Bowl,
+    /// The top of a cup seen from above: crema to pour milk onto.
+    LatteCup,
+}
+
 /// One meter the overlay spawns for a step. Nothing but the reading moves.
 pub struct MeterLayout {
     pub shape: MeterShape,
@@ -147,6 +174,8 @@ pub struct MeterLayout {
     pub cursor: bool,
     /// Short label under the meter.
     pub caption: &'static str,
+    /// What the overlay draws it as.
+    pub prop: Prop,
 }
 
 /// One meter's moving parts this frame, in [`MinigameState::meters`] order.
@@ -156,11 +185,20 @@ pub struct MeterReading {
     /// A good zone that moves during the step (Froth's drifting band),
     /// `(from, to)` along a bar. Static zones live in [`MeterLayout::zones`].
     pub zone: Option<(f32, f32)>,
+    /// The prop's second 0..1 quantity, where it has one: how hard the pour
+    /// is flowing, how much foam has been made, how mixed the bowl is. It is
+    /// what the overlay animates with — a pour that fades in and out rather
+    /// than a stream that snaps on. Props that draw one thing ignore it.
+    pub extra: f32,
 }
 
 impl From<f32> for MeterReading {
     fn from(value: f32) -> Self {
-        Self { value, zone: None }
+        Self {
+            value,
+            zone: None,
+            extra: 0.0,
+        }
     }
 }
 
@@ -186,7 +224,13 @@ impl MeterLayout {
             zones: Vec::new(),
             cursor: false,
             caption,
+            prop: Prop::Plain,
         }
+    }
+
+    pub fn dressed_as(mut self, prop: Prop) -> Self {
+        self.prop = prop;
+        self
     }
 
     pub fn with_zone(mut self, from: f32, to: f32, kind: MeterZone) -> Self {
@@ -261,7 +305,7 @@ impl MinigameState {
         match (self, game) {
             (Self::Pressure(s), _) => plain(&[s.value]),
             (Self::Scoop(s), _) => plain(&[s.amount, s.in_scoop]),
-            (Self::Pour(s), _) => plain(&[s.fill]),
+            (Self::Pour(s), Minigame::Pour(p)) => vec![s.reading(p)],
             (Self::Steep(s), _) => plain(&[s.progress]),
             (Self::Froth(s), Minigame::Froth(p)) => s.readings(p),
             (Self::Stir(s), Minigame::Stir(p)) => s.readings(p),

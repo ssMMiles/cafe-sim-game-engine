@@ -3,7 +3,9 @@
 //! has to come *before* the level reaches the line. One pour per step; going
 //! over the top spills and ends the step with nothing.
 
-use super::{MeterLayout, MeterZone, MinigameInput, Outcome, band_score, shifted};
+use super::{
+    MeterLayout, MeterReading, MeterZone, MinigameInput, Outcome, Prop, band_score, shifted,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PourParams {
@@ -56,7 +58,19 @@ impl PourState {
     }
 
     pub fn meter(&self) -> MeterLayout {
-        MeterLayout::bar(true, true, "cup").with_zone(self.line.0, self.line.1, MeterZone::Good)
+        MeterLayout::bar(true, true, "cup")
+            .dressed_as(Prop::PourCup)
+            .with_zone(self.line.0, self.line.1, MeterZone::Good)
+    }
+
+    /// The level, plus how hard the stream is running right now — which rises
+    /// while held and dies away after, so the overlay's stream does too.
+    pub fn reading(&self, p: &PourParams) -> MeterReading {
+        MeterReading {
+            value: self.fill,
+            zone: None,
+            extra: (self.speed / p.max_speed).clamp(0.0, 1.0),
+        }
     }
 
     pub fn update(&mut self, p: &PourParams, input: &MinigameInput) -> Outcome {

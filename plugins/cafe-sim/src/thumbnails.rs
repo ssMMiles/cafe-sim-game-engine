@@ -79,9 +79,13 @@ pub fn init_thumbnails(world: &mut World) {
             | TextureUsages::RENDER_ATTACHMENT;
         let image_handle = world.resource_mut::<Assets<Image>>().add(image);
 
-        // Camera — fixed three-quarter view of the piece, rendering only this
-        // thumbnail's render layer into its dedicated image.
-        let cam_offset = Vec3::new(1.6, 1.2, 1.6);
+        // Camera — three-quarter view of the piece, backed off by how far
+        // the footprint reaches: a one-cell piece and a three-cell counter
+        // both fill the frame. Renders only this thumbnail's layer into its
+        // dedicated image.
+        let (fx, fz) = piece.footprint();
+        let reach = ((fx * fx + fz * fz) as f32).sqrt() / std::f32::consts::SQRT_2;
+        let cam_offset = Vec3::new(1.6, 1.2, 1.6) * reach.max(1.0);
         world.spawn_owned((
             Camera3d::default(),
             Camera {

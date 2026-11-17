@@ -1,0 +1,6 @@
+# Tamp (pressure): hold to build pressure, release inside the green band.
+# The band is re-rolled every attempt, so the release frame below is a
+# plausible attempt rather than a winning one.
+10: press 45
+60: shot released
+130: quit

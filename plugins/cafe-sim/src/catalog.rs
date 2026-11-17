@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+use crate::grid::Turn;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PieceKind {
     Decoration,
@@ -21,9 +23,21 @@ pub struct PieceDef {
     /// (the placeholder look). Set false to keep the model's own material — e.g.
     /// a real baked asset that already looks right.
     pub tint: bool,
+    /// Cells the piece covers, along the shell's X then Z, before the player
+    /// turns it. The model is authored to fill that many cells at
+    /// [`crate::grid::PIECE_SCALE`], centred on the footprint.
+    pub footprint: (u8, u8),
+    /// How the model stands before the player turns it, so a piece authored
+    /// facing +Z can still rest facing into the room (away from the door).
+    /// Composed with the player's turn; saves store only the player's.
+    pub facing: Turn,
 }
 
 impl PieceDef {
+    pub fn footprint(&self) -> (i32, i32) {
+        (self.footprint.0 as i32, self.footprint.1 as i32)
+    }
+
     pub fn color(&self) -> Color {
         Color::srgb(self.color[0], self.color[1], self.color[2])
     }
@@ -52,6 +66,8 @@ pub const CATALOG: &[CategoryDef] = &[
             kind: PieceKind::Decoration,
             color: [0.25, 0.45, 0.85],
             tint: false,
+            footprint: (1, 1),
+            facing: Turn::None,
         }],
     },
     CategoryDef {
@@ -59,10 +75,16 @@ pub const CATALOG: &[CategoryDef] = &[
         pieces: &[
             PieceDef {
                 name: "Countertop",
-                asset_path: "cafe-sim/Tabletop.glb#Scene0",
+                asset_path: "cafe-sim/Counter.gltf#Scene0",
                 kind: PieceKind::Countertop,
                 color: [0.30, 0.70, 0.35],
-                tint: true,
+                tint: false,
+                // A setpiece: three cells long. The placeholder mesh is one
+                // cell wide and sits on the middle one until the real
+                // counter lands.
+                footprint: (3, 1),
+                // Authored facing the door; serve from the room side.
+                facing: Turn::Half,
             },
             PieceDef {
                 name: "Coffee Machine",
@@ -70,6 +92,8 @@ pub const CATALOG: &[CategoryDef] = &[
                 kind: PieceKind::CoffeeMachine,
                 color: [0.80, 0.25, 0.25],
                 tint: true,
+                footprint: (1, 1),
+                facing: Turn::None,
             },
             PieceDef {
                 name: "Garbage Can",
@@ -77,7 +101,27 @@ pub const CATALOG: &[CategoryDef] = &[
                 kind: PieceKind::GarbageCan,
                 color: [0.08, 0.08, 0.10],
                 tint: true,
+                footprint: (1, 1),
+                facing: Turn::None,
             },
         ],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_piece_covers_at_least_one_cell() {
+        for cat in CATALOG {
+            for piece in cat.pieces {
+                assert!(
+                    piece.footprint.0 >= 1 && piece.footprint.1 >= 1,
+                    "{} has an empty footprint",
+                    piece.name
+                );
+            }
+        }
+    }
+}
