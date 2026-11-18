@@ -14,7 +14,7 @@ use bevy::{asset::LoadState, prelude::*};
 use super::{
     bootstrap::TerrainRenderAssets,
     material::{TerrainMaterial, TerrainPaletteGpu},
-    paint::{build_palette_array, layer_bake_albedo, pattern_dark_factor},
+    paint::{build_palette_array, layer_bake_albedo, texture_mean_rgb},
     storage::TerrainWorld,
 };
 
@@ -29,10 +29,10 @@ pub struct PaletteTextures {
     pending: bool,
     /// Paths already reported as failed, so the warning fires once each.
     failed: Vec<String>,
-    /// Each source pattern's mean dark factor (`paint::pattern_dark_factor`),
+    /// Each source texture's mean linear RGB (`paint::texture_mean_rgb`),
     /// measured when the array was last rebuilt; drives the derived
     /// per-layer `bake_albedo`.
-    dark_factors: Vec<f32>,
+    mean_rgbs: Vec<[f32; 3]>,
 }
 
 pub fn sync_palette(
@@ -110,16 +110,16 @@ pub fn sync_palette(
                 bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                 bevy::asset::RenderAssetUsages::MAIN_WORLD,
             );
-            let (array, factors) = {
+            let (array, means) = {
                 let sources: Vec<&Image> = state
                     .sources
                     .iter()
                     .map(|(_, h)| images.get(h).unwrap_or(&flat))
                     .collect();
-                let factors = sources.iter().map(|img| pattern_dark_factor(img)).collect();
-                (build_palette_array(&sources, state.size), factors)
+                let means = sources.iter().map(|img| texture_mean_rgb(img)).collect();
+                (build_palette_array(&sources, state.size), means)
             };
-            state.dark_factors = factors;
+            state.mean_rgbs = means;
             let array = images.add(array);
             for (_, mat) in materials.iter_mut() {
                 mat.layers = array.clone();
@@ -137,8 +137,8 @@ pub fn sync_palette(
     //
     // What a bounce or probe ray should see where a layer is painted is the
     // colour the *screen* shows there: the shader's own layer colour with the
-    // pattern replaced by its mean dark factor (`paint::layer_bake_albedo`).
-    // Recomputed whenever the palette changes (a tint drag) or the patterns
+    // texel replaced by the texture's mean RGB (`paint::layer_bake_albedo`).
+    // Recomputed whenever the palette changes (a tint drag) or the textures
     // finish loading; written through `bypass_change_detection` because it is
     // derived bookkeeping — not an edit, not undoable, and it must not
     // retrigger this system or the uniform sync below. Shift+S persists it
@@ -146,10 +146,10 @@ pub fn sync_palette(
     {
         let world = terrain_world.bypass_change_detection();
         for (i, layer) in world.metadata.palette.layers.iter_mut().enumerate() {
-            let Some(factor) = state.dark_factors.get(i).copied() else {
+            let Some(mean) = state.mean_rgbs.get(i).copied() else {
                 break; // array not built yet this world; keep saved values
             };
-            let derived = layer_bake_albedo(layer, factor);
+            let derived = layer_bake_albedo(layer, mean);
             if layer.bake_albedo != derived {
                 layer.bake_albedo = derived;
             }

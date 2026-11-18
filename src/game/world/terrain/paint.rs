@@ -234,19 +234,26 @@ impl BlendProfile {
     }
 }
 
-/// One ground material. The texture is a flat greyscale *pattern*: where it
-/// is dark the tint is pulled towards black by `pattern_strength`, so one
-/// pattern serves any number of coloured layers and all light and shade come
-/// from the lightmap, as the toon look wants.
+/// One ground material: a full-colour texture × an optional tint. The layer
+/// shows `tint × mix(white, texture, pattern_strength)` — a white tint at
+/// strength 1 is the texture exactly as authored, and all light and shade
+/// still come from the lightmap, as the toon look wants.
+///
+/// Until 2026-11-17 the texture was a greyscale *pattern* that could only
+/// darken the tint; a palette authored for that model reads a little darker
+/// and flatter under the multiply and wants its tints touched up (plus a
+/// rebake, for the bounce albedo).
 #[derive(Archive, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct TerrainLayerData {
     pub name: String,
-    /// Asset path of the pattern (`textures/….png`).
+    /// Asset path of the texture (`textures/….png`).
     pub texture: String,
-    /// Linear RGB base colour.
+    /// Linear RGB multiplier over the texture. White = the texture as
+    /// authored, which is the default for new layers.
     pub tint: [f32; 3],
-    /// 0 = the pattern is ignored (flat tint); 1 = its dark parts go fully
-    /// to the pattern colour.
+    /// How much of the texture shows: 0 = flat tint, 1 = the full texture.
+    /// (The field keeps its pre-colour name; rkyv doesn't care and the
+    /// editor labels it "Texture".)
     pub pattern_strength: f32,
     /// World metres per texture repeat.
     pub tiling: f32,
@@ -277,8 +284,10 @@ impl TerrainLayerData {
         Self {
             name: name.into(),
             texture: texture.into(),
-            tint: [0.6, 0.6, 0.6],
-            pattern_strength: 0.85,
+            // The tint is an *optional* multiplier: a new layer shows its
+            // texture untinted, at full strength.
+            tint: [1.0, 1.0, 1.0],
+            pattern_strength: 1.0,
             tiling: 3.0,
             no_tile: true,
             blend_profile: BlendProfile::Soft as u8,
@@ -316,6 +325,10 @@ impl Default for TerrainPalette {
         let mut default = TerrainLayerData::new("Default", DEFAULT_LAYER_TEXTURE);
         default.no_tile = false;
         default.tiling = 2.0;
+        // The deliberately-neutral "unpainted" grey, not `new()`'s untinted
+        // full-strength texture (that default is for layers a user adds).
+        default.tint = [0.6, 0.6, 0.6];
+        default.pattern_strength = 0.85;
         Self {
             layers: vec![default],
             texture_size: 256,
@@ -330,6 +343,9 @@ impl TerrainPalette {
         let mut stone = TerrainLayerData::new("Stone", LEGACY_STONE_TEXTURE);
         let tint = LinearRgba::from(Color::srgb(0.81, 0.62, 0.60));
         stone.tint = [tint.red, tint.green, tint.blue];
+        // Pinned (not `new()`'s full-strength default) so an upgraded world
+        // stays as close to its old darken-model look as the multiply gets.
+        stone.pattern_strength = 0.85;
         stone.bake_albedo = stone.tint;
         Self {
             layers: vec![stone],
@@ -657,28 +673,11 @@ pub fn placeholder_palette_array() -> Image {
     image
 }
 
-/// Pack the palette's loaded textures into one `2d_array`, every layer
-/// resampled to `size` × `size` with a full mip chain.
-///
-/// Resampling is bilinear and the mips are 2×2 box filters, both on the
-/// stored (sRGB-encoded) bytes. Patterns are near-binary greys, so the
-/// gamma error of averaging in sRGB space is invisible here; revisit if a
-/// layer texture ever carries real colour.
-///
-/// `textures[i]` is layer `i`'s image in any 8-bit RGBA format; anything
-/// else is converted first. A texture that can't be read becomes a flat
-/// white layer (no pattern) and is reported.
-/// The dark colour a pattern pulls a layer's tint towards where it is dark.
-/// Mirrors `PATTERN_DARK` in `terrain_toon.wesl`.
-pub const PATTERN_DARK: [f32; 3] = [0.02, 0.02, 0.02];
-
-/// How much of a pattern texture is "dark", on average, as the shader
-/// measures it: the mean over its texels of
-/// `smoothstep(0.05, 0.45, 1 − pattern)` (linear luminance), the factor
-/// `layer_eval` in `terrain_toon.wesl` mixes the tint towards
-/// [`PATTERN_DARK`] by (before scaling by the layer's pattern strength).
+/// A texture's mean colour in linear RGB, as the shader will show it: the
+/// average texel of `layer_eval`'s tap in `terrain_toon.wesl` (the array is
+/// sRGB, so taps are linear — the decode here matches the hardware's).
 /// Feeds [`layer_bake_albedo`].
-pub fn pattern_dark_factor(img: &Image) -> f32 {
+pub fn texture_mean_rgb(img: &Image) -> [f32; 3] {
     let size = 32; // plenty for a mean; reuses the resize path's conversion
     let pixels = resample_rgba8(img, size);
     let srgb_to_linear = |b: u8| {
@@ -689,34 +688,43 @@ pub fn pattern_dark_factor(img: &Image) -> f32 {
             ((v + 0.055) / 1.055).powf(2.4)
         }
     };
-    let smoothstep = |e0: f32, e1: f32, x: f32| {
-        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    let mut sum = 0.0f32;
+    let mut sum = [0.0f32; 3];
     let (texels, _) = pixels.as_chunks::<4>();
     for px in texels {
-        // Patterns are greyscale-ish; a plain channel mean is the luminance.
-        let pattern = (srgb_to_linear(px[0]) + srgb_to_linear(px[1]) + srgb_to_linear(px[2])) / 3.0;
-        sum += smoothstep(0.05, 0.45, 1.0 - pattern);
+        for c in 0..3 {
+            sum[c] += srgb_to_linear(px[c]);
+        }
     }
-    sum / (size * size) as f32
+    sum.map(|s| s / (size * size) as f32)
 }
 
 /// A layer's bake albedo: the colour the *screen* shows for it, averaged over
-/// its pattern — `mix(tint, PATTERN_DARK, dark_factor × pattern_strength)`,
-/// which is `layer_eval` in `terrain_toon.wesl` with the pattern replaced by
-/// its mean dark factor ([`pattern_dark_factor`]). What a bounce or probe ray
-/// landing on this layer re-emits.
-pub fn layer_bake_albedo(layer: &TerrainLayerData, dark_factor: f32) -> [f32; 3] {
-    let f = (dark_factor * layer.pattern_strength).clamp(0.0, 1.0);
+/// its texture — `tint × mix(1, mean_rgb, strength)`, which is `layer_eval`
+/// in `terrain_toon.wesl` with the texel replaced by the texture's mean
+/// ([`texture_mean_rgb`]). What a bounce or probe ray landing on this layer
+/// re-emits.
+pub fn layer_bake_albedo(layer: &TerrainLayerData, mean_rgb: [f32; 3]) -> [f32; 3] {
+    let s = layer.pattern_strength.clamp(0.0, 1.0);
     let mut out = [0.0; 3];
     for c in 0..3 {
-        out[c] = layer.tint[c] + (PATTERN_DARK[c] - layer.tint[c]) * f;
+        out[c] = layer.tint[c] * (1.0 + (mean_rgb[c] - 1.0) * s);
     }
     out
 }
 
+/// Pack the palette's loaded textures into one `2d_array`, every layer
+/// resampled to `size` × `size` with a full mip chain.
+///
+/// Resampling is bilinear and the mips are 2×2 box filters, both on the
+/// stored (sRGB-encoded) bytes. Averaging sRGB bytes slightly darkens a
+/// colourful mip versus averaging in linear — the same approximation most
+/// engines make for albedo textures, and under the toon quantiser the
+/// difference stays below a band; linearise the mip chain if distant
+/// terrain ever reads darker than it should.
+///
+/// `textures[i]` is layer `i`'s image in any 8-bit RGBA format; anything
+/// else is converted first. A texture that can't be read becomes a flat
+/// white layer and is reported.
 pub fn build_palette_array(textures: &[&Image], size: u32) -> Image {
     let size = size.clamp(1, 4096).next_power_of_two();
     let layers = textures.len().max(1) as u32;
@@ -900,11 +908,13 @@ mod tests {
     }
 
     /// The derived albedo is the shader's colour for the layer with the
-    /// pattern replaced by its mean: a white pattern leaves the tint alone, a
-    /// black one at full strength is `PATTERN_DARK`, strength 0 ignores it.
+    /// texel replaced by the texture's mean: `tint × mix(1, mean, strength)`.
+    /// A white texture leaves the tint alone, a black one at full strength
+    /// is black, strength 0 ignores the texture entirely, and the mean is
+    /// measured in linear (an sRGB-128 grey is ~0.216 linear, not 0.5).
     #[test]
     fn bake_albedo_mirrors_the_shaders_layer_colour() {
-        let solid = |v: u8| {
+        let solid = |rgb: [u8; 3]| {
             Image::new_fill(
                 Extent3d {
                     width: 4,
@@ -912,25 +922,34 @@ mod tests {
                     depth_or_array_layers: 1,
                 },
                 TextureDimension::D2,
-                &[v, v, v, 255],
+                &[rgb[0], rgb[1], rgb[2], 255],
                 TextureFormat::Rgba8UnormSrgb,
                 bevy::asset::RenderAssetUsages::MAIN_WORLD,
             )
         };
-        assert!(pattern_dark_factor(&solid(255)).abs() < 1e-4);
-        assert!((pattern_dark_factor(&solid(0)) - 1.0).abs() < 1e-4);
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4);
+        assert!(close(texture_mean_rgb(&solid([255, 255, 255])), [1.0; 3]));
+        assert!(close(texture_mean_rgb(&solid([0, 0, 0])), [0.0; 3]));
+        // Colour comes through per channel, decoded to linear.
+        let red = texture_mean_rgb(&solid([255, 0, 0]));
+        assert!(close(red, [1.0, 0.0, 0.0]), "{red:?}");
+        let grey = texture_mean_rgb(&solid([128, 128, 128]));
+        assert!((grey[0] - 0.2158).abs() < 1e-3, "{grey:?}");
 
         let mut layer = TerrainLayerData::new("l", "x.png");
         layer.tint = [0.8, 0.4, 0.2];
         layer.pattern_strength = 1.0;
-        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
-        assert!(close(layer_bake_albedo(&layer, 0.0), layer.tint));
-        assert!(close(layer_bake_albedo(&layer, 1.0), PATTERN_DARK));
+        // Full strength: tint × mean. White mean = plain tint, black = black.
+        assert!(close(layer_bake_albedo(&layer, [1.0; 3]), layer.tint));
+        assert!(close(layer_bake_albedo(&layer, [0.0; 3]), [0.0; 3]));
+        let mixed = layer_bake_albedo(&layer, [0.5, 1.0, 0.25]);
+        assert!(close(mixed, [0.4, 0.4, 0.05]), "{mixed:?}");
+        // Strength 0 ignores the texture; 0.5 fades it halfway to white.
         layer.pattern_strength = 0.0;
-        assert!(close(layer_bake_albedo(&layer, 1.0), layer.tint));
+        assert!(close(layer_bake_albedo(&layer, [0.0; 3]), layer.tint));
         layer.pattern_strength = 0.5;
-        let half = layer_bake_albedo(&layer, 1.0);
-        assert!((half[0] - 0.41).abs() < 1e-4, "{half:?}");
+        let half = layer_bake_albedo(&layer, [0.5, 0.5, 0.5]);
+        assert!((half[0] - 0.8 * 0.75).abs() < 1e-4, "{half:?}");
     }
 
     #[test]

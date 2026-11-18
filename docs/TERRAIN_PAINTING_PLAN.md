@@ -751,3 +751,55 @@ notes.
   `PaintmapData` is a host type, so the clean shape is an engine-api
   resource the host keeps current, not a casual addition to this phase.
 
+
+## 13. Full-colour textures (2026-11-17)
+
+A layer's texture is no longer a greyscale *pattern* that darkens the tint —
+it is a full-colour texture, and the tint is an **optional multiplier**:
+
+    layer colour = tint × mix(white, texture.rgb, strength)
+
+White tint at strength 1 (the default for new layers) shows the texture as
+authored; strength 0 is a flat tint, exactly as before. `PATTERN_DARK` and
+the `smoothstep(0.05, 0.45, 1 − pattern)` darken curve are gone.
+
+What moved with it, each the colour analogue of what it replaced:
+
+- **Taps are `.rgb`** (`pattern_tap`/`pattern_no_tile` in
+  `terrain_toon.wesl`). The palette array was already `Rgba8UnormSrgb`, so
+  taps come back linear with hardware sRGB decode — no format change, no new
+  cost (the taps always fetched RGBA).
+- **The Height blend profile and `layer_eval`'s scalar** compare the texel's
+  Rec. 709 **luma** where they compared the raw pattern value.
+- **`bake_albedo` is `tint × mix(1, mean_rgb, strength)`**
+  (`paint::layer_bake_albedo`, fed by `texture_mean_rgb` — the mean linear
+  RGB of the texture, replacing the mean dark factor), so bounce and probe
+  rays re-emit the texture's real colour. Same derivation pipeline
+  (`palette_sync`), still never authored.
+- **UI**: "Pattern strength" is labelled "Texture strength"; the rules
+  swatch draws `bake_albedo` instead of the tint (white-tinted textured
+  layers would have painted it all white). The layer cells and the brush
+  disc already multiplied texture × tint, so they became *more* accurate.
+- The `pattern_strength` **field name is unchanged** (rkyv is positional, a
+  rename is free — it just wasn't worth the churn), and **no format bump**:
+  the struct is byte-identical, only reinterpreted.
+
+**Existing worlds shift in tone.** Tints were authored for the darken model
+(a mid-grey pattern stayed near the full tint through the smoothstep; under
+the multiply it darkens linearly), so old palettes read a little darker and
+flatter and want a tint touch-up plus a rebake (Shift+B) for the bounce
+albedo. The stock layers are pinned close to their old look:
+`TerrainPalette::default()` keeps the grey 0.6 tint / 0.85 strength and
+`legacy_stone()` its sRGB (0.81, 0.62, 0.60) / 0.85.
+
+Known approximations, with triggers to revisit:
+
+- **Mips are box-filtered in sRGB space** (`build_palette_array`), which
+  reads slightly dark on colourful textures at distance; linearise the mip
+  chain if far terrain visibly darkens.
+- **The no-tile sampler cross-fades four offset taps**, which on busy colour
+  textures reads as mild ghosting/contrast loss it also had on patterns,
+  just more visibly. The upgrade is histogram-preserving blending
+  (Deliot–Heitz) if it bothers.
+- **The palette array's alpha channel is unused** — a per-texture height
+  map for the Height profile could live there instead of luma, if authored.

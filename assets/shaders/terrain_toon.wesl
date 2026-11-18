@@ -2,7 +2,7 @@
 //
 // All lighting is baked (see toon_lighting.wesl for the model); this shader
 // only decides the *base colour*: which painted layers are under this pixel
-// and what their patterns and tints make of it (docs/TERRAIN_PAINTING_PLAN.md).
+// and what their textures × tints make of it (docs/TERRAIN_PAINTING_PLAN.md).
 //
 // Painting is a material-ID map. Every tile of the chunk's `paint_map` holds
 // a base layer, an overlay layer and a blend amount (R, G, B as bytes); the
@@ -50,7 +50,7 @@ var paint_map: texture_2d<f32>;
 
 // Mirrors `TerrainLayerGpu` / `TerrainPaletteGpu` in terrain/material.rs.
 struct TerrainLayer {
-    // Linear RGB tint; w = pattern strength.
+    // Linear RGB tint (white = the texture as authored); w = texture strength.
     tint: vec4<f32>,
     // x = repeats per metre, y = 1 for the no-tile sampler, z = blend
     // profile (see `blend_amount`), w = that profile's parameter.
@@ -174,10 +174,6 @@ fn toon_shade(radiance: vec3<f32>, curve: vec4<f32>) -> vec3<f32> {
 }
 // ─── END TOON CURVE ──────────────────────────────────────────────────────
 
-// Where a pattern is dark the layer's tint is pulled towards this. A
-// constant rather than per layer until something needs it to differ.
-const PATTERN_DARK: vec3<f32> = vec3<f32>(0.02, 0.02, 0.02);
-
 // Cheap 2D hash — maps an integer-lattice vec2 to a random [0,1]^2 offset
 fn hash2(p: vec2<f32>) -> vec2<f32> {
     let q = vec2<f32>(
@@ -187,16 +183,17 @@ fn hash2(p: vec2<f32>) -> vec2<f32> {
     return fract(sin(q) * 43758.5453);
 }
 
-// One pattern tap with explicit gradients (see the header).
-fn pattern_tap(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f32 {
-    return textureSampleGrad(layer_textures, layer_sampler, uv, layer, gx, gy).r;
+// One texture tap with explicit gradients (see the header). Full colour: the
+// palette array is sRGB, so this is linear RGB.
+fn pattern_tap(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+    return textureSampleGrad(layer_textures, layer_sampler, uv, layer, gx, gy).rgb;
 }
 
-// Stochastic (no-tile) pattern sample: blends four neighbouring lattice
+// Stochastic (no-tile) texture sample: blends four neighbouring lattice
 // cells, each with its own random UV offset, so the texture's repeat grid
 // becomes invisible. The offsets are integer-free noise added to the UV, so
 // the gradients are unchanged.
-fn pattern_no_tile(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f32 {
+fn pattern_no_tile(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
     let p = floor(uv);
     let f = fract(uv);
     let w = f * f * (3.0 - 2.0 * f);
@@ -209,21 +206,35 @@ fn pattern_no_tile(layer: u32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> f
     return mix(mix(va, vb, w.x), mix(vc, vd, w.x), w.y);
 }
 
-// One layer at a point: rgb = its tint darkened where its pattern is dark,
-// a = the pattern value itself (what the Height profile compares).
-// `gx`/`gy` are the world-xz gradients per screen pixel.
+// Rec. 709 luma of a linear-RGB texel: the scalar "height" the Height blend
+// profile compares now that textures are full colour (it compared the raw
+// greyscale pattern value before 2026-11-17).
+fn texel_luma(texel: vec3<f32>) -> f32 {
+    return dot(texel, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// One layer at a point: rgb = tint × the texture faded towards white by
+// (1 − strength) — strength 1 is the full colour texture, 0 a flat tint, and
+// a white tint leaves the texture as authored. a = the texel's luma (what
+// the Height profile compares). `gx`/`gy` are the world-xz gradients per
+// screen pixel.
+//
+// Until 2026-11-17 textures were greyscale *patterns* that could only pull
+// the tint towards black (`mix(tint, PATTERN_DARK, smoothstep(0.05, 0.45,
+// 1 − pattern) × strength)`); tints from palettes authored for that model
+// read a little darker and flatter under the multiply and want a touch-up.
 fn layer_eval(layer: u32, xz: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
     let l = palette.layers[layer];
     let scale = l.params.x;
     let uv = xz * scale;
-    var pattern = 1.0;
+    var texel = vec3<f32>(1.0);
     if (l.params.y > 0.5) {
-        pattern = pattern_no_tile(layer, uv, gx * scale, gy * scale);
+        texel = pattern_no_tile(layer, uv, gx * scale, gy * scale);
     } else {
-        pattern = pattern_tap(layer, uv, gx * scale, gy * scale);
+        texel = pattern_tap(layer, uv, gx * scale, gy * scale);
     }
-    let factor = smoothstep(0.05, 0.45, 1.0 - pattern) * l.tint.w;
-    return vec4<f32>(mix(l.tint.rgb, PATTERN_DARK, factor), pattern);
+    let rgb = l.tint.rgb * mix(vec3<f32>(1.0), texel, l.tint.w);
+    return vec4<f32>(rgb, texel_luma(texel));
 }
 
 // A paint sample's id byte as the layer it displays: clamped into the
@@ -250,11 +261,11 @@ fn value_noise(p: vec2<f32>) -> f32 {
 // the overlay layer's profile. `bw` is `fwidth` of the interpolated blend,
 // taken in uniform flow by the caller, so every edge here can be resolved
 // over ~one screen pixel without a derivative of its own. `h_base` /
-// `h_over` are the two patterns' values at this point.
+// `h_over` are the two textures' luma at this point.
 //   0 Soft     linear.
 //   1 Hard     step at ½, width from one pixel (param 1) to ½ (param 0).
-//   2 Height   the overlay appears first where its pattern is lighter than
-//              the base's; param is how strongly the patterns decide.
+//   2 Height   the overlay appears first where its texture is lighter (by
+//              luma) than the base's; param is how strongly that decides.
 //   3 Scatter  dithered patches: overlay where b exceeds a noise field;
 //              param is the patch size (25 cm – 4 m).
 //   4 Stepped  quantised into 2–8 bands, each boundary ~one pixel.

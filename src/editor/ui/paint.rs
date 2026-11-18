@@ -332,8 +332,8 @@ fn rules_section(ui: &mut egui::Ui, panels: &mut Panels) {
     }
 }
 
-/// Height (→) by slope (↑) preview of what the stack paints, in layer
-/// tints; noise is left out so the picture is readable.
+/// Height (→) by slope (↑) preview of what the stack paints, in each
+/// layer's mean colour; noise is left out so the picture is readable.
 fn rules_swatch(ui: &mut egui::Ui, palette: &TerrainPalette, rules: &[PaintRule]) {
     // Height axis: up to the highest band in play, at least 20 m.
     let max_h = rules
@@ -364,8 +364,14 @@ fn rules_swatch(ui: &mut egui::Ui, palette: &TerrainPalette, rules: &[PaintRule]
             let base = palette.resolve(crate::game::world::terrain::paint::paint_base(s));
             let over = palette.resolve(crate::game::world::terrain::paint::paint_overlay(s));
             let t = crate::game::world::terrain::paint::paint_blend(s) as f32 / 255.0;
-            let a = palette.layer(base).map(|l| l.tint).unwrap_or([0.5; 3]);
-            let b = palette.layer(over).map(|l| l.tint).unwrap_or(a);
+            // bake_albedo, not tint: the layer's mean on-screen colour.
+            // Textured layers default to a white tint, which would paint
+            // this whole map white.
+            let a = palette
+                .layer(base)
+                .map(|l| l.bake_albedo)
+                .unwrap_or([0.5; 3]);
+            let b = palette.layer(over).map(|l| l.bake_albedo).unwrap_or(a);
             let mixed = [
                 a[0] + (b[0] - a[0]) * t,
                 a[1] + (b[1] - a[1]) * t,
@@ -536,7 +542,8 @@ fn layer_settings(
                 });
             ui.end_row();
 
-            ui.label("Tint");
+            ui.label("Tint")
+                .on_hover_text("Optional multiplier over the texture; white shows it as authored");
             // Edited in sRGB, stored linear (like every colour the shaders read).
             let srgb =
                 bevy::prelude::Color::linear_rgb(layer.tint[0], layer.tint[1], layer.tint[2])
@@ -548,8 +555,9 @@ fn layer_settings(
             }
             ui.end_row();
 
-            ui.label("Pattern strength")
-                .on_hover_text("How far the pattern's dark parts pull the tint towards black");
+            ui.label("Texture strength").on_hover_text(
+                "How much of the texture shows: 1 = the full texture, 0 = a flat tint",
+            );
             ui.add(egui::Slider::new(&mut layer.pattern_strength, 0.0..=1.0));
             ui.end_row();
 
