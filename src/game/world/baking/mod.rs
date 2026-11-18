@@ -317,7 +317,12 @@ impl BakeRegion {
 #[derive(Message)]
 pub struct BakeMessage;
 
-type OccluderMeshItem = (Entity, &'static Mesh3d, &'static GlobalTransform);
+type OccluderMeshItem = (
+    Entity,
+    &'static Mesh3d,
+    &'static MeshMaterial3d<ToonMaterial>,
+    &'static GlobalTransform,
+);
 
 /// The world queries every bake path walks: terrain chunks, placed objects,
 /// the meshes under them, and the static scenery that casts shadows.
@@ -335,7 +340,8 @@ pub struct BakeSceneQueries<'w, 's> {
     pub toon_meshes: object_lightmaps::ToonMeshQuery<'w, 's>,
     pub children: Query<'w, 's, &'static Children>,
     /// Shadow-caster candidates: every toon-shaded mesh in the world.
-    /// `collect_occluder_triangles` keeps only the static ones.
+    /// `collect_occluder_triangles` keeps only the static, opaque ones
+    /// (alpha-blended glass lets light through).
     pub occluder_meshes: Query<'w, 's, OccluderMeshItem, With<MeshMaterial3d<ToonMaterial>>>,
     /// The loaded chunks' paint, for the paint-aware bounce albedo. Inserted
     /// by terrain bootstrap with the heightmap; `None` until a world loads.
@@ -516,6 +522,7 @@ fn run_bake(
         &scene.parents,
         &scene.scenery,
         &meshes,
+        &toon_materials,
         occluder_bounds,
     );
     let triangle_count = triangles.len();

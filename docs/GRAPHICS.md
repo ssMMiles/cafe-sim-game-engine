@@ -63,7 +63,7 @@ RENDER WORLD, gameplay Camera3d → GameRenderTarget (Rgba16Float, MSAA ×4, win
   Core3d:
     Prepass        depth + world normals    (every opaque mesh; sky dome writes normals, no depth)
     MainPass       opaque: terrain, toon objects, sky dome, StandardMaterial bits
-                   transparent: blob shadows, placement preview, brush disc, gizmos
+                   transparent: glass (alpha_blend toon), blob shadows, placement preview, brush disc, gizmos
     PostProcess    tonemapping (Linear) → edge detection (per MSAA sample) → atmosphere
     upscaling
         ▼
@@ -182,7 +182,12 @@ Placed meshes, the player, and plugin pieces.
   facing normal to the edge detector's target), vertex `scene/mesh_vertex.wesl`.
   There is no separate prepass since 2026-11-08: the scene pass is one
   geometry pass with the normal texture as a second colour target.
-- Pipeline key: `ToonMaterialKey { double_sided }`. Double-sided → no culling
+- Pipeline key: `ToonMaterialKey { double_sided, alpha_blend }`. `alpha_blend`
+  (glTF `alphaMode: BLEND`, ABI 19) moves the material to the scene pass's
+  transparent layer — alpha-blended, depth-tested but not written, normal
+  target masked (no outline of its own, no fog on the pane) — still lit from
+  its lightmap or the probes, and skipped by the bake's occluder BVH so light
+  passes through (`docs/TRANSPARENCY_PLAN.md`). Double-sided → no culling
   and the `TOON_DOUBLE_SIDED` def, which flips the normal of a back face
   (winding-corrected for mirrored meshes) — for probe lighting and for the
   edge detector alike. Single-sided → back faces culled.

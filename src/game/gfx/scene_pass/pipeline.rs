@@ -37,7 +37,7 @@ use crate::game::world::{sky::SkyDomeMaterial, terrain::material::TerrainMateria
 
 use super::{
     SceneBindGroupLayout, SceneLayer,
-    material::{MaterialLayout, ScenePipeline},
+    material::{MaterialLayout, SceneMaterial, ScenePipeline},
 };
 
 /// Everything about a *view* that changes a pipeline.
@@ -213,7 +213,7 @@ impl SpecializedMeshPipeline for TerrainScenePipeline {
         Ok(self.0.descriptor(
             "terrain_scene_pipeline",
             key.view,
-            SceneLayer::Opaque,
+            <TerrainMaterial as SceneMaterial>::layer(&()),
             vertex_layout,
             Vec::new(),
             Some(Face::Back),
@@ -297,10 +297,15 @@ impl SpecializedMeshPipeline for ToonScenePipeline {
         } else {
             Some(Face::Back)
         };
+        // The layer comes from the key (`alpha_blend` → Transparent), through
+        // the same function `queue_draws` files the draw under, so the
+        // pipeline's blend/depth/mask state always matches its layer. The
+        // shader needs no variant: it computes and writes alpha either way,
+        // and only the blend state decides whether that means anything.
         Ok(self.0.descriptor(
             "toon_scene_pipeline",
             key.view,
-            SceneLayer::Opaque,
+            <ToonMaterial as SceneMaterial>::layer(&key.material),
             vertex_layout,
             shader_defs,
             cull_mode,
@@ -354,7 +359,7 @@ impl SpecializedMeshPipeline for SkyScenePipeline {
         Ok(self.0.descriptor(
             "sky_scene_pipeline",
             key.view,
-            SceneLayer::Background,
+            <SkyDomeMaterial as SceneMaterial>::layer(&()),
             vertex_layout,
             Vec::new(),
             // The camera is *inside* the sphere.
@@ -415,7 +420,7 @@ impl SpecializedMeshPipeline for UnlitScenePipeline {
         Ok(self.0.descriptor(
             "unlit_scene_pipeline",
             key.view,
-            SceneLayer::Transparent,
+            <UnlitMaterial as SceneMaterial>::layer(&()),
             vertex_layout,
             shader_defs,
             None,

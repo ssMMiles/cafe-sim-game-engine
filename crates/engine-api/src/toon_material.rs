@@ -146,7 +146,9 @@ pub fn create_probe_volume_images(images: &mut Assets<Image>) -> ProbeVolumeImag
 #[bind_group_data(ToonMaterialKey)]
 pub struct ToonMaterial {
     /// Multiplies the base-colour texture (if any) and then the toon-shaded
-    /// lighting. Its alpha is written out but the material is always opaque.
+    /// lighting. Its alpha (× the texture's) is written out by the fragment
+    /// shader either way; only [`Self::alpha_blend`] makes the pipeline use
+    /// it.
     pub base_color: Color,
     /// Sampled through UV0 (and [`Self::uv_transform`]) on meshes that have
     /// UV0; `None` binds bevy's white fallback, i.e. no texture.
@@ -159,6 +161,14 @@ pub struct ToonMaterial {
     /// towards the viewer — in the colour pass (probe-lit lighting) and in
     /// the normal prepass the edge detector reads. glTF `doubleSided`.
     pub double_sided: bool,
+    /// glTF `alphaMode: BLEND` (window glass): drawn in the scene pass's
+    /// transparent layer — alpha-blended over the finished opaque image,
+    /// depth-tested but not depth-writing, no normal write (so no outline of
+    /// its own and no fog on the pane; both belong to what's behind it) —
+    /// and, still lit: it keeps its lightmap or probe source like any toon
+    /// surface. It also stops occluding in the bake (the host's BVH skips
+    /// it), so sunlight passes through. `docs/TRANSPARENCY_PLAN.md`.
+    pub alpha_blend: bool,
 
     /// Per-instance baked HDR lightmap: outgoing radiance in lightmap units
     /// where 1.0 shows the full base colour. Sun, ambient×AO, bounce and
@@ -204,17 +214,21 @@ impl From<&ToonMaterial> for ToonSurfaceUniform {
     }
 }
 
-/// What makes two toon materials need different pipelines. Only culling —
-/// and the matching normal flip, which is the same switch.
+/// What makes two toon materials need different pipelines: culling (and the
+/// matching normal flip, which is the same switch), and which scene layer the
+/// material draws in — [`ToonMaterial::alpha_blend`] changes the blend state,
+/// depth write and normal-target mask all at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ToonMaterialKey {
     pub double_sided: bool,
+    pub alpha_blend: bool,
 }
 
 impl From<&ToonMaterial> for ToonMaterialKey {
     fn from(m: &ToonMaterial) -> Self {
         Self {
             double_sided: m.double_sided,
+            alpha_blend: m.alpha_blend,
         }
     }
 }
@@ -260,6 +274,9 @@ impl ToonMaterial {
         // `cull_mode` rather than `double_sided`: it is what decides whether
         // back faces are visible, and the glTF loader sets both together.
         self.double_sided = gltf.cull_mode.is_none();
+        // Only `Blend` maps; `Mask` and the exotic modes stay opaque and are
+        // reported by `dropped_gltf_features`.
+        self.alpha_blend = matches!(gltf.alpha_mode, AlphaMode::Blend);
         self
     }
 }
@@ -275,8 +292,9 @@ pub fn dropped_gltf_features(gltf: &GltfMaterial) -> Vec<&'static str> {
     if gltf.emissive != LinearRgba::BLACK || gltf.emissive_texture.is_some() {
         dropped.push("emissive");
     }
-    if !matches!(gltf.alpha_mode, AlphaMode::Opaque) {
-        dropped.push("transparency (toon is always opaque)");
+    // `Blend` converts (`ToonMaterial::alpha_blend`); the rest don't.
+    if !matches!(gltf.alpha_mode, AlphaMode::Opaque | AlphaMode::Blend) {
+        dropped.push("alpha mode (only Opaque and Blend are supported)");
     }
     if gltf.unlit {
         dropped.push("unlit");
@@ -294,6 +312,7 @@ impl Default for ToonMaterial {
             base_color_texture: None,
             uv_transform: Affine2::IDENTITY,
             double_sided: false,
+            alpha_blend: false,
             lightmap: Handle::default(),
             shading: ToonShading::new(ToonSource::Lightmap),
             probe_c0: Handle::default(),
@@ -392,6 +411,30 @@ mod tests {
         assert!(!single.double_sided);
     }
 
+    /// glTF `BLEND` becomes a transparent toon material — and nothing else
+    /// does: `Mask` stays opaque (Blend-only by design,
+    /// `docs/TRANSPARENCY_PLAN.md` §6.1) and so does a plain material.
+    #[test]
+    fn only_blend_converts_to_a_transparent_material() {
+        let glass = GltfMaterial {
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        };
+        let toon = ToonMaterial::default().with_surface_of(&glass);
+        assert!(toon.alpha_blend);
+        assert!(ToonMaterialKey::from(&toon).alpha_blend);
+        // Blend is understood, not dropped.
+        assert!(dropped_gltf_features(&glass).is_empty());
+
+        for opaque_mode in [AlphaMode::Opaque, AlphaMode::Mask(0.5)] {
+            let gltf = GltfMaterial {
+                alpha_mode: opaque_mode,
+                ..default()
+            };
+            assert!(!ToonMaterial::default().with_surface_of(&gltf).alpha_blend);
+        }
+    }
+
     /// Conversion keeps the lighting the template chose.
     #[test]
     fn conversion_leaves_the_lighting_alone() {
@@ -428,7 +471,7 @@ mod tests {
         let fancy = GltfMaterial {
             normal_map_texture: Some(Handle::default()),
             emissive: LinearRgba::RED,
-            alpha_mode: AlphaMode::Blend,
+            alpha_mode: AlphaMode::Mask(0.5),
             ..default()
         };
         let dropped = dropped_gltf_features(&fancy);

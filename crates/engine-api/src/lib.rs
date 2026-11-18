@@ -83,7 +83,10 @@ pub use unlit_material::{UnlitMaterial, UnlitUniform};
 ///   spawned glTF mesh carries, and [`ToonMaterial::with_surface_of`] /
 ///   [`dropped_gltf_features`] read bevy's `GltfMaterial`. `StandardMaterial`
 ///   no longer exists in the app at all.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 18;
+/// - 19: [`ToonMaterial::alpha_blend`] (glTF `alphaMode: BLEND` — lit glass,
+///   drawn in the scene pass's transparent layer, skipped by the bake's
+///   occluder BVH) and the matching [`ToonMaterialKey`] field.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 19;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///

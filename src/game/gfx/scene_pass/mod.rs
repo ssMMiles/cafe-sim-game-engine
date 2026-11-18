@@ -93,16 +93,31 @@ impl SceneMaterial for TerrainMaterial {
 
 impl SceneMaterial for ToonMaterial {
     type Pipeline = ToonScenePipeline;
+
+    /// The one per-material answer: glass (`alpha_blend`, glTF `BLEND`) is
+    /// translucent *lit* geometry — drawn over the finished opaque image,
+    /// still shaded from its lightmap or the probes.
+    fn layer(key: &engine_api::ToonMaterialKey) -> SceneLayer {
+        if key.alpha_blend {
+            SceneLayer::Transparent
+        } else {
+            SceneLayer::Opaque
+        }
+    }
 }
 
 impl SceneMaterial for SkyDomeMaterial {
     type Pipeline = SkyScenePipeline;
-    const LAYER: SceneLayer = SceneLayer::Background;
+    fn layer(_: &()) -> SceneLayer {
+        SceneLayer::Background
+    }
 }
 
 impl SceneMaterial for UnlitMaterial {
     type Pipeline = UnlitScenePipeline;
-    const LAYER: SceneLayer = SceneLayer::Transparent;
+    fn layer(_: &()) -> SceneLayer {
+        SceneLayer::Transparent
+    }
 }
 
 /// Every system that appends to [`SceneInstances`] and writes a view's

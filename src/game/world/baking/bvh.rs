@@ -348,8 +348,8 @@ pub fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Op
 // Scene gathering
 // ============================================================================
 
-/// World-space triangles of every static, toon-shaded mesh whose footprint
-/// overlaps `bounds_xz` (`None` = everywhere).
+/// World-space triangles of every static, opaque, toon-shaded mesh whose
+/// footprint overlaps `bounds_xz` (`None` = everywhere).
 ///
 /// "Static" means the mesh, or an ancestor, is a placed object or a
 /// `RigidBody::Static` — and nothing on that path is [`DynamicLit`]. The
@@ -360,17 +360,40 @@ pub fn ray_triangle(origin: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Op
 /// animates (so it is `PlacedObject` yet moves) declares itself with
 /// `DynamicLit`, which wins — it would otherwise bake a shadow of whatever
 /// orientation it was authored in.
+///
+/// "Opaque" excludes `ToonMaterial::alpha_blend` (window glass): light passes
+/// through it unattenuated, so sun, AO, bounce and probe rays all see the sky
+/// through the cafe's windows instead of baking the interior as if they were
+/// walls. The filter is Blend only — if alpha *masking* ever converts
+/// (`docs/TRANSPARENCY_PLAN.md` §6.1), masked foliage should keep occluding.
+/// A material not yet in `Assets` counts as opaque: glass whose material
+/// hasn't loaded is the rare, conservative case.
 pub fn collect_occluder_triangles(
-    toon_meshes: &Query<(Entity, &Mesh3d, &GlobalTransform), With<MeshMaterial3d<ToonMaterial>>>,
+    toon_meshes: &Query<
+        (
+            Entity,
+            &Mesh3d,
+            &MeshMaterial3d<ToonMaterial>,
+            &GlobalTransform,
+        ),
+        With<MeshMaterial3d<ToonMaterial>>,
+    >,
     parents: &Query<&ChildOf>,
     scenery: &Query<(Option<&PlacedObject>, Option<&RigidBody>, Has<DynamicLit>)>,
     meshes: &Assets<Mesh>,
+    toon_materials: &Assets<ToonMaterial>,
     bounds_xz: Option<(Vec2, Vec2)>,
 ) -> Vec<[Vec3; 3]> {
     let mut out = Vec::new();
 
-    for (entity, mesh_handle, gt) in toon_meshes.iter() {
+    for (entity, mesh_handle, material_handle, gt) in toon_meshes.iter() {
         if !is_static_scenery(entity, parents, scenery) {
+            continue;
+        }
+        if toon_materials
+            .get(material_handle.id())
+            .is_some_and(|m| m.alpha_blend)
+        {
             continue;
         }
         let Some(mesh) = meshes.get(mesh_handle.id()) else {
@@ -694,6 +717,86 @@ mod tests {
         assert!(is_static_scenery(static_mesh, &parents, &scenery));
         assert!(!is_static_scenery(dynamic_mesh, &parents, &scenery));
         assert!(!is_static_scenery(player_mesh, &parents, &scenery));
+    }
+
+    /// Window glass (`ToonMaterial::alpha_blend`) lets light through: a Blend
+    /// material under static scenery contributes no occluder triangles, while
+    /// an opaque one right next to it does (`docs/TRANSPARENCY_PLAN.md` §4).
+    #[test]
+    fn alpha_blended_materials_do_not_occlude() {
+        use crate::game::world::objects::{PlacedKind, PlacedObject};
+        use bevy::asset::RenderAssetUsages;
+        use bevy::ecs::system::SystemState;
+        use bevy::mesh::PrimitiveTopology;
+
+        let mut meshes = Assets::<Mesh>::default();
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        );
+        let triangle = meshes.add(mesh);
+
+        let mut toon_materials = Assets::<ToonMaterial>::default();
+        let opaque = toon_materials.add(ToonMaterial::default());
+        let glass = toon_materials.add(ToonMaterial {
+            alpha_blend: true,
+            ..default()
+        });
+
+        let mut world = World::new();
+        let placed = PlacedObject {
+            id: 1,
+            chunk: (0, 0),
+            name: String::new(),
+            kind: PlacedKind::Empty,
+            parent: None,
+            prefab: None,
+        };
+        world.spawn((
+            placed.clone(),
+            Mesh3d(triangle.clone()),
+            MeshMaterial3d(opaque),
+            GlobalTransform::default(),
+        ));
+        world.spawn((
+            PlacedObject { id: 2, ..placed },
+            Mesh3d(triangle),
+            MeshMaterial3d(glass),
+            GlobalTransform::default(),
+        ));
+
+        let mut state: SystemState<(
+            Query<
+                (
+                    Entity,
+                    &Mesh3d,
+                    &MeshMaterial3d<ToonMaterial>,
+                    &GlobalTransform,
+                ),
+                With<MeshMaterial3d<ToonMaterial>>,
+            >,
+            Query<&ChildOf>,
+            Query<(Option<&PlacedObject>, Option<&RigidBody>, Has<DynamicLit>)>,
+        )> = SystemState::new(&mut world);
+        let (toon_meshes, parents, scenery) = state.get(&world).unwrap();
+
+        let triangles = collect_occluder_triangles(
+            &toon_meshes,
+            &parents,
+            &scenery,
+            &meshes,
+            &toon_materials,
+            None,
+        );
+        assert_eq!(
+            triangles.len(),
+            1,
+            "only the opaque mesh's triangle should occlude"
+        );
     }
 
     /// Many coincident triangles can't be separated by a median split; the

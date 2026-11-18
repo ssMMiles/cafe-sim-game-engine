@@ -56,9 +56,16 @@ use super::{
 /// key is built from the view and the material's own [`AsBindGroup::Data`].
 pub trait SceneMaterial: Material + AsBindGroup<Data: Clone + Hash + Eq + Send + Sync> {
     type Pipeline: ScenePipeline<Self>;
-    /// Where in the frame this material's geometry is drawn, and whether it
-    /// writes the normal target. Almost everything is [`SceneLayer::Opaque`].
-    const LAYER: SceneLayer = SceneLayer::Opaque;
+    /// Where in the frame one of this type's materials is drawn, and whether
+    /// it writes depth and the normal target. A function of the material's
+    /// key, not a per-type const, because `ToonMaterial` answers per material
+    /// (`alpha_blend` → [`SceneLayer::Transparent`]); almost everything else
+    /// is [`SceneLayer::Opaque`] for the whole type. The pipeline specializer
+    /// must derive its blend/depth/mask state from the same key, so a draw's
+    /// layer and its pipeline cannot disagree.
+    fn layer(_key: &Self::Data) -> SceneLayer {
+        SceneLayer::Opaque
+    }
 }
 
 /// The specializer for one [`SceneMaterial`]: built once in `RenderStartup`
@@ -354,7 +361,7 @@ fn queue_draws<M: SceneMaterial>(
             draws.push(SceneDraw {
                 mesh: head.mesh,
                 material: material.bind_group.clone(),
-                layer: M::LAYER,
+                layer: M::layer(&material.key),
                 pipeline: pipeline_id,
                 instances: start..instances.0.len() as u32,
                 distance,

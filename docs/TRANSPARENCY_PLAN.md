@@ -1,8 +1,11 @@
 # Transparency — plan
 
-Status: **draft for review, 2026-11-17**. Nothing is built. Written for the
-new cafe shell model, which has glass windows and is the first real consumer
-of a lit transparent surface.
+Status: **Phases 1 + 2 built 2026-11-17** (ABI 19), same day the draft was
+reviewed. Decisions from review: **Blend-only** (no `Mask` until something
+needs it — §6.1 stands as the trigger), **glass stays lightmapped** (§4.2 as
+proposed), **no outline on glass** (frames are opaque geometry in the glTF).
+Written for the new cafe shell model, which has glass windows and is the
+first real consumer of a lit transparent surface.
 
 ## 1. Goal
 
@@ -41,47 +44,39 @@ draw, fog applied to the glass surface itself.
   outlines belong to the window frame (separate opaque geometry in the
   glTF), and fog applies to what you see through the pane.
 
-## 3. Phase 1 — draw it
+## 3. Phase 1 — draw it (built)
 
-Goal: the cafe shell's windows are visibly glass. Light is still wrong
-(interior stays dark) until Phase 2.
+Goal: the cafe shell's windows are visibly glass.
 
-1. **`SceneLayer` becomes per-material.** Replace
-   `SceneMaterial::LAYER: SceneLayer` with
-   `fn layer(key: &Self::Data) -> SceneLayer` (default: `Opaque`).
-   `queue_draws` already holds `material.key` when it builds the
-   `SceneDraw`, so this is a contained change in `scene_pass/material.rs`;
-   terrain/sky/unlit implement it as the constant they are today.
-2. **`ToonMaterial` gains an alpha mode** (engine-api → **ABI 18 → 19**):
+As built, it is smaller than drafted: there is **no `ToonAlpha` enum, no
+cutoff, no shader change at all** — Blend-only collapsed it to one `bool
+alpha_blend` on `ToonMaterial` + `ToonMaterialKey`, and the fragment shader
+already computed and wrote `base_color.a × texture.a`; the opaque pipeline's
+blend-off state was the only thing discarding it.
 
-   ```rust
-   pub enum ToonAlpha { Opaque, Mask(f32), Blend }   // the glTF triad
-   ```
-
-   - `ToonMaterialKey` carries the *discriminant* (the pipeline differs);
-     the mask **cutoff stays in `ToonSurfaceUniform`** (new field, mirrored
-     in `toon_lighting.wesl`'s `ToonSurface` — a cutoff edit must not mint
-     a new pipeline). The uniform grows; the WESL struct and the Rust
-     `ShaderType` move together.
-   - `Blend` → `SceneLayer::Transparent`: `ALPHA_BLENDING`, no depth write,
-     normal target masked — all of which `SceneShaders::descriptor` already
-     derives from the layer, so toon's `specialize` only has to pass the
-     layer from the key.
-   - `Mask` → stays `Opaque` (writes depth, normals, gets outlines, MSAA's
-     alpha-to-coverage is a possible later nicety) + a `TOON_ALPHA_MASK`
-     def: `if (alpha < surface.alpha_cutoff) { discard; }`. Discard applies
-     to every target, so the outline follows the mask shape.
-3. **Shader**: `alpha = base_color.a × texture.a` (today the texture's
-   alpha is ignored); `Blend` outputs it, `Opaque` keeps forcing 1.0 so
-   existing content cannot change appearance from a stray texture alpha.
-4. **Conversion**: `with_surface_of` maps `gltf.alpha_mode` →
-   `ToonAlpha`; `dropped_gltf_features` stops listing transparency.
-   `ProbeToonMaterials` sharing is keyed per glTF material, so alpha flows
-   through untouched for dynamic pieces too.
-5. **Tests**: `shader_check` gains `TOON_ALPHA_MASK` in `TOON_DEFS` (the
-   def-combination sweep covers it both ways); `with_surface_of` conversion
-   tests for the three modes; a uniform-size test if one doesn't already
-   cover `ToonSurfaceUniform`.
+1. **`SceneLayer` is per-material.** `SceneMaterial::LAYER` became
+   `fn layer(key: &Self::Data) -> SceneLayer` (default `Opaque`);
+   `queue_draws` files each draw under `M::layer(&material.key)` and **every
+   specializer passes its layer through the same function**, so a draw's
+   layer and its pipeline's blend/depth/mask state cannot disagree.
+2. **`ToonMaterial::alpha_blend: bool`** (engine-api → **ABI 18 → 19**),
+   mirrored into `ToonMaterialKey`. True → `SceneLayer::Transparent`:
+   `ALPHA_BLENDING`, no depth write, normal target masked — all of which
+   `SceneShaders::descriptor` already derives from the layer, so toon's
+   `specialize` only passes the layer from the key. The `ToonAlpha` enum
+   (with `Mask(cutoff)` in the uniform) is what this grows into if masking
+   ever converts; nothing shipped blocks that shape.
+3. **Shader**: untouched. It already multiplied the texture's alpha into
+   `base_color` and wrote `base_color.a` out; opaque pipelines ignore it
+   exactly as before.
+4. **Conversion**: `with_surface_of` sets `alpha_blend` from
+   `gltf.alpha_mode == Blend`; `dropped_gltf_features` now reports only the
+   unsupported modes (`Mask` and the exotic ones). `ProbeToonMaterials`
+   sharing is keyed per glTF material, so alpha flows through untouched for
+   dynamic pieces too.
+5. **Tests**: `only_blend_converts_to_a_transparent_material` (engine-api)
+   covers the conversion; no new shader defs, so `shader_check` is
+   unchanged.
 
 Known limitation, accepted: `order_scene_draws` sorts *draws* (a
 `(material, mesh)` run) by the farthest instance, and panes inside one mesh
@@ -91,17 +86,18 @@ can't show it; two glass objects overlapping in view can pop. The fix
 for a sighting (§6). Same for double-sided blended *closed* shapes
 self-sorting — window panes don't care.
 
-## 4. Phase 2 — light comes through
+## 4. Phase 2 — light comes through (built)
 
 Goal: Shift+B in the cafe gives a sunlit interior.
 
 1. **Blend materials leave the BVH.** `collect_occluder_triangles` reads
-   `Assets<ToonMaterial>` and skips meshes whose material is
-   `ToonAlpha::Blend`. The filter is **Blend only** — `Mask` keeps
-   occluding (foliage should shadow; per-texel mask sampling in the BVH is
-   firmly out of scope). Everything downstream is free: sun shadow rays, AO
-   (no contact shadow under glass), bounce, probe gathers, *and the GPU
-   bake*, which uploads the same filtered triangle list.
+   `Assets<ToonMaterial>` and skips meshes whose material has
+   `alpha_blend` (a material not yet in `Assets` counts as opaque — the
+   conservative default). The filter is **Blend only** — if masking ever
+   converts, masked foliage should keep occluding (per-texel mask sampling
+   in the BVH is firmly out of scope). Everything downstream is free: sun
+   shadow rays, AO (no contact shadow under glass), bounce, probe gathers,
+   *and the GPU bake*, which uploads the same filtered triangle list.
 2. **Glass keeps its lightmap.** A static blend sub-mesh still gets UV1,
    a bake job and an EXR like any toon surface — a pane catching the sun
    shows its tint banded like everything else, which is the look. This also
@@ -109,22 +105,16 @@ Goal: Shift+B in the cafe gives a sunlit interior.
    sub-mesh's *position* in `collect_toon_meshes`'s vec, so skipping jobs
    would have to preserve `k` or every later sub-mesh wears the wrong
    lightmap. We skip nothing, so the numbering never moves.
-3. **Tests**: a `bvh` unit test in the style of
-   `dynamic_lit_ancestry_is_excluded_from_static_scenery`, proving a Blend
-   material under static scenery contributes no occluder triangles while a
-   Mask one does.
+3. **Tests**: `alpha_blended_materials_do_not_occlude` (bvh.rs) proves a
+   Blend material under static scenery contributes no occluder triangles
+   while an opaque one beside it does.
 
 No save-format change anywhere: alpha lives in the glTF material, nothing
 new is persisted. Existing worlds need a **rebake** (Shift+B) to see light
 through windows — stale lightmaps are just stale, not broken, and the
 existing stale-bake warning already covers it.
 
-## 5. Order of work
-
-Phase 1 and 2 land together or 1 first — a glass window that reads as glass
-but keeps the room dark is reviewable on its own. Each phase is a commit.
-
-## 6. Deferred, with triggers
+## 5. Deferred, with triggers
 
 | Deferred | Trigger to revisit |
 |---|---|
@@ -134,13 +124,11 @@ but keeps the room dark is reviewable on its own. Each phase is a commit.
 | Alpha-to-coverage for Mask under MSAA | foliage edges alias |
 | Editor override of a placed mesh's alpha (inspector) | first time someone wants glass not authored in the glTF |
 
-## 7. Review questions
+## 6. Review questions (answered 2026-11-17)
 
-1. `ToonAlpha::Mask` in Phase 1, or ship Blend-only first? Nothing in the
-   cafe needs Mask today; it is ~15 lines + one def, and skipping it would
-   also skip the BVH asymmetry in §4.1 until wanted.
-2. Should Blend surfaces stay lightmapped (§4.2) or render unlit at base
-   colour? Lightmapped is proposed — it keeps one code path and the toon
-   look — but it does spend atlas texels and bake time on every pane.
-3. Happy with "no outline on glass"? Frames must then be modelled as
-   opaque geometry in `Cafe.gltf` (they almost certainly already are).
+1. `Mask` in Phase 1? **Blend-only.** Masking waits for a consumer; the
+   §5 trigger stands.
+2. Blend surfaces lightmapped or unlit? **Lightmapped** — one code path,
+   toon-banded panes.
+3. No outline on glass? **Agreed** — frames are opaque geometry in
+   `Cafe.gltf`.
