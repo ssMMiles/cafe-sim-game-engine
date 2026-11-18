@@ -25,6 +25,9 @@ struct EdgeSettings {
     thickness: f32,
     fade_start: f32,
     fade_end: f32,
+    // The crease test's own fade band; silhouettes use the one above.
+    crease_fade_start: f32,
+    crease_fade_end: f32,
     near: f32,
     enabled: u32,
 }
@@ -56,15 +59,20 @@ fn load_depth(pixel: vec2<i32>, index: i32) -> f32 {
 }
 }
 
-fn load_normal(pixel: vec2<i32>, index: i32) -> vec3<f32> {
-    // Prepass normals are world space, packed from [-1, 1] to [0, 1].
-    var packed: vec3<f32>;
+// The raw normal-target texel: xyz is the world normal packed from [-1, 1]
+// to [0, 1]; the 2-bit alpha is the instance's outline weight (grass writes
+// a low one, buildings and terrain 1.0, and the clear value — sky — is 1.0
+// too, so silhouettes against sky keep full strength).
+fn load_packed_normal(pixel: vec2<i32>, index: i32) -> vec4<f32> {
 @if(MULTISAMPLED) {
-    packed = textureLoad(normal_texture, pixel, index).xyz;
+    return textureLoad(normal_texture, pixel, index);
 } @else {
-    packed = textureLoad(normal_texture, pixel, 0).xyz;
+    return textureLoad(normal_texture, pixel, 0);
 }
-    return normalize(packed * 2.0 - vec3<f32>(1.0));
+}
+
+fn decode_normal(packed: vec4<f32>) -> vec3<f32> {
+    return normalize(packed.xyz * 2.0 - vec3<f32>(1.0));
 }
 
 // Depth discontinuity across `a – c – b` (three pixels on a line), relative
@@ -93,11 +101,13 @@ fn in_bounds(pixel: vec2<i32>, dims: vec2<i32>) -> bool {
     return all(pixel >= vec2<i32>(0)) && all(pixel < dims);
 }
 
-// One MSAA sample's edge amount at this pixel: the thresholded strength,
-// softened, and faded with distance.
+// One MSAA sample's edge amount at this pixel: the depth and crease tests
+// thresholded separately (each softened, each with its own distance fade),
+// then the stronger of the two scaled by the neighbourhood's outline weight.
 fn sample_amount(pixel: vec2<i32>, dims: vec2<i32>, radius: i32, index: i32) -> f32 {
     let c = load_depth(pixel, index);
-    let n = load_normal(pixel, index);
+    let centre = load_packed_normal(pixel, index);
+    let n = decode_normal(centre);
 
     // The four lines through the pixel: horizontal, vertical, both diagonals.
     var axes = array<vec2<i32>, 4>(
@@ -107,8 +117,16 @@ fn sample_amount(pixel: vec2<i32>, dims: vec2<i32>, radius: i32, index: i32) -> 
         vec2<i32>(1, -1),
     );
 
-    var strength = 0.0;
+    var depth_edge = 0.0;
+    var crease_edge = 0.0;
     var nearest = c;
+    // The *strongest* weight among the sampled texels, not the centre's: an
+    // edge between a faint object and a full-weight one (grass against the
+    // terrain, or against the sky's clear value) is somebody's silhouette
+    // and keeps full strength. Only edges whose whole neighbourhood is faint
+    // — a small object's interior creases and blade-over-blade steps — are
+    // scaled down.
+    var weight = centre.a;
     for (var i = 0; i < 4; i++) {
         let offset = axes[i] * radius;
         let pa = pixel + offset;
@@ -122,32 +140,42 @@ fn sample_amount(pixel: vec2<i32>, dims: vec2<i32>, radius: i32, index: i32) -> 
         if (a_ok && b_ok) {
             let a = load_depth(pa, index);
             let b = load_depth(pb, index);
-            strength = max(strength, depth_strength(a, c, b));
+            depth_edge = max(depth_edge, depth_strength(a, c, b));
             nearest = max(nearest, max(a, b));
         }
 
         // Crease: angle between neighbouring normals, as 1 − cos.
         if (a_ok) {
-            strength = max(strength, (1.0 - dot(n, load_normal(pa, index))) / settings.normal_threshold);
+            let ta = load_packed_normal(pa, index);
+            crease_edge = max(crease_edge, (1.0 - dot(n, decode_normal(ta))) / settings.normal_threshold);
+            weight = max(weight, ta.a);
         }
         if (b_ok) {
-            strength = max(strength, (1.0 - dot(n, load_normal(pb, index))) / settings.normal_threshold);
+            let tb = load_packed_normal(pb, index);
+            crease_edge = max(crease_edge, (1.0 - dot(n, decode_normal(tb))) / settings.normal_threshold);
+            weight = max(weight, tb.a);
         }
     }
 
-    // A soft band around the threshold so an edge that hovers near it fades
+    // A soft band around each threshold so an edge that hovers near it fades
     // in and out instead of popping. This is tonal softness; the geometric
-    // antialiasing is the per-sample average in `fragment`.
+    // antialiasing is the per-sample average in `fragment`. (With the fades
+    // equal this maxing of two smoothsteps is exactly the old single
+    // smoothstep of the maxed strengths — smoothstep is monotone.)
     let soft = max(settings.softness, 1e-3);
-    let edge = smoothstep(1.0 - soft, 1.0 + soft, strength);
+    let edge_depth = smoothstep(1.0 - soft, 1.0 + soft, depth_edge);
+    let edge_crease = smoothstep(1.0 - soft, 1.0 + soft, crease_edge);
 
     // Fade with the distance of the nearest surface in the neighbourhood,
     // so a silhouette against the sky (cleared depth 0) fades with the
-    // object rather than vanishing on the sky side.
+    // object rather than vanishing on the sky side. Creases have their own,
+    // usually much shorter band: they are surface detail, and dense geometry
+    // turns to scribble at range if they persist as far as silhouettes.
     let distance = settings.near / max(nearest, 1e-9);
     let fade = 1.0 - smoothstep(settings.fade_start, settings.fade_end, distance);
+    let crease_fade = 1.0 - smoothstep(settings.crease_fade_start, settings.crease_fade_end, distance);
 
-    return edge * fade;
+    return max(edge_depth * fade, edge_crease * crease_fade) * weight;
 }
 
 @fragment

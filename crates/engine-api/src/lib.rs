@@ -86,7 +86,9 @@ pub use unlit_material::{UnlitMaterial, UnlitUniform};
 /// - 19: [`ToonMaterial::alpha_blend`] (glTF `alphaMode: BLEND` — lit glass,
 ///   drawn in the scene pass's transparent layer, skipped by the bake's
 ///   occluder BVH) and the matching [`ToonMaterialKey`] field.
-pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 19;
+/// - 20: [`OutlineWeight`] — per-mesh override of the outline post-process's
+///   automatic, size-based edge weighting.
+pub const ENGINE_SCRIPTS_ABI_VERSION: u32 = 20;
 
 /// A plugin exported from a dynamically loaded script dylib.
 ///
@@ -426,6 +428,48 @@ pub struct GltfSurface(pub Handle<bevy::gltf::GltfMaterial>);
 /// materials by hand pick the source directly in [`ToonMaterial::new`].
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub struct DynamicLit;
+
+/// How strongly the outline post-process draws this mesh — an override of the
+/// automatic size rule (ABI 20).
+///
+/// By default every mesh instance gets a weight from its world-space size
+/// (small things like grass tufts get faint lines, buildings full ones — the
+/// thresholds are `EdgeStyle`'s, inspector → Edges). Put this on a mesh
+/// entity, or any ancestor (a scene root a plugin spawned, a placed object),
+/// to pin the weight instead; the nearest one up the hierarchy wins.
+///
+/// The weight scales the *whole* edge amount at pixels this mesh drew, but
+/// the outline pass reads the strongest weight in its sampling neighbourhood,
+/// so a faint object's silhouette against a full-weight surface (terrain, a
+/// wall, the sky) still draws at full strength — only edges interior to the
+/// faint object (creases, blade-over-blade steps) are suppressed. Hardware
+/// grants 4 levels: the weight rides the normal prepass target's 2-bit alpha
+/// (`docs/EDGE_DETECTION.md`).
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OutlineWeight {
+    /// No outlines of this mesh's own.
+    None,
+    /// A third strength: barely-there lines.
+    Faint,
+    /// Two-thirds strength.
+    Reduced,
+    /// Today's look; what every mesh had before weights existed.
+    #[default]
+    Full,
+}
+
+impl OutlineWeight {
+    /// The 2-bit level the scene pass packs into its instance flags:
+    /// weight = level / 3.
+    pub fn level(self) -> u32 {
+        match self {
+            OutlineWeight::None => 0,
+            OutlineWeight::Faint => 1,
+            OutlineWeight::Reduced => 2,
+            OutlineWeight::Full => 3,
+        }
+    }
+}
 
 /// Player physics state.
 #[derive(Component, Debug)]

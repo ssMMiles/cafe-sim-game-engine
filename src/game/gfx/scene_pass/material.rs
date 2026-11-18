@@ -44,7 +44,11 @@ use bevy::{
     },
 };
 
+use bevy::camera::primitives::Aabb;
 use bevy::platform::collections::HashMap;
+use engine_api::OutlineWeight;
+
+use crate::game::gfx::post_process::EdgeStyle;
 
 use super::{
     SceneDraw, SceneDraws, SceneInstance, SceneInstances, SceneLayer, SceneQueue,
@@ -221,6 +225,15 @@ impl<M: Asset> Default for SceneSources<M> {
 /// `ViewVisibility` is the cheap pre-filter (hierarchy visibility and whether
 /// *any* view can see it); the per-view frustum and render-layer decision is
 /// bevy's `RenderVisibleEntities`, read in [`queue_draws`].
+///
+/// Each instance also gets its **outline level** (2 bits of
+/// `SceneInstance::flags`): an [`OutlineWeight`] on the mesh or the nearest
+/// ancestor wins, else the automatic size rule ([`auto_outline_level`] over
+/// the mesh's world-space AABB, thresholds from `EdgeStyle`). The toon
+/// fragment writes it into the normal target's alpha for the edge detector.
+/// The ancestor walk is a few `get`s per visible mesh per frame — the same
+/// "retained maps are the upgrade if the Systems table ever says otherwise"
+/// trade as [`SceneSources`] itself.
 fn extract_instances<M: SceneMaterial>(
     mut sources: ResMut<SceneSources<M>>,
     entities: Extract<
@@ -230,22 +243,90 @@ fn extract_instances<M: SceneMaterial>(
             &GlobalTransform,
             &Mesh3d,
             &MeshMaterial3d<M>,
+            Option<&Aabb>,
         )>,
     >,
+    weights: Extract<Query<&OutlineWeight>>,
+    parents: Extract<Query<&ChildOf>>,
+    edge_style: Extract<Option<Res<EdgeStyle>>>,
 ) {
     sources.0.clear();
-    for (entity, visibility, transform, mesh, material) in &entities {
+    for (entity, visibility, transform, mesh, material, aabb) in &entities {
         if !visibility.get() {
             continue;
         }
+        let level = outline_level(
+            entity,
+            &weights,
+            &parents,
+            aabb,
+            transform,
+            edge_style.as_deref(),
+        );
         sources.0.insert(
             MainEntity::from(entity),
             SourceInstance {
                 mesh: mesh.id(),
                 material: material.id(),
-                instance: SceneInstance::from_transform(transform),
+                instance: SceneInstance::from_transform(transform).with_outline_level(level),
             },
         );
+    }
+}
+
+/// A mesh's outline level: the nearest [`OutlineWeight`] on the entity or an
+/// ancestor, else the automatic size rule. No AABB (not computed yet, or a
+/// meshless oddity) reads as full — the conservative default is today's look.
+fn outline_level(
+    entity: Entity,
+    weights: &Query<&OutlineWeight>,
+    parents: &Query<&ChildOf>,
+    aabb: Option<&Aabb>,
+    transform: &GlobalTransform,
+    edge_style: Option<&EdgeStyle>,
+) -> u32 {
+    let mut current = entity;
+    // Bounded walk: hierarchies are shallow and this guards against cycles.
+    for _ in 0..64 {
+        if let Ok(weight) = weights.get(current) {
+            return weight.level();
+        }
+        match parents.get(current) {
+            Ok(child_of) => current = child_of.parent(),
+            Err(_) => break,
+        }
+    }
+    let (Some(aabb), Some(style)) = (aabb, edge_style) else {
+        return SceneInstance::OUTLINE_LEVEL_FULL;
+    };
+    auto_outline_level(
+        world_size(aabb, transform),
+        style.auto_weight_small,
+        style.auto_weight_large,
+    )
+}
+
+/// The largest world-space dimension of `aabb` under `transform`, in metres.
+fn world_size(aabb: &Aabb, transform: &GlobalTransform) -> f32 {
+    let m = Mat3::from(transform.affine().matrix3);
+    let he = Vec3::from(aabb.half_extents);
+    // Standard AABB transform: each world half-extent is the sum of the
+    // rotated/scaled axes' absolute contributions.
+    let world_half = m.x_axis.abs() * he.x + m.y_axis.abs() * he.y + m.z_axis.abs() * he.z;
+    2.0 * world_half.max_element()
+}
+
+/// The automatic rule: small scenery gets faint lines, middling things
+/// reduced ones, anything at or past `large` keeps the full look. Level 0
+/// (no outline) is never assigned automatically — that's [`OutlineWeight`]'s
+/// job.
+pub fn auto_outline_level(size: f32, small: f32, large: f32) -> u32 {
+    if size < small {
+        1
+    } else if size < large {
+        2
+    } else {
+        SceneInstance::OUTLINE_LEVEL_FULL
     }
 }
 
@@ -371,5 +452,68 @@ fn queue_draws<M: SceneMaterial>(
         if !draws.is_empty() {
             view_draws.0.entry(view_entity).or_default().extend(draws);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::SystemState;
+
+    /// The automatic rule: faint under `small`, reduced under `large`, full
+    /// past it. Level 0 is reserved for the explicit override.
+    #[test]
+    fn auto_level_follows_the_size_thresholds() {
+        assert_eq!(auto_outline_level(0.3, 0.6, 1.5), 1);
+        assert_eq!(auto_outline_level(1.0, 0.6, 1.5), 2);
+        assert_eq!(auto_outline_level(1.5, 0.6, 1.5), 3);
+        assert_eq!(auto_outline_level(12.0, 0.6, 1.5), 3);
+    }
+
+    /// `world_size` measures the mesh in world space: the instance's scale
+    /// (a grass tuft blown up to a hedge) changes its level.
+    #[test]
+    fn world_size_scales_with_the_transform() {
+        let aabb = Aabb {
+            center: Vec3A::ZERO.into(),
+            half_extents: bevy::math::Vec3A::new(0.2, 0.15, 0.2),
+        };
+        let unit = GlobalTransform::IDENTITY;
+        assert!((world_size(&aabb, &unit) - 0.4).abs() < 1e-5);
+        let scaled = GlobalTransform::from(Transform::from_scale(Vec3::splat(5.0)));
+        assert!((world_size(&aabb, &scaled) - 2.0).abs() < 1e-4);
+    }
+
+    /// An [`OutlineWeight`] on the mesh or the nearest ancestor beats the
+    /// size rule; without one, the rule decides; without an AABB, full.
+    #[test]
+    fn override_on_an_ancestor_wins_over_the_size_rule() {
+        let mut world = World::new();
+        let root = world.spawn(OutlineWeight::None).id();
+        let mesh = world.spawn_empty().id();
+        world.entity_mut(root).add_child(mesh);
+        // Nearer override wins over a further one.
+        let marked_mesh = world.spawn(OutlineWeight::Reduced).id();
+        world.entity_mut(root).add_child(marked_mesh);
+        let plain_mesh = world.spawn_empty().id();
+
+        let mut state: SystemState<(Query<&OutlineWeight>, Query<&ChildOf>)> =
+            SystemState::new(&mut world);
+        let (weights, parents) = state.get(&world).unwrap();
+
+        let tuft = Aabb {
+            center: bevy::math::Vec3A::ZERO.into(),
+            half_extents: bevy::math::Vec3A::splat(0.15),
+        };
+        let style = EdgeStyle::default();
+        let transform = GlobalTransform::IDENTITY;
+
+        let level = |e, aabb: Option<&Aabb>| {
+            outline_level(e, &weights, &parents, aabb, &transform, Some(&style))
+        };
+        assert_eq!(level(mesh, Some(&tuft)), 0, "root override inherited");
+        assert_eq!(level(marked_mesh, Some(&tuft)), 2, "own override wins");
+        assert_eq!(level(plain_mesh, Some(&tuft)), 1, "size rule: faint");
+        assert_eq!(level(plain_mesh, None), 3, "no AABB reads as full");
     }
 }

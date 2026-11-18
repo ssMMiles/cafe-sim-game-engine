@@ -68,6 +68,16 @@ fn scene_instance_winds_forward(instance_index: u32) -> bool {
     return (instances[instance_index].flags & SCENE_INSTANCE_SIGN_DETERMINANT) != 0u;
 }
 
+// Bits 1-2 of the flags: the instance's outline weight as a 2-bit level,
+// weight = level / 3 (mirrors `SceneInstance::OUTLINE_LEVEL_SHIFT`,
+// scene_pass/mod.rs). The toon fragment writes it to the normal target's
+// 2-bit alpha; the edge detector scales its lines by the strongest weight in
+// its sampling neighbourhood, so small scenery (grass) loses its interior
+// scribble but keeps its silhouette against full-weight surroundings.
+fn scene_instance_outline_weight(instance_index: u32) -> f32 {
+    return f32((instances[instance_index].flags >> 1u) & 3u) / 3.0;
+}
+
 // The skinned object-to-world matrix: a weighted sum of four joint matrices,
 // which already include the inverse bind pose and the object transform (that
 // is what bevy's `extract_skins` writes). Same arithmetic as

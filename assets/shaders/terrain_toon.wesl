@@ -435,6 +435,9 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     // there is no front/back flip; the skirt normal was fixed up in the
     // vertex stage, where the mesh generator's zero normals come from.
 @if(SCENE_NORMAL_TARGET)
+    // Alpha 1.0 = full outline weight (the 2-bit channel the edge detector
+    // reads): terrain is the canvas everything is silhouetted against, never
+    // the small scenery the weighting exists to quieten.
     out.normal = vec4<f32>(in.world_normal * 0.5 + vec3<f32>(0.5), 1.0);
     return out;
 }

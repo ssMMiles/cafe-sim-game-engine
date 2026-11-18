@@ -1153,6 +1153,53 @@ fn edges(ui: &mut egui::Ui, style: &mut ResMut<EdgeStyle>) {
             });
             ui.end_row();
 
+            ui.label("Crease fade").on_hover_text(
+                "Crease lines (the angle test) fade out between these \
+                 distances — separately from silhouettes, and usually much \
+                 sooner, so dense geometry doesn't turn to scribble at range.",
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut s.crease_fade_start)
+                        .speed(1.0)
+                        .range(0.0..=2000.0)
+                        .suffix(" m"),
+                );
+                ui.label("to");
+                ui.add(
+                    egui::DragValue::new(&mut s.crease_fade_end)
+                        .speed(1.0)
+                        .range(0.0..=2000.0)
+                        .suffix(" m"),
+                );
+            });
+            ui.end_row();
+
+            ui.label("Auto weight").on_hover_text(
+                "Meshes smaller than the first size draw their lines at a \
+                 third strength, smaller than the second at two-thirds, \
+                 larger in full — so small scenery (grass) stays quiet while \
+                 buildings keep their look. Silhouettes against bigger \
+                 surfaces keep full strength either way; an OutlineWeight \
+                 component on the mesh or an ancestor overrides the rule.",
+            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut s.auto_weight_small)
+                        .speed(0.05)
+                        .range(0.0..=100.0)
+                        .suffix(" m"),
+                );
+                ui.label("/");
+                ui.add(
+                    egui::DragValue::new(&mut s.auto_weight_large)
+                        .speed(0.05)
+                        .range(0.0..=100.0)
+                        .suffix(" m"),
+                );
+            });
+            ui.end_row();
+
             ui.label("Colour");
             let [r, g, b, a] = s.color;
             let mut rgba = egui::Rgba::from_rgba_unmultiplied(r, g, b, a);

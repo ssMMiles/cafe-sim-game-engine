@@ -390,6 +390,19 @@ pub struct EdgeStyle {
     /// Lines fade out between these distances from the camera, metres.
     pub fade_start: f32,
     pub fade_end: f32,
+    /// Crease lines (the normal test) fade out between these distances —
+    /// separately from silhouettes, and much sooner by default: a crease is
+    /// surface detail, and dense geometry (foliage) turns into scribble at
+    /// range if its creases persist as far as its silhouette does.
+    pub crease_fade_start: f32,
+    pub crease_fade_end: f32,
+    /// The automatic outline-weight rule's thresholds, metres of world-space
+    /// mesh size (largest AABB dimension): below `small` a mesh's lines draw
+    /// at a third strength, below `large` at two-thirds, at or past `large`
+    /// in full. An `OutlineWeight` component on the mesh or an ancestor
+    /// overrides the rule. `docs/EDGE_DETECTION.md`.
+    pub auto_weight_small: f32,
+    pub auto_weight_large: f32,
     /// Line colour, linear RGBA; alpha is its opacity.
     pub color: [f32; 4],
 }
@@ -404,6 +417,10 @@ impl Default for EdgeStyle {
             softness: 0.25,
             fade_start: 120.0,
             fade_end: 240.0,
+            crease_fade_start: 40.0,
+            crease_fade_end: 80.0,
+            auto_weight_small: 0.6,
+            auto_weight_large: 1.5,
             color: [0.0, 0.0, 0.0, 1.0],
         }
     }
@@ -423,6 +440,9 @@ pub struct EdgeDetectionSettings {
     pub thickness: f32,
     pub fade_start: f32,
     pub fade_end: f32,
+    /// The crease test's own fade band (silhouettes use the one above).
+    pub crease_fade_start: f32,
+    pub crease_fade_end: f32,
     /// The camera's near plane: prepass depth is `near / distance`.
     pub near: f32,
     /// 0 skips the pass entirely.
@@ -435,6 +455,7 @@ impl EdgeDetectionSettings {
     pub fn new(style: &EdgeStyle, near: f32, enabled: bool) -> Self {
         let crease = style.crease_angle.clamp(1.0, 180.0).to_radians();
         let fade_start = style.fade_start.max(0.0);
+        let crease_fade_start = style.crease_fade_start.max(0.0);
         Self {
             edge_color: LinearRgba::from_f32_array(style.color),
             depth_threshold: style.depth_threshold.max(1e-4),
@@ -444,6 +465,8 @@ impl EdgeDetectionSettings {
             thickness: style.thickness.max(1.0),
             fade_start,
             fade_end: style.fade_end.max(fade_start + 0.01),
+            crease_fade_start,
+            crease_fade_end: style.crease_fade_end.max(crease_fade_start + 0.01),
             near,
             enabled: enabled as u32,
         }
@@ -531,12 +554,17 @@ mod tests {
             softness: 0.0,
             fade_start: 50.0,
             fade_end: 10.0,
+            crease_fade_start: 50.0,
+            crease_fade_end: 10.0,
+            auto_weight_small: 0.6,
+            auto_weight_large: 1.5,
             color: [0.0, 0.0, 0.0, 1.0],
         };
         let s = EdgeDetectionSettings::new(&style, 0.1, true);
         assert!(s.depth_threshold > 0.0 && s.normal_threshold > 0.0);
         assert!(s.softness > 0.0 && s.thickness >= 1.0 && s.grazing_bias >= 0.0);
         assert!(s.fade_end > s.fade_start);
+        assert!(s.crease_fade_end > s.crease_fade_start);
     }
 
     // ── The depth term's geometry ────────────────────────────────────────────

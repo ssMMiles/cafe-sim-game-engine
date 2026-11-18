@@ -17,7 +17,7 @@
 // varyings and the per-instance winding flag come from our modules, and
 // nothing here reads bevy_pbr at all.
 import package::shaders::scene::mesh_io::{VertexOutput, FragmentOutput};
-import package::shaders::scene::bindings::{scene, scene_instance_winds_forward};
+import package::shaders::scene::bindings::{scene, scene_instance_winds_forward, scene_instance_outline_weight};
 
 // Mirrors `ToonSurfaceUniform` in engine-api's toon_material.rs.
 struct ToonSurface {
@@ -369,7 +369,13 @@ fn fragment(
     // The edge detector's normal target (docs/EDGE_DETECTION.md). Without the
     // flip every leaf and thin double-sided part would show its back with an
     // inverted normal: spurious crease outlines wherever the two sides meet.
+    // The 2-bit alpha carries the instance's outline weight — the format is
+    // Rgb10a2Unorm, so those two bits are all it can hold, and nothing else
+    // ever read them.
 @if(SCENE_NORMAL_TARGET)
-    out.normal = vec4<f32>(facing * 0.5 + vec3<f32>(0.5), 1.0);
+    out.normal = vec4<f32>(
+        facing * 0.5 + vec3<f32>(0.5),
+        scene_instance_outline_weight(in.instance_index),
+    );
     return out;
 }

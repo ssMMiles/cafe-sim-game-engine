@@ -97,7 +97,15 @@ mod tests {
         let flip = facing_normal(OBJECT_SHADER).expect("toon_lighting.wesl has facing_normal");
         assert!(flip.contains(&format!("@if({})", engine_api::TOON_DOUBLE_SIDED_DEF)));
         assert!(OBJECT_SHADER.contains("let facing = facing_normal("));
-        assert!(OBJECT_SHADER.contains("out.normal = vec4<f32>(facing * 0.5"));
+        // The normal write itself, however it is formatted: xyz from the
+        // facing normal, the 2-bit alpha from the instance's outline weight.
+        let start = OBJECT_SHADER
+            .find("out.normal = ")
+            .expect("toon_lighting.wesl writes out.normal");
+        let write = &OBJECT_SHADER[start..];
+        let write = &write[..write.find(';').expect("statement ends")];
+        assert!(write.contains("facing * 0.5"), "{write}");
+        assert!(write.contains("scene_instance_outline_weight"), "{write}");
     }
 
     const BEGIN: &str = "// ─── TOON CURVE";

@@ -151,20 +151,38 @@ impl SceneInstance {
     /// `MESH_FLAGS_SIGN_DETERMINANT_MODEL_3X3_BIT`, which is what the toon
     /// shaders read today — Phase 3 moves them onto this one unchanged.
     pub const SIGN_DETERMINANT: u32 = 1;
+    /// Bits 1–2: the instance's outline weight as a 2-bit level, weight =
+    /// level / 3 (mirrored in `bindings.wesl`'s
+    /// `scene_instance_outline_weight`). The toon fragment writes it to the
+    /// normal target's 2-bit alpha, which is what the edge detector reads —
+    /// how small scenery (grass) gets faint lines while keeping its
+    /// silhouette against full-weight surfaces. Filled by
+    /// `material::outline_level`: an `OutlineWeight` on the mesh or an
+    /// ancestor, else the automatic size rule.
+    pub const OUTLINE_LEVEL_SHIFT: u32 = 1;
+    pub const OUTLINE_LEVEL_FULL: u32 = 3;
 
     pub fn from_transform(transform: &GlobalTransform) -> Self {
         let affine = transform.affine();
         let matrix3 = Mat3::from(affine.matrix3);
+        let sign = if matrix3.determinant() >= 0.0 {
+            Self::SIGN_DETERMINANT
+        } else {
+            0
+        };
         Self {
             world_from_local: Mat4::from(affine),
             normal_from_local: matrix3.inverse().transpose(),
-            flags: if matrix3.determinant() >= 0.0 {
-                Self::SIGN_DETERMINANT
-            } else {
-                0
-            },
+            flags: sign | (Self::OUTLINE_LEVEL_FULL << Self::OUTLINE_LEVEL_SHIFT),
             skin_index: 0,
         }
+    }
+
+    /// Replace the outline level (0–3; see [`Self::OUTLINE_LEVEL_SHIFT`]).
+    pub fn with_outline_level(mut self, level: u32) -> Self {
+        self.flags = (self.flags & !(0b11 << Self::OUTLINE_LEVEL_SHIFT))
+            | ((level.min(3)) << Self::OUTLINE_LEVEL_SHIFT);
+        self
     }
 }
 
@@ -173,7 +191,7 @@ impl Default for SceneInstance {
         Self {
             world_from_local: Mat4::IDENTITY,
             normal_from_local: Mat3::IDENTITY,
-            flags: Self::SIGN_DETERMINANT,
+            flags: Self::SIGN_DETERMINANT | (Self::OUTLINE_LEVEL_FULL << Self::OUTLINE_LEVEL_SHIFT),
             skin_index: 0,
         }
     }

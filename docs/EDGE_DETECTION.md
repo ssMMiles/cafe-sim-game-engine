@@ -162,12 +162,55 @@ so no slider position can produce NaN.
 | Softness | 0.25 | fraction of threshold | edges flicker as you move | lines look grey or washed out |
 | Thickness | 1 | px offset | you want heavier lines | thin things (fences, poles) break up: taps at ±r skip anything thinner than r |
 | Fade start / end | 120 / 240 m | metres | — | the horizon is busy with lines under the fog |
+| Crease fade start / end | 40 / 80 m | metres | nearby surface detail vanishes too soon | mid-distance geometry is scribble (creases are surface detail; silhouettes keep the longer fade above) |
+| Auto weight small / large | 0.6 / 1.5 m | metres of mesh size | furniture-sized props look too faint | grass-sized scenery is still too busy |
 | Colour | black, α 1 | linear RGBA | α is opacity | |
 
 The style is saved **per user** in `editor_settings.json`, next to the dock
 layout (`editor/ui/persist.rs`: debounced 1 s, flushed on exit to the menu,
 an OPFS key on web). Every field defaults, so a file from before a knob
 existed still loads. "Reset" in the panel restores the defaults.
+
+### 4.1 Per-object outline weight (2026-11-18)
+
+Both tests are scale-free — a 60° fold between grass blades reads exactly
+like a 60° fold on a roof — so small, busy scenery (grass tufts, foliage)
+used to draw as dense scribble while buildings looked right. Each mesh
+instance now carries a 4-level **outline weight** that scales its whole edge
+amount:
+
+- **Transport.** The weight rides the two otherwise-unused bits of the
+  normal target's alpha (`Rgb10a2Unorm`): 2 bits of `SceneInstance::flags`
+  (`OUTLINE_LEVEL_SHIFT`, set at extraction in `scene_pass/material.rs`) →
+  written by `toon_lighting.wesl` as `alpha = level / 3` → read back here.
+  Free at every step: the flags field, the alpha bits and the normal fetch
+  all already existed. Terrain hardcodes 1.0 (it is the canvas, never the
+  clutter), and the attachment's clear value has alpha 1.0, so sky reads as
+  full weight too.
+- **Automatic rule.** `auto_outline_level` over the mesh's world-space AABB
+  size: under `auto_weight_small` → ⅓ strength, under `auto_weight_large` →
+  ⅔, else full. Level 0 (no lines) is never assigned automatically.
+- **Override.** engine-api's `OutlineWeight` component (ABI 20) on the mesh
+  or any ancestor — a plugin's scene root, a placed object — pins the level;
+  the nearest one up the hierarchy wins.
+- **Silhouettes survive.** The pass takes the *strongest* weight among the
+  texels it samples, so an edge between a faint object and anything
+  full-weight (terrain, a wall, the sky) is somebody's silhouette and draws
+  in full. Only edges whose whole neighbourhood is faint — a tuft's interior
+  creases and blade-over-blade depth steps — are scaled down. Two faint
+  objects overlapping also suppress their shared edge, which reads as clumps
+  merging into one mass.
+
+Separately, **creases fade with their own distance band**
+(`crease_fade_start/end`, default 40–80 m vs the silhouettes' 120–240 m):
+a crease is surface detail, and dense geometry turns to scribble at range if
+its creases persist as far as its silhouette. With the two bands set equal
+the split is exactly the old behaviour (the max of two smoothsteps of the
+same softness is the smoothstep of the max).
+
+Also worth knowing: the crease test is purely normal-based, so *flat-shaded*
+foliage outlines every facet no matter what. Smoothing the mesh's normals in
+the modelling tool removes those lines at the source and costs nothing.
 
 ## 5. Symptoms
 
